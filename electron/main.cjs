@@ -1,7 +1,11 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
+const { createGenerationStore } = require('./generation.cjs');
 
 let mainWindow = null;
+let generationStore = null;
+
+app.setName('crenv');
 
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
@@ -32,6 +36,16 @@ const createWindow = () => {
 };
 
 app.whenReady().then(() => {
+  generationStore = createGenerationStore(app.getPath('userData'));
+
+  ipcMain.handle('generation:listGeneratedImages', async () => {
+    return generationStore.listGeneratedImages();
+  });
+
+  ipcMain.handle('generation:generateImages', async (_event, payload) => {
+    return generationStore.generateImages(payload);
+  });
+
   createWindow();
 
   app.on('activate', () => {
@@ -41,4 +55,8 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  generationStore?.close();
 });
