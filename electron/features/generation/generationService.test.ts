@@ -1,0 +1,111 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { createGenerationDatabase } from '../../db/client';
+import { createGenerationService } from './generationService';
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function makeTempDir() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crenv-generation-service-'));
+  tempDirs.push(dir);
+  return dir;
+}
+
+function writeTinyPng(filePath: string) {
+  const pngBase64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9p0nX6sAAAAASUVORK5CYII=';
+  fs.writeFileSync(filePath, Buffer.from(pngBase64, 'base64'));
+}
+
+describe('createGenerationService', () => {
+  it('creates a job workspace, runs the runner, imports assets, and persists succeeded state', async () => {
+    const rootDir = makeTempDir();
+    const db = createGenerationDatabase(path.join(rootDir, 'crenv.sqlite'));
+    const runner = vi.fn(async (input: { outputDirectory: string; manifestPath: string }) => {
+      const imagePath = path.join(input.outputDirectory, 'result.png');
+      fs.mkdirSync(input.outputDirectory, { recursive: true });
+      writeTinyPng(imagePath);
+      fs.writeFileSync(
+        input.manifestPath,
+        JSON.stringify({
+          images: [{ path: imagePath }],
+        })
+      );
+      return { success: true };
+    });
+
+    const service = createGenerationService({
+      database: db,
+      paths: {
+        userDataDir: rootDir,
+        databasePath: path.join(rootDir, 'crenv.sqlite'),
+        generatedImagesDir: path.join(rootDir, 'generated-images'),
+        codexJobsTempDir: path.join(rootDir, 'tmp', 'codex-jobs'),
+      },
+      runCodexJob: runner,
+      now: () => '2026-05-26T11:00:00.000Z',
+      createId: (() => {
+        let value = 0;
+        return () => `id_${++value}`;
+      })(),
+    });
+
+    const result = await service.generateImages({
+      prompt: 'steel-and-glass atrium, rain outside, editorial lighting',
+      count: 1,
+    });
+
+    expect(result.assets).toHaveLength(1);
+    expect(result.assets[0]?.fileName).toBe('id_2.png');
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner.mock.calls[0]?.[0].workingDirectory).toContain(path.join('tmp', 'codex-jobs', 'id_1'));
+
+    const jobs = db.listJobs();
+    const assets = db.listAssets();
+
+    expect(jobs[0]?.status).toBe('succeeded');
+    expect(assets).toHaveLength(1);
+
+    db.close();
+  });
+
+  it('persists failed job state when the runner fails', async () => {
+    const rootDir = makeTempDir();
+    const db = createGenerationDatabase(path.join(rootDir, 'crenv.sqlite'));
+
+    const service = createGenerationService({
+      database: db,
+      paths: {
+        userDataDir: rootDir,
+        databasePath: path.join(rootDir, 'crenv.sqlite'),
+        generatedImagesDir: path.join(rootDir, 'generated-images'),
+        codexJobsTempDir: path.join(rootDir, 'tmp', 'codex-jobs'),
+      },
+      runCodexJob: async () => ({ success: false, errorMessage: 'Codex exited non-zero.' }),
+      now: () => '2026-05-26T11:00:00.000Z',
+      createId: () => 'id_1',
+    });
+
+    await expect(
+      service.generateImages({
+        prompt: 'failed run',
+        count: 1,
+      })
+    ).rejects.toThrow('Codex exited non-zero.');
+
+    const jobs = db.listJobs();
+    expect(jobs[0]?.status).toBe('failed');
+    expect(jobs[0]?.errorMessage).toBe('Codex exited non-zero.');
+
+    db.close();
+  });
+});
