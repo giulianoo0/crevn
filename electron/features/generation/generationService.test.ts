@@ -140,6 +140,62 @@ describe('createGenerationService', () => {
     db.close();
   });
 
+  it('persists failed job state when asset ingestion fails after codex succeeds', async () => {
+    const rootDir = makeTempDir();
+    const db = createGenerationDatabase(path.join(rootDir, 'crenv.sqlite'));
+    await db.createProject({
+      id: 'project_1',
+      name: 'Documents',
+      createdAt: '2026-05-26T10:59:00.000Z',
+      updatedAt: '2026-05-26T10:59:00.000Z',
+    });
+    await db.createThread({
+      id: 'thread_1',
+      projectId: 'project_1',
+      name: 'New Thread',
+      createdAt: '2026-05-26T10:59:30.000Z',
+      updatedAt: '2026-05-26T10:59:30.000Z',
+    });
+
+    const service = createGenerationService({
+      database: db,
+      paths: {
+        userDataDir: rootDir,
+        databasePath: path.join(rootDir, 'crenv.sqlite'),
+        generatedImagesDir: path.join(rootDir, 'generated-images'),
+        codexJobsTempDir: path.join(rootDir, 'tmp', 'codex-jobs'),
+      },
+      runCodexJob: async (input) => {
+        fs.mkdirSync(input.outputDirectory, { recursive: true });
+        fs.writeFileSync(
+          input.manifestPath,
+          JSON.stringify({
+            images: [{ path: path.join(input.outputDirectory, 'result.bmp') }],
+          })
+        );
+        fs.writeFileSync(path.join(input.outputDirectory, 'result.bmp'), 'not-a-supported-image');
+        return { success: true };
+      },
+      now: () => '2026-05-26T11:00:00.000Z',
+      createId: () => 'id_1',
+    });
+
+    await expect(
+      service.generateImages({
+        prompt: 'failed import',
+        count: 1,
+        threadId: 'thread_1',
+        referenceImages: [],
+      })
+    ).rejects.toThrow('Unsupported image type: .bmp');
+
+    const jobs = await db.listJobs();
+    expect(jobs[0]?.status).toBe('failed');
+    expect(jobs[0]?.errorMessage).toBe('Unsupported image type: .bmp');
+
+    db.close();
+  });
+
   it('can auto-create a default project and numbered thread titles', async () => {
     const rootDir = makeTempDir();
     const db = createGenerationDatabase(path.join(rootDir, 'crenv.sqlite'));

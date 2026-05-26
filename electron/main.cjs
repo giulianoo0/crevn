@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, net, protocol } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol } = require('electron');
+const fs = require('node:fs/promises');
 const path = require('path');
 const { pathToFileURL } = require('node:url');
 const { createGenerationStore, getAppDataPaths } = require('./generation.cjs');
@@ -76,7 +77,13 @@ function registerAssetProtocol() {
 
 app.whenReady().then(async () => {
   registerAssetProtocol();
-  generationStore = await createGenerationStore(app.getPath('userData'));
+  generationStore = await createGenerationStore(app.getPath('userData'), {
+    onScenePlan: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('generation:scenePlan', payload);
+      }
+    },
+  });
 
   ipcMain.handle('generation:listGeneratedImages', async (_event, threadId) => {
     return generationStore.listGeneratedImages(threadId);
@@ -110,6 +117,10 @@ app.whenReady().then(async () => {
     return generationStore.renameProject(projectId, name);
   });
 
+  ipcMain.handle('generation:updateProjectSettings', async (_event, projectId, payload) => {
+    return generationStore.updateProjectSettings(projectId, payload);
+  });
+
   ipcMain.handle('generation:renameThread', async (_event, threadId, name) => {
     return generationStore.renameThread(threadId, name);
   });
@@ -124,6 +135,42 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('generation:generateImages', async (_event, payload) => {
     return generationStore.generateImages(payload);
+  });
+
+  ipcMain.handle('generation:copyGeneratedImage', async (_event, imageId) => {
+    const asset = await generationStore.getGeneratedImage(imageId);
+    if (!asset) {
+      throw new Error('Generated image not found.');
+    }
+
+    const image = nativeImage.createFromPath(asset.storedPath);
+    if (image.isEmpty()) {
+      throw new Error('Failed to load generated image.');
+    }
+
+    clipboard.writeImage(image);
+  });
+
+  ipcMain.handle('generation:downloadGeneratedImage', async (_event, imageId) => {
+    const asset = await generationStore.getGeneratedImage(imageId);
+    if (!asset) {
+      throw new Error('Generated image not found.');
+    }
+
+    const result = await dialog.showSaveDialog(mainWindow ?? undefined, {
+      defaultPath: asset.fileName,
+    });
+
+    if (result.canceled || !result.filePath) {
+      return false;
+    }
+
+    await fs.copyFile(asset.storedPath, result.filePath);
+    return true;
+  });
+
+  ipcMain.handle('generation:deleteGeneratedImage', async (_event, imageId) => {
+    await generationStore.deleteGeneratedImage(imageId);
   });
 
   createWindow();

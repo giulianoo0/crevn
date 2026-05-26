@@ -18,6 +18,8 @@ const CODEX_MODEL = 'gpt-5.4-mini';
 const projectsTable = sqliteTable('projects', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
+  systemInstructions: text('system_instructions').notNull().default(''),
+  artStyle: text('art_style').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -75,6 +77,8 @@ const CREATE_PROJECTS_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    system_instructions TEXT NOT NULL DEFAULT '',
+    art_style TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )
@@ -148,7 +152,7 @@ async function resetCodexJobsDirectory(codexJobsTempDir) {
   await fsp.mkdir(codexJobsTempDir, { recursive: true });
 }
 
-async function createGenerationStore(userDataDir) {
+async function createGenerationStore(userDataDir, options = {}) {
   const paths = getAppDataPaths(userDataDir);
   fs.mkdirSync(path.dirname(paths.databasePath), { recursive: true });
   await resetCodexJobsDirectory(paths.codexJobsTempDir);
@@ -169,6 +173,7 @@ async function createGenerationStore(userDataDir) {
   await db.run(sql.raw(CREATE_GENERATION_JOBS_TABLE_SQL));
   await db.run(sql.raw(CREATE_GENERATED_ASSETS_TABLE_SQL));
   await db.run(sql.raw(CREATE_REFERENCE_IMAGES_TABLE_SQL));
+  await ensureProjectSettingsColumns(db);
   await ensureGenerationJobsThreadColumn(db);
 
   async function ensureProjectThreadWorkspace() {
@@ -217,6 +222,16 @@ async function createGenerationStore(userDataDir) {
     await db
       .update(projectsTable)
       .set({ name: name.trim() })
+      .where(eq(projectsTable.id, projectId));
+  }
+
+  async function updateProjectSettings(projectId, input) {
+    await db
+      .update(projectsTable)
+      .set({
+        systemInstructions: input.systemInstructions,
+        artStyle: input.artStyle,
+      })
       .where(eq(projectsTable.id, projectId));
   }
 
@@ -314,7 +329,7 @@ async function createGenerationStore(userDataDir) {
       .orderBy(desc(referenceImagesTable.createdAt), desc(referenceImagesTable.id));
   }
 
-  async function generateImages({ prompt, count, threadId, referenceImages = [] }) {
+  async function generateImages({ prompt, count, threadId, mode = 'manual', referenceImages = [], pinPoint, camera }) {
     const jobId = nanoid();
     const timestamp = new Date().toISOString();
     const workingDirectory = path.join(paths.codexJobsTempDir, jobId);
@@ -347,20 +362,79 @@ async function createGenerationStore(userDataDir) {
       updatedAt: timestamp,
     });
 
-    const result = await runCodexJob({
-      jobId,
-      workingDirectory,
-      prompt: buildCodexImageGenerationPrompt({
-        userPrompt: prompt,
-        outputDirectory,
-        manifestPath,
-        imageCount: count,
-        referenceImages: stagedReferenceImages,
-      }),
-    });
+    try {
+      const result = await runCodexJob({
+        jobId,
+        workingDirectory,
+        prompt: buildCodexImageGenerationPrompt({
+          mode,
+          userPrompt: prompt,
+          outputDirectory,
+          manifestPath,
+          imageCount: count,
+          referenceImages: stagedReferenceImages,
+          pinPoint,
+          camera,
+        }),
+        requestedCount: count,
+        threadId,
+        onScenePlan: options.onScenePlan,
+      });
 
-    if (!result.success) {
-      console.error(`[crenv:codex:${jobId}] generation failed`);
+      if (!result.success) {
+        console.error(`[crenv:codex:${jobId}] generation failed`);
+        throw new Error(result.errorMessage);
+      }
+
+      await fsp.access(manifestPath);
+      const manifest = parseGenerationManifest(await fsp.readFile(manifestPath, 'utf8'));
+      console.info(`[crenv:codex:${jobId}] manifest contains ${manifest.images.length} image(s)`);
+      const assets = [];
+
+      for (const image of manifest.images) {
+        const assetId = nanoid();
+        const imported = await importGeneratedImage({
+          assetId,
+          sourcePath: image.path,
+          generatedImagesDir: paths.generatedImagesDir,
+          createdAt: new Date().toISOString(),
+        });
+
+        const assetRecord = {
+          id: assetId,
+          jobId,
+          originalPath: image.path,
+          storedPath: imported.storedPath,
+          fileName: imported.fileName,
+          mimeType: imported.mimeType,
+          width: null,
+          height: null,
+          createdAt: imported.createdAt,
+        };
+
+        await db.insert(generatedAssetsTable).values(assetRecord);
+        assets.push(toRendererAsset(assetRecord));
+        console.info(`[crenv:codex:${jobId}] imported asset: ${imported.storedPath}`);
+      }
+
+      await upsertJob({
+        id: jobId,
+        threadId,
+        prompt,
+        requestedCount: count,
+        status: 'succeeded',
+        workingDirectory,
+        manifestPath,
+        errorMessage: null,
+        createdAt: timestamp,
+        updatedAt: new Date().toISOString(),
+      });
+
+      console.info(`[crenv:codex:${jobId}] generation succeeded`);
+
+      return { jobId, assets };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       await upsertJob({
         id: jobId,
         threadId,
@@ -369,60 +443,12 @@ async function createGenerationStore(userDataDir) {
         status: 'failed',
         workingDirectory,
         manifestPath,
-        errorMessage: result.errorMessage,
+        errorMessage,
         createdAt: timestamp,
         updatedAt: new Date().toISOString(),
       });
-      throw new Error(result.errorMessage);
+      throw error;
     }
-
-    await fsp.access(manifestPath);
-    const manifest = parseGenerationManifest(await fsp.readFile(manifestPath, 'utf8'));
-    console.info(`[crenv:codex:${jobId}] manifest contains ${manifest.images.length} image(s)`);
-    const assets = [];
-
-    for (const image of manifest.images) {
-      const assetId = nanoid();
-      const imported = await importGeneratedImage({
-        assetId,
-        sourcePath: image.path,
-        generatedImagesDir: paths.generatedImagesDir,
-        createdAt: new Date().toISOString(),
-      });
-
-      const assetRecord = {
-        id: assetId,
-        jobId,
-        originalPath: image.path,
-        storedPath: imported.storedPath,
-        fileName: imported.fileName,
-        mimeType: imported.mimeType,
-        width: null,
-        height: null,
-        createdAt: imported.createdAt,
-      };
-
-      await db.insert(generatedAssetsTable).values(assetRecord);
-      assets.push(toRendererAsset(assetRecord));
-      console.info(`[crenv:codex:${jobId}] imported asset: ${imported.storedPath}`);
-    }
-
-    await upsertJob({
-      id: jobId,
-      threadId,
-      prompt,
-      requestedCount: count,
-      status: 'succeeded',
-      workingDirectory,
-      manifestPath,
-      errorMessage: null,
-      createdAt: timestamp,
-      updatedAt: new Date().toISOString(),
-    });
-
-    console.info(`[crenv:codex:${jobId}] generation succeeded`);
-
-    return { jobId, assets };
   }
 
   async function listGeneratedImages(threadId) {
@@ -450,6 +476,36 @@ async function createGenerationStore(userDataDir) {
     return assets.map(toRendererAsset);
   }
 
+  async function getGeneratedImage(imageId) {
+    const assets = await db
+      .select({
+        id: generatedAssetsTable.id,
+        jobId: generatedAssetsTable.jobId,
+        originalPath: generatedAssetsTable.originalPath,
+        storedPath: generatedAssetsTable.storedPath,
+        fileName: generatedAssetsTable.fileName,
+        mimeType: generatedAssetsTable.mimeType,
+        width: generatedAssetsTable.width,
+        height: generatedAssetsTable.height,
+        createdAt: generatedAssetsTable.createdAt,
+      })
+      .from(generatedAssetsTable)
+      .where(eq(generatedAssetsTable.id, imageId))
+      .limit(1);
+
+    return assets[0] ?? null;
+  }
+
+  async function deleteGeneratedImage(imageId) {
+    const asset = await getGeneratedImage(imageId);
+    if (!asset) {
+      throw new Error('Generated image not found.');
+    }
+
+    await db.delete(generatedAssetsTable).where(eq(generatedAssetsTable.id, imageId));
+    await fsp.rm(asset.storedPath, { force: true });
+  }
+
   function close() {
     client.close();
   }
@@ -458,11 +514,14 @@ async function createGenerationStore(userDataDir) {
     createProject,
     createThread,
     renameProject,
+    updateProjectSettings,
     renameThread,
     deleteProject,
     deleteThread,
     ensureProjectThreadWorkspace,
     generateImages,
+    getGeneratedImage,
+    deleteGeneratedImage,
     listGeneratedImages,
     listProjectsWithThreads,
     listReferences,
@@ -475,6 +534,8 @@ async function createGenerationStore(userDataDir) {
     const project = {
       id: nanoid(),
       name,
+      systemInstructions: '',
+      artStyle: '',
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -573,6 +634,19 @@ async function createGenerationStore(userDataDir) {
   }
 }
 
+async function ensureProjectSettingsColumns(db) {
+  const tableInfo = await db.all(sql.raw("PRAGMA table_info('projects')"));
+  const columnNames = new Set(tableInfo.map((column) => column.name));
+
+  if (!columnNames.has('system_instructions')) {
+    await db.run(sql.raw("ALTER TABLE projects ADD COLUMN system_instructions TEXT NOT NULL DEFAULT ''"));
+  }
+
+  if (!columnNames.has('art_style')) {
+    await db.run(sql.raw("ALTER TABLE projects ADD COLUMN art_style TEXT NOT NULL DEFAULT ''"));
+  }
+}
+
 async function ensureGenerationJobsThreadColumn(db) {
   const tableInfo = await db.all(sql.raw("PRAGMA table_info('generation_jobs')"));
   const hasThreadId = tableInfo.some((column) => column.name === 'thread_id');
@@ -592,9 +666,12 @@ function toRendererAsset(asset) {
 }
 
 function buildCodexImageGenerationPrompt(input) {
+  const mode = input.mode ?? 'manual';
+
   return [
     'You are running inside a Codex batch job for an Electron app.',
     'Use Codex image generation capabilities to create image files for the following prompt.',
+    `Generation mode: ${mode}`,
     '',
     `Creative prompt: ${input.userPrompt}`,
     '',
@@ -610,11 +687,70 @@ function buildCodexImageGenerationPrompt(input) {
               ? `- ${referenceImage.path} (${metadata.join('; ')})`
               : `- ${referenceImage.path}`;
           }),
-          'Use those reference images as visual guidance for composition, subject, color, and mood when relevant.',
+          'Analyze all attached reference images before generating anything.',
+          'Decide the role of each reference image: exact edit target, scene anchor, subject anchor, style-only reference, or supporting mood/material reference.',
+          'If one or more references define the exact scene or asset to continue, preserve and extend that scene instead of inventing a different one.',
+          'If the references are only stylistic, material, or mood guidance, create a new asset that borrows those qualities without copying unrelated scene layout.',
+          'Use those reference images as visual guidance for composition, subject, color, materials, and mood when relevant.',
           '',
         ]
       : []),
-    `Create exactly ${input.imageCount} image file(s).`,
+    ...(mode === 'scene'
+      ? [
+          `The user requested at least ${input.imageCount} image file(s). Never create fewer than that.`,
+          'You may create more image files when useful, but never fewer.',
+          'Decide whether the scene already has a strong anchor from the prompt or references, or whether you should create a canonical master scene first.',
+          'If a master scene is useful, create it first and then derive additional views from it.',
+          'If existing references already define the scene strongly, reuse them as the anchor instead of creating a new master image.',
+          'Use the attached references to decide whether this is a continuation/edit of an existing scene or a fresh scene that only borrows style/material cues.',
+          'Preserve environment identity, materials, layout, lighting direction, palette, and spatial continuity whenever the request calls for the same scene.',
+          'Choose camera coverage yourself and hide explicit angle-selection logic from the final output behavior.',
+          'If you choose a scene-coverage workflow, the final output must contain at least 4 image files total.',
+          'Before generating final images, print exactly one single-line JSON object to stdout in this format:',
+          '{"type":"CRENV_SCENE_PLAN","count":6,"applyToShimmers":true}',
+          'Set count to the total number of final image files you plan to create.',
+          'Set applyToShimmers to true only when the UI should expand its loading shimmer placeholders to match count.',
+          'If the UI should keep the original placeholder count, emit applyToShimmers as false.',
+          '',
+        ]
+      : mode === 'pinpoint'
+        ? [
+            'Create exactly 1 final image file.',
+            'Treat the first/source pinpoint reference as the primary scene anchor.',
+            'Interpret the selected point as the target location to zoom into or edit around.',
+            'Preserve the source image world, style, lighting, perspective, and continuity.',
+            input.pinPoint?.hasCharacterReferences
+              ? 'If character-sheet or subject references are attached, place or add that character naturally at the selected point while keeping the rest of the scene coherent.'
+              : 'If no character-sheet references are attached, create a coherent zoom-in, continuation, or localized edit around the selected point.',
+            input.pinPoint?.extraPrompt
+              ? `Use this extra pinpoint guidance when useful: ${input.pinPoint.extraPrompt}`
+              : 'There is no extra pinpoint guidance beyond the selected point and attached references.',
+            '',
+          ]
+        : mode === 'camera'
+          ? [
+              `Create exactly ${input.imageCount} final image file${input.imageCount === 1 ? '' : 's'}.`,
+              'Treat the first/source camera reference as the primary scene anchor.',
+              'Move the camera around the subject or scene; do not rotate the subject like a flat sticker.',
+              'Synthesize a true novel camera view using the source image as an identity, geometry, material, and lighting anchor.',
+              `Horizontal camera orbit/azimuth: ${input.camera?.rotationDeg ?? 0} degrees.`,
+              `Vertical camera tilt/elevation: ${input.camera?.tiltDeg ?? 0} degrees.`,
+              `Camera zoom/dolly value: ${input.camera?.zoom ?? 0}.`,
+              input.camera?.generateBestAngles
+                ? 'Generate a deterministic 12-angle camera lattice across orbit and tilt: 0°/0°, 45°/-30°, 45°/30°, 90°/0°, 135°/-30°, 135°/30°, 180°/0°, 225°/-30°, 225°/30°, 270°/0°, 315°/-30°, and 315°/30°. Treat each pair as orbit degrees / tilt degrees. Favor views that remain plausible and identity-consistent.'
+                : 'Generate one camera-adjusted image from the requested view.',
+              'Preserve subject identity, proportions, wardrobe, materials, lighting direction, palette, and environment continuity.',
+              'Keep the original source image aspect ratio, visual quality, resolution feel, and style.',
+              'Use the original source canvas proportions exactly; do not crop, stretch, rescale, letterbox, or switch to a requested output ratio.',
+              'Change as little as possible except for the requested camera angle.',
+              'Avoid stylistic re-rendering, quality downgrades, simplified detail, compression artifacts, or a different finish.',
+              'Do not add angle labels, numbering, captions, watermarks, UI overlays, or any text into the generated pixels.',
+              'For visible areas already present in the source, keep them materially consistent. For newly revealed areas, infer plausible geometry instead of redesigning the subject or scene.',
+              'Prefer small, coherent perspective changes over dramatic reinvention when the requested rotation or tilt is modest.',
+              'If the requested camera move is too large to know hidden geometry, make the unseen side plausible while keeping every visible identifier stable.',
+              '',
+            ]
+          : [`Create exactly ${input.imageCount} image file(s).`]),
     `The output directory is: ${input.outputDirectory}`,
     `The manifest path is: ${input.manifestPath}`,
     '',
@@ -632,6 +768,7 @@ function buildCodexImageGenerationPrompt(input) {
     '- Use only absolute paths in the manifest.',
     '- Include every generated image in the manifest.',
     '- Write the manifest only after all image files exist on disk.',
+    '- Do not execute shell scripts, package scripts, build scripts, test scripts, or project automation during this run.',
     '- Do not rely on prose output as the result contract.',
   ].join('\n');
 }
@@ -734,9 +871,20 @@ async function importGeneratedImage(input) {
   };
 }
 
-function runCodexJob({ jobId, workingDirectory, prompt }) {
+function runCodexJob({ jobId, workingDirectory, prompt, requestedCount = 1, threadId, onScenePlan }) {
   return new Promise((resolve) => {
     const logPrefix = `[crenv:codex:${jobId}]`;
+    const env = buildCodexSpawnEnv(workingDirectory);
+
+    for (const directoryPath of [
+      env.XDG_CACHE_HOME,
+      env.XDG_CONFIG_HOME,
+      env.XDG_STATE_HOME,
+      env.TMPDIR,
+    ]) {
+      fs.mkdirSync(directoryPath, { recursive: true });
+    }
+
     const child = spawn(
       'codex',
       [
@@ -752,23 +900,27 @@ function runCodexJob({ jobId, workingDirectory, prompt }) {
       ],
       {
         cwd: workingDirectory,
+        env,
         stdio: ['pipe', 'pipe', 'pipe'],
       }
     );
 
     let stdout = '';
+    let stdoutLineBuffer = '';
     let stderr = '';
+    let hasDispatchedScenePlan = false;
 
     console.info(`${logPrefix} spawn: codex --model ${CODEX_MODEL} --ask-for-approval never exec --sandbox workspace-write --skip-git-repo-check -`);
     console.info(`${logPrefix} cwd: ${workingDirectory}`);
 
     child.stdout.on('data', (chunk) => {
       const text = chunk.toString();
-      stdout += text;
-      for (const line of text.split('\n')) {
-        if (line.trim()) {
-          console.info(`${logPrefix} stdout: ${line}`);
-        }
+      stdoutLineBuffer += text;
+      const lines = stdoutLineBuffer.split('\n');
+      stdoutLineBuffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        processStdoutLine(line);
       }
     });
 
@@ -777,6 +929,7 @@ function runCodexJob({ jobId, workingDirectory, prompt }) {
       stderr += text;
       for (const line of text.split('\n')) {
         if (line.trim()) {
+          processPotentialScenePlan(line);
           console.error(`${logPrefix} stderr: ${line}`);
         }
       }
@@ -791,6 +944,10 @@ function runCodexJob({ jobId, workingDirectory, prompt }) {
     });
 
     child.on('close', (code) => {
+      if (stdoutLineBuffer.trim()) {
+        processStdoutLine(stdoutLineBuffer);
+      }
+
       if (code === 0) {
         console.info(`${logPrefix} process exited successfully`);
         resolve({ success: true });
@@ -807,10 +964,87 @@ function runCodexJob({ jobId, workingDirectory, prompt }) {
 
     child.stdin.write(prompt);
     child.stdin.end();
+
+    function processStdoutLine(line) {
+      const trimmedLine = line.trim();
+      if (!trimmedLine) {
+        return;
+      }
+
+      if (processPotentialScenePlan(trimmedLine)) {
+        return;
+      }
+
+      stdout += `${line}\n`;
+      console.info(`${logPrefix} stdout: ${line}`);
+    }
+
+    function processPotentialScenePlan(line) {
+      if (hasDispatchedScenePlan) {
+        return false;
+      }
+
+      const scenePlan = parseScenePlanLine(line.trim());
+      if (!scenePlan) {
+        return false;
+      }
+
+      hasDispatchedScenePlan = true;
+      const plannedCount = Math.max(requestedCount, scenePlan.count);
+      onScenePlan?.({
+        jobId,
+        threadId,
+        count: plannedCount,
+        applyToShimmers: scenePlan.applyToShimmers,
+      });
+      console.info(`${logPrefix} scene plan: ${JSON.stringify({ ...scenePlan, count: plannedCount })}`);
+      return true;
+    }
   });
+}
+
+function buildCodexSpawnEnv(workingDirectory) {
+  return {
+    ...process.env,
+    XDG_CACHE_HOME: path.join(workingDirectory, '.codex-cache'),
+    XDG_CONFIG_HOME: path.join(workingDirectory, '.codex-config'),
+    XDG_STATE_HOME: path.join(workingDirectory, '.codex-state'),
+    TMPDIR: path.join(workingDirectory, '.tmp'),
+  };
+}
+
+function parseScenePlanLine(line) {
+  const trimmedLine = line.trim();
+  if (!trimmedLine.startsWith('{') || !trimmedLine.endsWith('}')) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmedLine);
+    if (
+      parsed &&
+      parsed.type === 'CRENV_SCENE_PLAN' &&
+      Number.isInteger(parsed.count) &&
+      parsed.count > 0
+    ) {
+      return {
+        type: parsed.type,
+        count: parsed.count,
+        applyToShimmers: parsed.applyToShimmers === true,
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 module.exports = {
   createGenerationStore,
   getAppDataPaths,
+  __test__: {
+    buildCodexSpawnEnv,
+    parseScenePlanLine,
+  },
 };

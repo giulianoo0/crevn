@@ -33,7 +33,7 @@ export const ContextMenuContent = React.forwardRef<
       <ContextMenuPrimitive.Popup
         ref={ref}
         className={cn(
-          'z-[80] min-w-[180px] overflow-hidden rounded-[18px] border border-[var(--border-soft)] bg-[color-mix(in_srgb,var(--surface)_96%,transparent)] p-1.5 text-[13px] text-[var(--foreground)] shadow-[0_20px_48px_rgba(0,0,0,0.38)] backdrop-blur-xl outline-none',
+          'z-[80] min-w-[180px] overflow-hidden rounded-[18px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] p-1.5 text-[13px] text-[var(--foreground)] shadow-[0_20px_48px_rgba(0,0,0,0.38)] backdrop-blur-2xl outline-none',
           className
         )}
         {...props}
@@ -50,7 +50,7 @@ export const ContextMenuItem = React.forwardRef<
   <ContextMenuPrimitive.Item
     ref={ref}
     className={cn(
-      'relative flex cursor-default select-none items-center rounded-[12px] px-3 py-2 text-[13px] outline-none transition-colors data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-[var(--surface2)] data-[highlighted]:text-[var(--foreground)]',
+      'relative flex cursor-default select-none items-center rounded-[12px] px-3 py-2 text-[13px] outline-none transition-colors data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-white/6 data-[highlighted]:text-[var(--foreground)]',
       inset && 'pl-8',
       className
     )}

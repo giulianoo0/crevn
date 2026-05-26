@@ -80,6 +80,7 @@
 - Persistent controls should float above the window edge instead of collapsing into browser-default layouts.
 - Header title is left aligned unless a screen has a strong reason to differ.
 - Header actions should live inside a restrained rounded cluster when grouped.
+- Floating shell chrome, popovers, dropdowns, and context menus should use the composer material language: translucent dark surfaces around `rgba(15,16,16,0.72)` or `rgba(32,32,33,0.72)`, restrained borders, and strong backdrop blur.
 - Active state should usually use `surface2`, not loud accent fills.
 - The shell should feel neutral, polished, and quiet.
 - Primary creation actions should remain obvious and always within easy reach.
@@ -97,6 +98,7 @@
 - Prefer `shadcn` primitives as the starting point for buttons, inputs, popovers, dialogs, and menus.
 - Do not nest decorative cards inside other decorative cards.
 - Use `surface` for primary containers and `surface2` for selected states or inner pills.
+- Keep dropdowns, context menus, and floating panels visually consistent with the composer: translucent dark material, `backdrop-blur-xl` or stronger, soft borders, and subtle white/6 hover states.
 - Keep shadows restrained or absent. Contrast should come from surface layering, spacing, and radii.
 - Hover, focus, and press states should be subtle opacity, border, or surface changes, not loud scale effects.
 - Inputs and control bars should read as integrated studio instruments, not bright consumer form fields.

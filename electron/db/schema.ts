@@ -3,6 +3,8 @@ import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 export const projectsTable = sqliteTable('projects', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
+  systemInstructions: text('system_instructions').notNull().default(''),
+  artStyle: text('art_style').notNull().default(''),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -60,6 +62,8 @@ export const CREATE_PROJECTS_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    system_instructions TEXT NOT NULL DEFAULT '',
+    art_style TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )

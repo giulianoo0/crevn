@@ -12,9 +12,16 @@ export interface ThreadRecord {
 export interface ProjectRecord {
   id: string;
   name: string;
+  systemInstructions: string;
+  artStyle: string;
   createdAt: string;
   updatedAt: string;
   threads: ThreadRecord[];
+}
+
+export interface UpdateProjectSettingsPayload {
+  systemInstructions: string;
+  artStyle: string;
 }
 
 export interface WorkspaceRecord {
@@ -41,6 +48,7 @@ export interface CreateReferencePayload {
 }
 
 export interface GenerateImagesPayload {
+  mode?: 'manual' | 'scene' | 'pinpoint' | 'camera';
   prompt: string;
   count: number;
   threadId: string;
@@ -51,10 +59,31 @@ export interface GenerateImagesPayload {
     mimeType: string;
     bytesBase64: string;
   }>;
+  pinPoint?: {
+    point: {
+      x: number;
+      y: number;
+    };
+    extraPrompt?: string;
+    hasCharacterReferences: boolean;
+  };
+  camera?: {
+    rotationDeg: number;
+    tiltDeg: number;
+    zoom: number;
+    generateBestAngles: boolean;
+  };
 }
 
 export interface GeneratedImageRecord extends GeneratedImageGridImage {
   createdAt: string;
+}
+
+export interface ScenePlanEvent {
+  jobId: string;
+  threadId: string;
+  count: number;
+  applyToShimmers: boolean;
 }
 
 function getElectronApi() {
@@ -78,6 +107,9 @@ function getElectronApi() {
       renameProject: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
+      updateProjectSettings: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
       renameThread: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
@@ -90,6 +122,16 @@ function getElectronApi() {
       generateImages: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
+      copyGeneratedImage: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      downloadGeneratedImage: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      deleteGeneratedImage: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      subscribeToScenePlan: () => () => {},
     };
   }
 
@@ -128,6 +170,10 @@ export function renameProject(projectId: string, name: string) {
   return getElectronApi().renameProject(projectId, name) as Promise<void>;
 }
 
+export function updateProjectSettings(projectId: string, payload: UpdateProjectSettingsPayload) {
+  return getElectronApi().updateProjectSettings(projectId, payload) as Promise<void>;
+}
+
 export function renameThread(threadId: string, name: string) {
   return getElectronApi().renameThread(threadId, name) as Promise<void>;
 }
@@ -145,4 +191,20 @@ export function generateImages(payload: GenerateImagesPayload) {
     jobId: string;
     assets: GeneratedImageRecord[];
   }>;
+}
+
+export function subscribeToScenePlan(listener: (event: ScenePlanEvent) => void) {
+  return getElectronApi().subscribeToScenePlan(listener) as () => void;
+}
+
+export function copyGeneratedImage(imageId: string) {
+  return getElectronApi().copyGeneratedImage(imageId) as Promise<void>;
+}
+
+export function downloadGeneratedImage(imageId: string) {
+  return getElectronApi().downloadGeneratedImage(imageId) as Promise<boolean>;
+}
+
+export function deleteGeneratedImage(imageId: string) {
+  return getElectronApi().deleteGeneratedImage(imageId) as Promise<void>;
 }

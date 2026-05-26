@@ -7,10 +7,25 @@ export interface ReferenceImageInput {
 }
 
 export interface GenerateImagesInput {
+  mode?: 'manual' | 'scene' | 'pinpoint' | 'camera';
   prompt: string;
   count: number;
   threadId: string;
   referenceImages: ReferenceImageInput[];
+  pinPoint?: {
+    point: {
+      x: number;
+      y: number;
+    };
+    extraPrompt?: string;
+    hasCharacterReferences: boolean;
+  };
+  camera?: {
+    rotationDeg: number;
+    tiltDeg: number;
+    zoom: number;
+    generateBestAngles: boolean;
+  };
 }
 
 export interface ParsedGenerationManifest {

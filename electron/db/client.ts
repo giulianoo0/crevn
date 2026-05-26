@@ -23,8 +23,15 @@ export type GenerationJobStatus = 'pending' | 'running' | 'succeeded' | 'failed'
 export interface ProjectRecord {
   id: string;
   name: string;
+  systemInstructions: string;
+  artStyle: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface UpdateProjectSettingsInput {
+  systemInstructions: string;
+  artStyle: string;
 }
 
 export interface ThreadRecord {
@@ -82,6 +89,7 @@ export interface GenerationDatabase {
   createProject(project: ProjectRecord): Promise<ProjectRecord>;
   createThread(thread: ThreadRecord): Promise<ThreadRecord>;
   renameProject(projectId: string, name: string): Promise<void>;
+  updateProjectSettings(projectId: string, input: UpdateProjectSettingsInput): Promise<void>;
   renameThread(threadId: string, name: string): Promise<void>;
   deleteProject(projectId: string): Promise<GenerationAssetRecord[]>;
   deleteThread(threadId: string): Promise<GenerationAssetRecord[]>;
@@ -126,6 +134,16 @@ export function createGenerationDatabase(databasePath: string): GenerationDataba
       await database
         .update(projectsTable)
         .set({ name })
+        .where(eq(projectsTable.id, projectId));
+    },
+    async updateProjectSettings(projectId, input) {
+      await ready;
+      await database
+        .update(projectsTable)
+        .set({
+          systemInstructions: input.systemInstructions,
+          artStyle: input.artStyle,
+        })
         .where(eq(projectsTable.id, projectId));
     },
     async renameThread(threadId, name) {
@@ -284,7 +302,23 @@ async function initializeDatabase(database: ReturnType<typeof drizzle<Client>>) 
   await database.run(sql.raw(CREATE_GENERATION_JOBS_TABLE_SQL));
   await database.run(sql.raw(CREATE_GENERATED_ASSETS_TABLE_SQL));
   await database.run(sql.raw(CREATE_REFERENCE_IMAGES_TABLE_SQL));
+  await ensureProjectSettingsColumns(database);
   await ensureGenerationJobsThreadColumn(database);
+}
+
+async function ensureProjectSettingsColumns(database: ReturnType<typeof drizzle<Client>>) {
+  const tableInfo = await database.all<{ name: string }>(sql.raw("PRAGMA table_info('projects')"));
+  const columnNames = new Set(tableInfo.map((column) => column.name));
+
+  if (!columnNames.has('system_instructions')) {
+    await database.run(
+      sql.raw("ALTER TABLE projects ADD COLUMN system_instructions TEXT NOT NULL DEFAULT ''")
+    );
+  }
+
+  if (!columnNames.has('art_style')) {
+    await database.run(sql.raw("ALTER TABLE projects ADD COLUMN art_style TEXT NOT NULL DEFAULT ''"));
+  }
 }
 
 async function ensureGenerationJobsThreadColumn(database: ReturnType<typeof drizzle<Client>>) {

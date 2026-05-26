@@ -90,7 +90,8 @@ body {
 }
 
 input,
-textarea {
+textarea,
+[contenteditable] {
   user-select: text;
   -webkit-user-select: text;
 }
@@ -108,6 +109,12 @@ textarea {
 textarea::-webkit-scrollbar {
   width: 0;
   height: 0;
+}
+
+/* Lexical paragraph reset */
+.prompt-composer-paragraph {
+  margin: 0;
+  padding: 0;
 }
 
 @keyframes skeleton-shimmer {
@@ -160,4 +167,8 @@ textarea::-webkit-scrollbar {
 @media (prefers-reduced-motion: reduce) {
   .t-resize { transition: none !important; }
   .t-text-swap { transition: none !important; }
+}
+
+.prompt-composer-card [contenteditable]::selection {
+  background: rgba(65, 130, 230, 0.25) !important;
 }

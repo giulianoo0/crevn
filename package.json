@@ -5,6 +5,7 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "postinstall": "node scripts/ensure-electron.cjs",
     "dev:vite": "vite --host 127.0.0.1 --port 5173 --strictPort",
     "dev:electron": "wait-on http://127.0.0.1:5173 && NODE_ENV=development electron .",
     "dev": "concurrently \"pnpm run dev:vite\" \"pnpm run dev:electron\"",
@@ -32,6 +33,8 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
+    "@lexical/react": "^0.44.0",
+    "@lexical/utils": "^0.44.0",
     "@libsql/client": "^0.17.3",
     "@number-flow/react": "^0.6.0",
     "cli-spinners": "^3.4.0",
@@ -40,6 +43,7 @@
     "embla-carousel-react": "^8.6.0",
     "framer-motion": "^12.40.0",
     "geist": "^1.7.1",
+    "lexical": "^0.44.0",
     "lucide-react": "^1.16.0",
     "metal-fx": "^1.0.4",
     "nanoid": "^3.3.12",
@@ -49,13 +53,5 @@
     "react-window": "^2.2.7",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "electron",
-      "electron-winstaller",
-      "esbuild",
-      "sharp"
-    ]
   }
 }

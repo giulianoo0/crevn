@@ -15,6 +15,7 @@ export function ProjectRow({
   isOpen,
   onToggle,
   onPrepareThreadDraft,
+  onOpenProperties,
   onRename,
   onDelete,
 }: {
@@ -23,6 +24,7 @@ export function ProjectRow({
   isOpen: boolean;
   onToggle: (id: string) => void;
   onPrepareThreadDraft: (projectId: string) => void;
+  onOpenProperties: (projectId: string) => void;
   onRename: (projectId: string) => void;
   onDelete: (projectId: string) => void;
 }) {
@@ -58,6 +60,8 @@ export function ProjectRow({
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
+        <ContextMenuItem onClick={() => onOpenProperties(id)}>Propriedades</ContextMenuItem>
+        <ContextMenuSeparator />
         <ContextMenuItem onClick={() => onRename(id)}>Rename project</ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem

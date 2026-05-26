@@ -10,8 +10,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   createProject: (projectName) => ipcRenderer.invoke('generation:createProject', projectName),
   createThread: (projectId) => ipcRenderer.invoke('generation:createThread', projectId),
   renameProject: (projectId, name) => ipcRenderer.invoke('generation:renameProject', projectId, name),
+  updateProjectSettings: (projectId, payload) =>
+    ipcRenderer.invoke('generation:updateProjectSettings', projectId, payload),
   renameThread: (threadId, name) => ipcRenderer.invoke('generation:renameThread', threadId, name),
   deleteProject: (projectId) => ipcRenderer.invoke('generation:deleteProject', projectId),
   deleteThread: (threadId) => ipcRenderer.invoke('generation:deleteThread', threadId),
   generateImages: (payload) => ipcRenderer.invoke('generation:generateImages', payload),
+  copyGeneratedImage: (imageId) => ipcRenderer.invoke('generation:copyGeneratedImage', imageId),
+  downloadGeneratedImage: (imageId) => ipcRenderer.invoke('generation:downloadGeneratedImage', imageId),
+  deleteGeneratedImage: (imageId) => ipcRenderer.invoke('generation:deleteGeneratedImage', imageId),
+  subscribeToScenePlan: (listener) => {
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on('generation:scenePlan', wrappedListener);
+    return () => {
+      ipcRenderer.removeListener('generation:scenePlan', wrappedListener);
+    };
+  },
 });

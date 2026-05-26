@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GeneratedImageGrid } from './generated-image-grid';
 
@@ -12,6 +12,14 @@ const images = [
 ];
 
 describe('GeneratedImageGrid', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('renders images across two rows with three images per row', () => {
     render(<GeneratedImageGrid images={images} className="h-[600px]" />);
 
@@ -38,5 +46,56 @@ describe('GeneratedImageGrid', () => {
     const { container } = render(<GeneratedImageGrid images={[]} />);
 
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it('calls selection and open handlers from image tiles', () => {
+    const handleSelect = vi.fn();
+    const handleOpen = vi.fn();
+
+    render(
+      <GeneratedImageGrid
+        images={images}
+        className="h-[600px]"
+        selectedImageIds={['2']}
+        onImageSelect={handleSelect}
+        onImageOpen={handleOpen}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select 1.png' }));
+    vi.advanceTimersByTime(220);
+    fireEvent.doubleClick(screen.getByRole('button', { name: 'Select 2.png' }));
+
+    expect(handleSelect).toHaveBeenCalledWith(images[0]);
+    expect(handleOpen).toHaveBeenCalledWith(images[1]);
+    expect(screen.getByRole('button', { name: 'Select 2.png' })).toHaveAttribute('data-selected', 'true');
+  });
+
+  it('shows a context menu with copy, download, and delete actions for images', () => {
+    const handleCopy = vi.fn();
+    const handleDownload = vi.fn();
+    const handleDelete = vi.fn();
+
+    render(
+      <GeneratedImageGrid
+        images={images}
+        className="h-[600px]"
+        onImageCopy={handleCopy}
+        onImageDownload={handleDownload}
+        onImageDelete={handleDelete}
+      />
+    );
+
+    fireEvent.contextMenu(screen.getByRole('button', { name: 'Select 1.png' }));
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy' }));
+    fireEvent.contextMenu(screen.getByRole('button', { name: 'Select 1.png' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
+    fireEvent.contextMenu(screen.getByRole('button', { name: 'Select 1.png' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+
+    expect(handleCopy).toHaveBeenCalledWith(images[0]);
+    expect(handleDownload).toHaveBeenCalledWith(images[0]);
+    expect(handleDelete).toHaveBeenCalledWith(images[0]);
   });
 });

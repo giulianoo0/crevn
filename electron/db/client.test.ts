@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { createClient } from '@libsql/client/node';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -100,6 +102,8 @@ describe('createGenerationDatabase', () => {
     const project = await database.createProject({
       id: 'project_1',
       name: 'Documents',
+      systemInstructions: 'Always preserve character silhouette language.',
+      artStyle: 'cartoon',
       createdAt: '2026-05-26T11:00:00.000Z',
       updatedAt: '2026-05-26T11:00:00.000Z',
     });
@@ -138,6 +142,8 @@ describe('createGenerationDatabase', () => {
       {
         id: 'project_1',
         name: 'Documents',
+        systemInstructions: 'Always preserve character silhouette language.',
+        artStyle: 'cartoon',
         createdAt: '2026-05-26T11:00:00.000Z',
         updatedAt: '2026-05-26T11:00:00.000Z',
         threads: [
@@ -158,6 +164,92 @@ describe('createGenerationDatabase', () => {
             hasRunningJob: false,
           },
         ],
+      },
+    ]);
+
+    database.close();
+  });
+
+  it('updates project settings without mutating other projects', async () => {
+    const database = createGenerationDatabase(makeTempDatabasePath());
+
+    await database.createProject({
+      id: 'project_1',
+      name: 'Project One',
+      systemInstructions: '',
+      artStyle: '',
+      createdAt: '2026-05-26T11:00:00.000Z',
+      updatedAt: '2026-05-26T11:00:00.000Z',
+    });
+    await database.createProject({
+      id: 'project_2',
+      name: 'Project Two',
+      systemInstructions: 'Keep loose brushwork.',
+      artStyle: 'illustration',
+      createdAt: '2026-05-26T11:01:00.000Z',
+      updatedAt: '2026-05-26T11:01:00.000Z',
+    });
+
+    await database.updateProjectSettings('project_1', {
+      systemInstructions: 'Use a sharp visual hierarchy and strong rim light.',
+      artStyle: 'photoreal',
+    });
+
+    expect(await database.listProjectsWithThreads()).toEqual([
+      {
+        id: 'project_2',
+        name: 'Project Two',
+        systemInstructions: 'Keep loose brushwork.',
+        artStyle: 'illustration',
+        createdAt: '2026-05-26T11:01:00.000Z',
+        updatedAt: '2026-05-26T11:01:00.000Z',
+        threads: [],
+      },
+      {
+        id: 'project_1',
+        name: 'Project One',
+        systemInstructions: 'Use a sharp visual hierarchy and strong rim light.',
+        artStyle: 'photoreal',
+        createdAt: '2026-05-26T11:00:00.000Z',
+        updatedAt: '2026-05-26T11:00:00.000Z',
+        threads: [],
+      },
+    ]);
+
+    database.close();
+  });
+
+  it('migrates older project tables to include settings columns', async () => {
+    const databasePath = makeTempDatabasePath();
+    const client = createClient({
+      url: pathToFileURL(databasePath).toString(),
+    });
+
+    await client.execute(`
+      CREATE TABLE projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    await client.execute(`
+      INSERT INTO projects (id, name, created_at, updated_at)
+      VALUES ('project_legacy', 'Legacy Project', '2026-05-26T10:00:00.000Z', '2026-05-26T10:00:00.000Z')
+    `);
+    client.close();
+
+    const database = createGenerationDatabase(databasePath);
+
+    expect(await database.listProjectsWithThreads()).toEqual([
+      {
+        id: 'project_legacy',
+        name: 'Legacy Project',
+        systemInstructions: '',
+        artStyle: '',
+        createdAt: '2026-05-26T10:00:00.000Z',
+        updatedAt: '2026-05-26T10:00:00.000Z',
+        threads: [],
       },
     ]);
 

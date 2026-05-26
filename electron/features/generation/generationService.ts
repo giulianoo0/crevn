@@ -118,64 +118,72 @@ export function createGenerationService(input: CreateGenerationServiceInput) {
 
     await input.database.upsertJob(pendingJob);
 
-    const codexPrompt = buildCodexImageGenerationPrompt({
-      userPrompt: request.prompt,
-      outputDirectory,
-      manifestPath,
-      imageCount: request.count,
-      referenceImages: stagedReferenceImages,
-    });
+    try {
+      const codexPrompt = buildCodexImageGenerationPrompt({
+        mode: request.mode ?? 'manual',
+        userPrompt: request.prompt,
+        outputDirectory,
+        manifestPath,
+        imageCount: request.count,
+        referenceImages: stagedReferenceImages,
+        pinPoint: request.pinPoint,
+        camera: request.camera,
+      });
 
-    const runResult = await input.runCodexJob({
-      workingDirectory,
-      outputDirectory,
-      manifestPath,
-      prompt: codexPrompt,
-    });
+      const runResult = await input.runCodexJob({
+        workingDirectory,
+        outputDirectory,
+        manifestPath,
+        prompt: codexPrompt,
+      });
 
-    if (!runResult.success) {
+      if (!runResult.success) {
+        throw new Error(runResult.errorMessage);
+      }
+
+      await fs.access(manifestPath);
+      const manifestContent = await fs.readFile(manifestPath, 'utf8');
+      const manifest = parseGenerationManifest(manifestContent);
+
+      const assets: GenerationAssetRecord[] = [];
+
+      for (const image of manifest.images) {
+        const assetId = createId();
+        const imported = await importGeneratedImage({
+          assetId,
+          sourcePath: image.path,
+          generatedImagesDir: input.paths.generatedImagesDir,
+          createdAt: now(),
+        });
+
+        const assetRecord = toAssetRecord({
+          jobId,
+          assetId,
+          originalPath: image.path,
+          imported,
+        });
+
+        await input.database.insertAsset(assetRecord);
+        assets.push(assetRecord);
+      }
+
+      await input.database.upsertJob({
+        ...pendingJob,
+        status: 'succeeded',
+        updatedAt: now(),
+      });
+
+      return { jobId, assets };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       await input.database.upsertJob({
         ...pendingJob,
         status: 'failed',
-        errorMessage: runResult.errorMessage,
+        errorMessage,
         updatedAt: now(),
       });
-      throw new Error(runResult.errorMessage);
+      throw error;
     }
-
-    await fs.access(manifestPath);
-    const manifestContent = await fs.readFile(manifestPath, 'utf8');
-    const manifest = parseGenerationManifest(manifestContent);
-
-    const assets: GenerationAssetRecord[] = [];
-
-    for (const image of manifest.images) {
-      const assetId = createId();
-      const imported = await importGeneratedImage({
-        assetId,
-        sourcePath: image.path,
-        generatedImagesDir: input.paths.generatedImagesDir,
-        createdAt: now(),
-      });
-
-      const assetRecord = toAssetRecord({
-        jobId,
-        assetId,
-        originalPath: image.path,
-        imported,
-      });
-
-      await input.database.insertAsset(assetRecord);
-      assets.push(assetRecord);
-    }
-
-    await input.database.upsertJob({
-      ...pendingJob,
-      status: 'succeeded',
-      updatedAt: now(),
-    });
-
-    return { jobId, assets };
   }
 
   return {
