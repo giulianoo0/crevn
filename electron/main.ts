@@ -7,6 +7,7 @@ export const createWindow = () => {
   mainWindow = new BrowserWindow({
     width: 1024,
     height: 768,
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -17,6 +18,9 @@ export const createWindow = () => {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  mainWindow.setMenuBarVisibility(false);
+  mainWindow.removeMenu();
 
   // If in development, load the Vite dev server. Otherwise, load the built index.html.
   if (process.env.NODE_ENV === 'development') {

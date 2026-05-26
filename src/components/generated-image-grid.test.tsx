@@ -12,18 +12,31 @@ const images = [
 ];
 
 describe('GeneratedImageGrid', () => {
-  it('renders images across three rows', () => {
-    render(<GeneratedImageGrid images={images} />);
+  it('renders images across two rows with three images per row', () => {
+    render(<GeneratedImageGrid images={images} className="h-[600px]" />);
 
     expect(screen.getByTestId('generated-image-grid-row-0')).toBeInTheDocument();
     expect(screen.getByTestId('generated-image-grid-row-1')).toBeInTheDocument();
-    expect(screen.getByTestId('generated-image-grid-row-2')).toBeInTheDocument();
     expect(screen.getAllByRole('img')).toHaveLength(5);
   });
 
-  it('renders an empty state message when there are no images', () => {
-    render(<GeneratedImageGrid images={[]} />);
+  it('renders shimmer placeholders for loading entries', () => {
+    render(
+      <GeneratedImageGrid
+        images={[{ id: 'loading-1', fileName: 'Generating 1', isLoading: true }]}
+        className="h-[300px]"
+      />
+    );
 
-    expect(screen.getByText('No generated images yet')).toBeInTheDocument();
+    const placeholder = screen.getByLabelText('Generating 1 loading');
+    expect(placeholder).toBeInTheDocument();
+    expect(placeholder).toHaveClass('animate-skeleton-shimmer');
+    expect(placeholder).not.toHaveClass('animate-pulse');
+  });
+
+  it('renders nothing when there are no images', () => {
+    const { container } = render(<GeneratedImageGrid images={[]} />);
+
+    expect(container).toBeEmptyDOMElement();
   });
 });
