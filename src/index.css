@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+:root {
+  --background: rgb(7, 7, 7);
+  --surface: rgb(15, 16, 16);
+  --surface2: rgb(32, 32, 33);
+  --surface3: rgb(39, 39, 40);
+  --foreground: rgb(228, 227, 233);
+  --muted-foreground: rgb(150, 151, 158);
+  --accent: rgb(65, 130, 230);
+  --border-soft: rgb(42, 42, 45);
+  --border-strong: rgb(58, 58, 62);
+  font-family:
+    Geist,
+    "SF Pro Text",
+    "Segoe UI",
+    sans-serif;
+  color: var(--foreground);
+  background: var(--background);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+html {
+  color-scheme: dark;
+  background: var(--background);
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.04), transparent 34%),
+    var(--background);
+}
+
+textarea {
+  font: inherit;
+}
+
+textarea::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
