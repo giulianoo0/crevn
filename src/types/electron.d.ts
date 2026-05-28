@@ -48,6 +48,8 @@ interface ElectronCreateReferencePayload {
 }
 
 interface ElectronGenerateImagesPayload {
+  clientRunId?: string;
+  fastMode?: boolean;
   mode?: 'manual' | 'scene' | 'pinpoint' | 'camera';
   prompt: string;
   count: number;
@@ -77,6 +79,7 @@ interface ElectronGenerateImagesPayload {
 
 interface ElectronScenePlanEvent {
   jobId: string;
+  clientRunId?: string;
   threadId: string;
   count: number;
   applyToShimmers: boolean;

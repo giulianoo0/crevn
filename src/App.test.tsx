@@ -6,7 +6,9 @@ import * as electronApi from './lib/electron-api';
 import * as errors from './lib/errors';
 import { toast } from 'sonner';
 
-let scenePlanListener: ((event: { jobId: string; threadId: string; count: number; applyToShimmers: boolean }) => void) | null = null;
+let scenePlanListener:
+  | ((event: { jobId: string; clientRunId?: string; threadId: string; count: number; applyToShimmers: boolean }) => void)
+  | null = null;
 
 const projectFixture = {
   id: 'project-1',
@@ -592,6 +594,104 @@ describe('App header thread title', () => {
 
     await act(async () => {
       resolveGeneration?.({ jobId: 'job-1', assets: [] });
+      await vi.runAllTimersAsync();
+    });
+  });
+
+  it('allows overlapping scene runs and routes shimmer expansion per run', async () => {
+    const pendingRuns: Array<(value: { jobId: string; assets: [] }) => void> = [];
+    const generationPayloads: Array<Record<string, unknown>> = [];
+
+    vi.mocked(electronApi.generateImages).mockImplementation(
+      (payload) =>
+        new Promise((resolve) => {
+          generationPayloads.push(payload as Record<string, unknown>);
+          pendingRuns.push(resolve);
+        })
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.focus(screen.getByRole('textbox'));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mode' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Scene' }));
+
+    await act(async () => {
+      fireEvent.change(screen.getByRole('textbox'), {
+        target: { value: 'First subway platform scene' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.focus(screen.getByRole('textbox'));
+    fireEvent.click(screen.getByRole('button', { name: 'Mode' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Scene' }));
+
+    await act(async () => {
+      fireEvent.change(screen.getByRole('textbox'), {
+        target: { value: 'Second subway platform scene' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.generateImages).toHaveBeenCalledTimes(2);
+    expect(screen.getAllByLabelText(/loading$/i)).toHaveLength(2);
+
+    const firstClientRunId = generationPayloads[0]?.clientRunId;
+    const secondClientRunId = generationPayloads[1]?.clientRunId;
+
+    expect(typeof firstClientRunId).toBe('string');
+    expect(typeof secondClientRunId).toBe('string');
+
+    await act(async () => {
+      scenePlanListener?.({
+        jobId: 'job-1',
+        clientRunId: firstClientRunId as string,
+        threadId: 'thread-1',
+        count: 6,
+        applyToShimmers: true,
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getAllByLabelText(/loading$/i)).toHaveLength(7);
+
+    await act(async () => {
+      scenePlanListener?.({
+        jobId: 'job-2',
+        clientRunId: secondClientRunId as string,
+        threadId: 'thread-1',
+        count: 4,
+        applyToShimmers: true,
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getAllByLabelText(/loading$/i)).toHaveLength(10);
+
+    await act(async () => {
+      pendingRuns[0]?.({ jobId: 'job-1', assets: [] });
+      pendingRuns[1]?.({ jobId: 'job-2', assets: [] });
       await vi.runAllTimersAsync();
     });
   });
@@ -1516,7 +1616,7 @@ describe('App header thread title', () => {
         referenceImages: [
           expect.objectContaining({
             name: 'palette.png',
-            title: 'Palette guide',
+            title: 'RefImage1',
             description: 'Muted contrast and soft highlights.',
             bytesBase64: 'CgsMDQ==',
           }),
@@ -1628,6 +1728,71 @@ describe('App header thread title', () => {
     expect(composerInput).toHaveValue('');
     expect(composerInput).toHaveAttribute('rows', '1');
     expect(screen.queryByRole('button', { name: 'Open pasted.png' })).not.toBeInTheDocument();
+  });
+
+  it('keeps Fast enabled across submits while clearing the rest of the composer', async () => {
+    const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
+      jobId: 'job-1',
+      assets: [],
+    });
+    generateImagesMock.mockClear();
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    fireEvent.focus(composerInput);
+
+    const fastButton = screen.getByRole('button', { name: 'Fast' });
+    expect(fastButton).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Increase image count' }));
+
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Generate a fast portrait' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(generateImagesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        count: 2,
+        fastMode: true,
+      })
+    );
+    expect(composerInput).toHaveValue('');
+    expect(screen.getByText('1')).toBeInTheDocument();
+    fireEvent.focus(composerInput);
+    expect(screen.getByRole('button', { name: 'Fast' })).toHaveAttribute('aria-pressed', 'true');
+
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Generate another fast portrait' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(generateImagesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        count: 1,
+        fastMode: true,
+      })
+    );
   });
 
   it('keeps angle guidance off by default', async () => {

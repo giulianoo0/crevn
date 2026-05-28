@@ -48,6 +48,8 @@ export interface CreateReferencePayload {
 }
 
 export interface GenerateImagesPayload {
+  clientRunId?: string;
+  fastMode?: boolean;
   mode?: 'manual' | 'scene' | 'pinpoint' | 'camera';
   prompt: string;
   count: number;
@@ -81,6 +83,7 @@ export interface GeneratedImageRecord extends GeneratedImageGridImage {
 
 export interface ScenePlanEvent {
   jobId: string;
+  clientRunId?: string;
   threadId: string;
   count: number;
   applyToShimmers: boolean;

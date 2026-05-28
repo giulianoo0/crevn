@@ -329,7 +329,17 @@ async function createGenerationStore(userDataDir, options = {}) {
       .orderBy(desc(referenceImagesTable.createdAt), desc(referenceImagesTable.id));
   }
 
-  async function generateImages({ prompt, count, threadId, mode = 'manual', referenceImages = [], pinPoint, camera }) {
+  async function generateImages({
+    prompt,
+    count,
+    threadId,
+    mode = 'manual',
+    referenceImages = [],
+    pinPoint,
+    camera,
+    fastMode = false,
+    clientRunId = null,
+  }) {
     const jobId = nanoid();
     const timestamp = new Date().toISOString();
     const workingDirectory = path.join(paths.codexJobsTempDir, jobId);
@@ -365,6 +375,7 @@ async function createGenerationStore(userDataDir, options = {}) {
     try {
       const result = await runCodexJob({
         jobId,
+        clientRunId,
         workingDirectory,
         prompt: buildCodexImageGenerationPrompt({
           mode,
@@ -378,6 +389,7 @@ async function createGenerationStore(userDataDir, options = {}) {
         }),
         requestedCount: count,
         threadId,
+        fastMode,
         onScenePlan: options.onScenePlan,
       });
 
@@ -871,10 +883,23 @@ async function importGeneratedImage(input) {
   };
 }
 
-function runCodexJob({ jobId, workingDirectory, prompt, requestedCount = 1, threadId, onScenePlan }) {
+function buildCodexExecArgs({ fastMode = false } = {}) {
+  const args = ['--model', CODEX_MODEL, '--ask-for-approval', 'never'];
+
+  if (fastMode) {
+    args.push('-c', 'service_tier="fast"');
+  }
+
+  args.push('exec', '--sandbox', 'workspace-write', '--skip-git-repo-check', '-');
+
+  return args;
+}
+
+function runCodexJob({ jobId, clientRunId, workingDirectory, prompt, requestedCount = 1, threadId, fastMode = false, onScenePlan }) {
   return new Promise((resolve) => {
     const logPrefix = `[crenv:codex:${jobId}]`;
     const env = buildCodexSpawnEnv(workingDirectory);
+    const codexArgs = buildCodexExecArgs({ fastMode });
 
     for (const directoryPath of [
       env.XDG_CACHE_HOME,
@@ -885,32 +910,18 @@ function runCodexJob({ jobId, workingDirectory, prompt, requestedCount = 1, thre
       fs.mkdirSync(directoryPath, { recursive: true });
     }
 
-    const child = spawn(
-      'codex',
-      [
-        '--model',
-        CODEX_MODEL,
-        '--ask-for-approval',
-        'never',
-        'exec',
-        '--sandbox',
-        'workspace-write',
-        '--skip-git-repo-check',
-        '-',
-      ],
-      {
-        cwd: workingDirectory,
-        env,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }
-    );
+    const child = spawn('codex', codexArgs, {
+      cwd: workingDirectory,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
 
     let stdout = '';
     let stdoutLineBuffer = '';
     let stderr = '';
     let hasDispatchedScenePlan = false;
 
-    console.info(`${logPrefix} spawn: codex --model ${CODEX_MODEL} --ask-for-approval never exec --sandbox workspace-write --skip-git-repo-check -`);
+    console.info(`${logPrefix} spawn: codex ${codexArgs.join(' ')}`);
     console.info(`${logPrefix} cwd: ${workingDirectory}`);
 
     child.stdout.on('data', (chunk) => {
@@ -993,6 +1004,7 @@ function runCodexJob({ jobId, workingDirectory, prompt, requestedCount = 1, thre
       const plannedCount = Math.max(requestedCount, scenePlan.count);
       onScenePlan?.({
         jobId,
+        clientRunId,
         threadId,
         count: plannedCount,
         applyToShimmers: scenePlan.applyToShimmers,
@@ -1044,6 +1056,7 @@ module.exports = {
   createGenerationStore,
   getAppDataPaths,
   __test__: {
+    buildCodexExecArgs,
     buildCodexSpawnEnv,
     parseScenePlanLine,
   },

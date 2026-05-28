@@ -37,6 +37,7 @@ import {
   Trash2,
   WandSparkles,
   X,
+  Zap,
 } from 'lucide-react';
 import NumberFlow from '@number-flow/react';
 import { toast } from 'sonner';
@@ -409,6 +410,10 @@ function createLoadingEntries(prefix: string, count: number): GeneratedImageReco
   }));
 }
 
+function isLoadingEntryForRun(image: GeneratedImageRecord, runId: string) {
+  return image.isLoading && image.id.startsWith(`loading-${runId}-`);
+}
+
 function mergeGeneratedImagesWithLoadingEntries(
   images: GeneratedImageRecord[],
   loadingEntries: GeneratedImageRecord[] | undefined
@@ -418,6 +423,12 @@ function mergeGeneratedImagesWithLoadingEntries(
   }
 
   return [...loadingEntries, ...images];
+}
+
+function getLoadingEntriesForThread(activeRuns: Record<string, ActiveGenerationRun>, threadId: string) {
+  return Object.values(activeRuns)
+    .filter((run) => run.threadId === threadId)
+    .flatMap((run) => run.loadingEntries);
 }
 
 function toSavedReferenceImage(reference: ReferenceImageRecord): SavedReferenceImage {
@@ -454,6 +465,12 @@ type SavedReferenceImage = ComposerReferenceImage & {
 
 type ComposerGenerationMode = (typeof generationModeOptions)[number]['value'];
 type GenerationMode = ComposerGenerationMode | 'pinpoint' | 'camera';
+type ActiveGenerationRun = {
+  clientRunId: string;
+  threadId: string;
+  mode: GenerationMode;
+  loadingEntries: GeneratedImageRecord[];
+};
 
 type CameraPose = {
   rotationDeg: number;
@@ -525,8 +542,8 @@ export function App() {
   const [isAnglePanelOpen, setIsAnglePanelOpen] = useState(false);
   const [selectedAngle, setSelectedAngle] = useState<(typeof angleOptions)[number]['name']>('Low Angle');
   const [isAngleEnabled, setIsAngleEnabled] = useState(false);
+  const [isFastModeEnabled, setIsFastModeEnabled] = useState(true);
   const [generatedImages, setGeneratedImages] = useState<GeneratedImageRecord[]>([]);
-  const [isGenerating, setIsGenerating] = useState(false);
   const [isCreateProjectDialogOpen, setIsCreateProjectDialogOpen] = useState(false);
   const [sidebarEntityAction, setSidebarEntityAction] = useState<SidebarEntityAction>(null);
   const [isSidebarEntityDialogOpen, setIsSidebarEntityDialogOpen] = useState(false);
@@ -551,8 +568,8 @@ export function App() {
   const [playerSession, setPlayerSession] = useState<PlayerSession | null>(null);
   const [savedReferences, setSavedReferences] = useState<SavedReferenceImage[]>([]);
   const [selectedPromptReferenceIds, setSelectedPromptReferenceIds] = useState<string[]>([]);
-  const [locallyRunningThreadIds, setLocallyRunningThreadIds] = useState<string[]>([]);
-  const [loadingEntriesByThreadId, setLoadingEntriesByThreadId] = useState<Record<string, GeneratedImageRecord[]>>({});
+  const [localRunningCountsByThreadId, setLocalRunningCountsByThreadId] = useState<Record<string, number>>({});
+  const [activeRunsById, setActiveRunsById] = useState<Record<string, ActiveGenerationRun>>({});
   const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
   const [cursorIndex, setCursorIndex] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
@@ -571,11 +588,8 @@ export function App() {
   const headerMeasureRef = useRef<HTMLDivElement>(null);
   const headerTitleMeasureRef = useRef<HTMLSpanElement>(null);
   const isReferencePickerOpenRef = useRef(false);
-  const currentGenerationRef = useRef<{
-    threadId: string;
-    mode: GenerationMode;
-    loadingPrefix: string;
-  } | null>(null);
+  const activeRunsRef = useRef<Record<string, ActiveGenerationRun>>({});
+  const selectedThreadIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     referenceImagesRef.current = referenceImages;
@@ -584,6 +598,14 @@ export function App() {
   useEffect(() => {
     savedReferencesRef.current = savedReferences;
   }, [savedReferences]);
+
+  useEffect(() => {
+    activeRunsRef.current = activeRunsById;
+  }, [activeRunsById]);
+
+  useEffect(() => {
+    selectedThreadIdRef.current = selectedThreadId;
+  }, [selectedThreadId]);
 
   useEffect(() => {
     if (generationMode === 'scene' && isAnglePanelOpen) {
@@ -747,6 +769,93 @@ export function App() {
       return [];
     });
   }, []);
+
+  const createClientRunId = useCallback(() => {
+    const randomUuid = globalThis.crypto?.randomUUID?.();
+    if (randomUuid) {
+      return randomUuid;
+    }
+
+    return `run-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }, []);
+
+  const clearComposerAfterSubmit = useCallback(() => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    window.getSelection()?.removeAllRanges();
+    setPrompt('');
+    setSelectedPromptReferenceIds([]);
+    clearReferenceImages();
+    composerRef.current?.clear();
+    setIsFocused(false);
+    setGenerationMode('manual');
+    setSelectedAspectRatio('16:9');
+    setShotCount(1);
+    setIsModePickerOpen(false);
+    setIsAspectRatioOpen(false);
+    setIsAngleEnabled(false);
+    setSelectedAngle('Low Angle');
+    setIsAnglePanelOpen(false);
+  }, [clearReferenceImages]);
+
+  const incrementLocalRunningThread = useCallback((threadId: string) => {
+    setLocalRunningCountsByThreadId((current) => ({
+      ...current,
+      [threadId]: (current[threadId] ?? 0) + 1,
+    }));
+  }, []);
+
+  const decrementLocalRunningThread = useCallback((threadId: string) => {
+    setLocalRunningCountsByThreadId((current) => {
+      const nextCount = (current[threadId] ?? 0) - 1;
+      if (nextCount > 0) {
+        return {
+          ...current,
+          [threadId]: nextCount,
+        };
+      }
+
+      const nextState = { ...current };
+      delete nextState[threadId];
+      return nextState;
+    });
+  }, []);
+
+  const syncVisibleThreadImages = useCallback((threadId: string, images: GeneratedImageRecord[]) => {
+    setGeneratedImages(
+      mergeGeneratedImagesWithLoadingEntries(images, getLoadingEntriesForThread(activeRunsRef.current, threadId))
+    );
+  }, []);
+
+  const registerActiveRun = useCallback((input: {
+    clientRunId: string;
+    threadId: string;
+    mode: GenerationMode;
+    count: number;
+  }) => {
+    const loadingEntries = createLoadingEntries(input.clientRunId, input.count);
+
+    setActiveRunsById((current) => {
+      const nextState = {
+        ...current,
+        [input.clientRunId]: {
+          clientRunId: input.clientRunId,
+          threadId: input.threadId,
+          mode: input.mode,
+          loadingEntries,
+        },
+      };
+      activeRunsRef.current = nextState;
+      return nextState;
+    });
+
+    incrementLocalRunningThread(input.threadId);
+
+    if (selectedThreadIdRef.current === input.threadId) {
+      setGeneratedImages((current) => [...loadingEntries, ...current]);
+    }
+  }, [incrementLocalRunningThread]);
 
   const removeReferenceImage = useCallback((referenceImageId: string) => {
     setReferenceImages((current) => {
@@ -1019,8 +1128,8 @@ export function App() {
 
   const loadThreadImages = useCallback(async (threadId: string) => {
     const images = await listGeneratedImages(threadId);
-    setGeneratedImages(mergeGeneratedImagesWithLoadingEntries(images, loadingEntriesByThreadId[threadId]));
-  }, [loadingEntriesByThreadId]);
+    syncVisibleThreadImages(threadId, images);
+  }, [syncVisibleThreadImages]);
 
   const handleSelectThread = useCallback(async (projectId: string, threadId: string) => {
     setSelectedProjectId(projectId);
@@ -1187,7 +1296,7 @@ export function App() {
 
   const handleGenerate = useCallback(async () => {
     const trimmedPrompt = prompt.trim();
-    if (!trimmedPrompt || isGenerating) return;
+    if (!trimmedPrompt) return;
 
     let activeProjectId = selectedProjectId;
     let activeThreadId = selectedThreadId;
@@ -1218,37 +1327,32 @@ export function App() {
       }
     }
 
-    const loadingPrefix = `${Date.now()}`;
-    const loadingEntries = createLoadingEntries(loadingPrefix, shotCount);
-    const isCurrentLoadingEntry = (image: GeneratedImageRecord) =>
-      image.isLoading && image.id.startsWith(`loading-${loadingPrefix}-`);
+    if (!activeThreadId) {
+      return;
+    }
 
-    currentGenerationRef.current = {
-      threadId: activeThreadId,
-      mode: generationMode,
-      loadingPrefix,
-    };
-
-    setIsGenerating(true);
-    setLocallyRunningThreadIds((current) =>
-      current.includes(activeThreadId) ? current : [...current, activeThreadId]
-    );
-    setLoadingEntriesByThreadId((current) => ({
-      ...current,
-      [activeThreadId]: loadingEntries,
-    }));
-    setGeneratedImages((current) => [...loadingEntries, ...current]);
-    toast.message('Generation started');
+    const clientRunId = createClientRunId();
+    const currentGenerationMode = generationMode;
+    const currentShotCount = shotCount;
+    const currentSelectedAspectRatio = selectedAspectRatio;
+    const currentIsAngleEnabled = isAngleEnabled;
+    const currentSelectedAngle = selectedAngle;
+    const currentReferenceImages = [...referenceImages];
+    const currentSavedReferences = [...savedReferences];
+    const currentSelectedPromptReferenceIds = [...selectedPromptReferenceIds];
 
     try {
       const uniqueReferenceImages = [];
       const seenBytes = new Set<string>();
 
       // 1. Add mentioned saved references
-      const selectedSavedReferences = savedReferences.filter((reference) =>
-        selectedPromptReferenceIds.includes(reference.id)
+      const selectedSavedReferences = currentSavedReferences.filter((reference) =>
+        currentSelectedPromptReferenceIds.includes(reference.id)
       );
-      for (const ref of selectedSavedReferences) {
+      const unselectedSavedReferences = currentSavedReferences.filter(
+        (reference) => !currentSelectedPromptReferenceIds.includes(reference.id)
+      );
+      for (const ref of [...selectedSavedReferences, ...unselectedSavedReferences]) {
         if (ref.bytesBase64) {
           seenBytes.add(ref.bytesBase64);
         }
@@ -1262,7 +1366,7 @@ export function App() {
       }
 
       // 2. Add attached reference images (avoiding duplicates)
-      for (const img of referenceImages) {
+      for (const img of currentReferenceImages) {
         if (img.bytesBase64 && seenBytes.has(img.bytesBase64)) {
           continue;
         }
@@ -1302,62 +1406,87 @@ export function App() {
       }));
 
       const generationPrompt =
-        generationMode === 'scene'
-          ? `${mappedPrompt}\n\nAspect ratio: ${selectedAspectRatio}\nMode: Scene`
+        currentGenerationMode === 'scene'
+          ? `${mappedPrompt}\n\nAspect ratio: ${currentSelectedAspectRatio}\nMode: Scene`
           : [
               mappedPrompt,
               '',
-              `Aspect ratio: ${selectedAspectRatio}`,
-              isAngleEnabled ? `Angle: ${selectedAngle}` : null,
+              `Aspect ratio: ${currentSelectedAspectRatio}`,
+              currentIsAngleEnabled ? `Angle: ${currentSelectedAngle}` : null,
             ]
               .filter((line): line is string => line !== null)
               .join('\n');
 
+      registerActiveRun({
+        clientRunId,
+        threadId: activeThreadId,
+        mode: currentGenerationMode,
+        count: currentShotCount,
+      });
+      clearComposerAfterSubmit();
+      toast.message('Generation started');
+
       const result = await generateImages({
-        mode: generationMode,
+        clientRunId,
+        fastMode: isFastModeEnabled,
+        mode: currentGenerationMode,
         prompt: generationPrompt,
-        count: shotCount,
+        count: currentShotCount,
         threadId: activeThreadId,
         referenceImages: formattedReferenceImages,
       });
 
       await refreshProjects();
-      setLoadingEntriesByThreadId((current) => {
+      setActiveRunsById((current) => {
         const nextState = { ...current };
-        delete nextState[activeThreadId];
+        delete nextState[clientRunId];
+        activeRunsRef.current = nextState;
         return nextState;
       });
-      setGeneratedImages((current) => [
-        ...result.assets,
-        ...current.filter((image) => !isCurrentLoadingEntry(image)),
-      ]);
-      setPrompt('');
-      setSelectedPromptReferenceIds([]);
-      clearReferenceImages();
-      composerRef.current?.clear();
-      setIsFocused(false);
+      if (selectedThreadIdRef.current === activeThreadId) {
+        setGeneratedImages((current) => [
+          ...result.assets,
+          ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId)),
+        ]);
+      }
       toast.success(result.assets.length > 0 ? `Generated ${result.assets.length} images` : 'Generation complete');
     } catch (error) {
       console.error('Failed to generate images', error);
-      setLoadingEntriesByThreadId((current) => {
+      setActiveRunsById((current) => {
         const nextState = { ...current };
-        delete nextState[activeThreadId];
+        delete nextState[clientRunId];
+        activeRunsRef.current = nextState;
         return nextState;
       });
-      setGeneratedImages((current) =>
-        current.filter((image) => !isCurrentLoadingEntry(image))
-      );
+      if (selectedThreadIdRef.current === activeThreadId) {
+        setGeneratedImages((current) =>
+          current.filter((image) => !isLoadingEntryForRun(image, clientRunId))
+        );
+      }
       await refreshProjects();
-      clearReferenceImages();
       toast.error(getErrorMessage(error, 'Failed to generate images'));
     } finally {
-      setLocallyRunningThreadIds((current) =>
-        current.filter((threadId) => threadId !== activeThreadId)
-      );
-      currentGenerationRef.current = null;
-      setIsGenerating(false);
+      decrementLocalRunningThread(activeThreadId);
     }
-  }, [clearReferenceImages, generationMode, isAngleEnabled, isGenerating, prompt, referenceImages, refreshProjects, savedReferences, selectedAngle, selectedProjectId, selectedAspectRatio, selectedThreadId, shotCount]);
+  }, [
+    clearComposerAfterSubmit,
+    createClientRunId,
+    decrementLocalRunningThread,
+    generationMode,
+    isAngleEnabled,
+    isFastModeEnabled,
+    prompt,
+    referenceImages,
+    refreshProjects,
+    registerActiveRun,
+    savedReferences,
+    selectedAngle,
+    selectedProjectId,
+    selectedAspectRatio,
+    selectedPromptReferenceIds,
+    selectedThreadId,
+    shotCount,
+  ]);
 
   const handlePinPointCharacterReferences = useCallback(async (files: FileList | File[]) => {
     const imageFiles = Array.from(files).filter((file) => file.type.startsWith('image/'));
@@ -1416,7 +1545,7 @@ export function App() {
 
   const handlePinPointGenerate = useCallback(async () => {
     const session = playerSession;
-    if (!session || !session.point || isGenerating) {
+    if (!session || !session.point) {
       return;
     }
 
@@ -1449,16 +1578,11 @@ export function App() {
       }
     }
 
-    const loadingPrefix = `${Date.now()}`;
-    const loadingEntries = createLoadingEntries(loadingPrefix, 1);
-    const isCurrentLoadingEntry = (image: GeneratedImageRecord) =>
-      image.isLoading && image.id.startsWith(`loading-${loadingPrefix}-`);
+    if (!activeThreadId) {
+      return;
+    }
 
-    currentGenerationRef.current = {
-      threadId: activeThreadId,
-      mode: 'pinpoint',
-      loadingPrefix,
-    };
+    const clientRunId = createClientRunId();
 
     let sourceImage: PlayerImageSource;
     try {
@@ -1496,20 +1620,19 @@ export function App() {
       bytesBase64: reference.bytesBase64,
     }));
 
-    setIsGenerating(true);
-    setLocallyRunningThreadIds((current) =>
-      current.includes(activeThreadId) ? current : [...current, activeThreadId]
-    );
-    setLoadingEntriesByThreadId((current) => ({
-      ...current,
-      [activeThreadId]: loadingEntries,
-    }));
-    setGeneratedImages((current) => [...loadingEntries, ...current]);
+    registerActiveRun({
+      clientRunId,
+      threadId: activeThreadId,
+      mode: 'pinpoint',
+      count: 1,
+    });
     closePlayer();
     toast.message('Generation started');
 
     try {
       const result = await generateImages({
+        clientRunId,
+        fastMode: isFastModeEnabled,
         mode: 'pinpoint',
         prompt: [
           'Pin Point source image: RefImage1',
@@ -1534,40 +1657,54 @@ export function App() {
       });
 
       await refreshProjects();
-      setLoadingEntriesByThreadId((current) => {
+      setActiveRunsById((current) => {
         const nextState = { ...current };
-        delete nextState[activeThreadId];
+        delete nextState[clientRunId];
+        activeRunsRef.current = nextState;
         return nextState;
       });
-      setGeneratedImages((current) => [
-        ...result.assets,
-        ...current.filter((image) => !isCurrentLoadingEntry(image)),
-      ]);
+      if (selectedThreadIdRef.current === activeThreadId) {
+        setGeneratedImages((current) => [
+          ...result.assets,
+          ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId)),
+        ]);
+      }
       toast.success(result.assets.length > 0 ? 'Generated 1 image' : 'Generation complete');
     } catch (error) {
       console.error('Failed to generate pinpoint image', error);
-      setLoadingEntriesByThreadId((current) => {
+      setActiveRunsById((current) => {
         const nextState = { ...current };
-        delete nextState[activeThreadId];
+        delete nextState[clientRunId];
+        activeRunsRef.current = nextState;
         return nextState;
       });
-      setGeneratedImages((current) =>
-        current.filter((image) => !isCurrentLoadingEntry(image))
-      );
+      if (selectedThreadIdRef.current === activeThreadId) {
+        setGeneratedImages((current) =>
+          current.filter((image) => !isLoadingEntryForRun(image, clientRunId))
+        );
+      }
       await refreshProjects();
       toast.error(getErrorMessage(error, 'Failed to generate pinpoint image'));
     } finally {
-      setLocallyRunningThreadIds((current) =>
-        current.filter((threadId) => threadId !== activeThreadId)
-      );
-      currentGenerationRef.current = null;
-      setIsGenerating(false);
+      decrementLocalRunningThread(activeThreadId);
     }
-  }, [closePlayer, ensurePlayerImageBytes, isGenerating, playerSession, refreshProjects, selectedAspectRatio, selectedProjectId, selectedThreadId]);
+  }, [
+    closePlayer,
+    createClientRunId,
+    decrementLocalRunningThread,
+    ensurePlayerImageBytes,
+    isFastModeEnabled,
+    playerSession,
+    refreshProjects,
+    registerActiveRun,
+    selectedAspectRatio,
+    selectedProjectId,
+    selectedThreadId,
+  ]);
 
   const handleCameraGenerate = useCallback(async () => {
     const session = playerSession;
-    if (!session || isGenerating) {
+    if (!session) {
       return;
     }
 
@@ -1607,16 +1744,7 @@ export function App() {
 
     const cameraPose = session.camera;
     const outputCount = cameraPose.generateBestAngles ? 12 : 1;
-    const loadingPrefix = `${Date.now()}`;
-    const loadingEntries = createLoadingEntries(loadingPrefix, outputCount);
-    const isCurrentLoadingEntry = (image: GeneratedImageRecord) =>
-      image.isLoading && image.id.startsWith(`loading-${loadingPrefix}-`);
-
-    currentGenerationRef.current = {
-      threadId: activeThreadId,
-      mode: 'camera',
-      loadingPrefix,
-    };
+    const clientRunId = createClientRunId();
 
     let sourceImage: PlayerImageSource;
     try {
@@ -1640,20 +1768,19 @@ export function App() {
       bytesBase64: sourceImage.bytesBase64 ?? '',
     };
 
-    setIsGenerating(true);
-    setLocallyRunningThreadIds((current) =>
-      current.includes(activeThreadId) ? current : [...current, activeThreadId]
-    );
-    setLoadingEntriesByThreadId((current) => ({
-      ...current,
-      [activeThreadId]: loadingEntries,
-    }));
-    setGeneratedImages((current) => [...loadingEntries, ...current]);
+    registerActiveRun({
+      clientRunId,
+      threadId: activeThreadId,
+      mode: 'camera',
+      count: outputCount,
+    });
     closePlayer();
     toast.message('Generation started');
 
     try {
       const result = await generateImages({
+        clientRunId,
+        fastMode: isFastModeEnabled,
         mode: 'camera',
         prompt: [
           'Camera source image: RefImage1',
@@ -1672,15 +1799,18 @@ export function App() {
       });
 
       await refreshProjects();
-      setLoadingEntriesByThreadId((current) => {
+      setActiveRunsById((current) => {
         const nextState = { ...current };
-        delete nextState[activeThreadId];
+        delete nextState[clientRunId];
+        activeRunsRef.current = nextState;
         return nextState;
       });
-      setGeneratedImages((current) => [
-        ...result.assets,
-        ...current.filter((image) => !isCurrentLoadingEntry(image)),
-      ]);
+      if (selectedThreadIdRef.current === activeThreadId) {
+        setGeneratedImages((current) => [
+          ...result.assets,
+          ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId)),
+        ]);
+      }
       toast.success(
         result.assets.length === 1
           ? 'Generated 1 image'
@@ -1690,24 +1820,34 @@ export function App() {
       );
     } catch (error) {
       console.error('Failed to generate camera image', error);
-      setLoadingEntriesByThreadId((current) => {
+      setActiveRunsById((current) => {
         const nextState = { ...current };
-        delete nextState[activeThreadId];
+        delete nextState[clientRunId];
+        activeRunsRef.current = nextState;
         return nextState;
       });
-      setGeneratedImages((current) =>
-        current.filter((image) => !isCurrentLoadingEntry(image))
-      );
+      if (selectedThreadIdRef.current === activeThreadId) {
+        setGeneratedImages((current) =>
+          current.filter((image) => !isLoadingEntryForRun(image, clientRunId))
+        );
+      }
       await refreshProjects();
       toast.error(getErrorMessage(error, 'Failed to generate camera image'));
     } finally {
-      setLocallyRunningThreadIds((current) =>
-        current.filter((threadId) => threadId !== activeThreadId)
-      );
-      currentGenerationRef.current = null;
-      setIsGenerating(false);
+      decrementLocalRunningThread(activeThreadId);
     }
-  }, [closePlayer, ensurePlayerImageBytes, isGenerating, playerSession, refreshProjects, selectedAspectRatio, selectedProjectId, selectedThreadId]);
+  }, [
+    closePlayer,
+    createClientRunId,
+    decrementLocalRunningThread,
+    ensurePlayerImageBytes,
+    isFastModeEnabled,
+    playerSession,
+    refreshProjects,
+    registerActiveRun,
+    selectedProjectId,
+    selectedThreadId,
+  ]);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && 'OffscreenCanvas' in window) {
@@ -1744,7 +1884,7 @@ export function App() {
           });
           setSelectedProjectId(workspace.project.id);
           setSelectedThreadId(workspace.thread.id);
-          setGeneratedImages(mergeGeneratedImagesWithLoadingEntries(images, loadingEntriesByThreadId[workspace.thread.id]));
+          syncVisibleThreadImages(workspace.thread.id, images);
           setSavedReferences((current) => {
             for (const reference of current) {
               revokeReferencePreviewUrl(reference);
@@ -1762,12 +1902,23 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [loadingEntriesByThreadId]);
+  }, [syncVisibleThreadImages]);
 
   useEffect(() => {
     return subscribeToScenePlan((event) => {
-      const currentGeneration = currentGenerationRef.current;
-      if (!currentGeneration || currentGeneration.mode !== 'scene' || currentGeneration.threadId !== event.threadId) {
+      let runId = event.clientRunId;
+      if (!runId) {
+        const matchingRuns = Object.values(activeRunsRef.current).filter(
+          (run) => run.mode === 'scene' && run.threadId === event.threadId
+        );
+        if (matchingRuns.length !== 1) {
+          return;
+        }
+        runId = matchingRuns[0].clientRunId;
+      }
+
+      const currentRun = activeRunsRef.current[runId];
+      if (!currentRun || currentRun.mode !== 'scene' || currentRun.threadId !== event.threadId) {
         return;
       }
 
@@ -1776,17 +1927,30 @@ export function App() {
         return;
       }
 
-      const nextLoadingEntries = createLoadingEntries(currentGeneration.loadingPrefix, event.count);
-      setLoadingEntriesByThreadId((current) => ({
-        ...current,
-        [event.threadId]: nextLoadingEntries,
-      }));
-      setGeneratedImages((current) => [
-        ...nextLoadingEntries,
-        ...current.filter(
-          (image) => !(image.isLoading && image.id.startsWith(`loading-${currentGeneration.loadingPrefix}-`))
-        ),
-      ]);
+      const nextLoadingEntries = createLoadingEntries(runId, event.count);
+      setActiveRunsById((current) => {
+        const existingRun = current[runId];
+        if (!existingRun) {
+          return current;
+        }
+
+        const nextState = {
+          ...current,
+          [runId]: {
+            ...existingRun,
+            loadingEntries: nextLoadingEntries,
+          },
+        };
+        activeRunsRef.current = nextState;
+        return nextState;
+      });
+
+      if (selectedThreadIdRef.current === event.threadId) {
+        setGeneratedImages((current) => [
+          ...nextLoadingEntries,
+          ...current.filter((image) => !isLoadingEntryForRun(image, runId)),
+        ]);
+      }
     });
   }, []);
 
@@ -2310,7 +2474,7 @@ export function App() {
                                   id={thread.id}
                                   name={thread.name}
                                   createdAtLabel={formatRelativeTime(thread.createdAt)}
-                                  isRunning={thread.hasRunningJob || locallyRunningThreadIds.includes(thread.id)}
+                                  isRunning={thread.hasRunningJob || (localRunningCountsByThreadId[thread.id] ?? 0) > 0}
                                   isSelected={selectedThreadId === thread.id}
                                   onClick={() => void handleSelectThread(project.id, thread.id)}
                                   onRename={() =>
@@ -2685,7 +2849,7 @@ export function App() {
                 isExpanded ? 'left-5 right-5 bottom-4' : 'left-4 right-4 bottom-3',
               ].join(' ')}
             >
-              <div className="flex items-center">
+              <div className="flex min-w-0 flex-1 items-center">
                 <div
                   className={[
                     'overflow-hidden transition-[width,margin,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]',
@@ -2707,8 +2871,8 @@ export function App() {
 
                 <div
                   className={[
-                    'flex items-center gap-2.5 overflow-hidden transition-[max-width,opacity,transform] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]',
-                    isExpanded ? 'max-w-[280px] opacity-100 translate-y-0' : 'max-w-0 opacity-0 translate-y-1',
+                    'flex min-w-0 items-center gap-2 overflow-hidden transition-[max-width,opacity,transform] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)]',
+                    isExpanded ? 'max-w-full opacity-100 translate-y-0' : 'max-w-0 opacity-0 translate-y-1',
                   ].join(' ')}
                   aria-hidden={!isExpanded}
                 >
@@ -2719,7 +2883,7 @@ export function App() {
                         type="button"
                         tabIndex={isExpanded ? 0 : -1}
                         onMouseDown={holdComposerOpen}
-                        className="pointer-events-auto inline-flex h-9 items-center gap-2 rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-4 text-[13px] font-medium text-[var(--foreground)] backdrop-blur-xl transition-[background-color,border-color] duration-200 hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)]"
+                        className="pointer-events-auto inline-flex h-9 shrink-0 items-center gap-2 rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-3.5 text-[13px] font-medium text-[var(--foreground)] backdrop-blur-xl transition-[background-color,border-color] duration-200 hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)]"
                       >
                         <Crop className="size-3.5 text-[var(--muted-foreground)]" />
                         <span>{selectedAspectRatio}</span>
@@ -2765,9 +2929,30 @@ export function App() {
                     </PopoverContent>
                   </Popover>
 
+                  <button
+                    type="button"
+                    tabIndex={isExpanded ? 0 : -1}
+                    aria-label="Fast"
+                    aria-pressed={isFastModeEnabled}
+                    onPointerDown={(event) => {
+                      event.preventDefault();
+                      holdComposerOpen();
+                    }}
+                    onClick={() => setIsFastModeEnabled((current) => !current)}
+                    className={[
+                      'pointer-events-auto inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3 text-[13px] font-medium backdrop-blur-xl transition-[background-color,border-color,color] duration-200',
+                      isFastModeEnabled
+                        ? 'border-[color-mix(in_srgb,var(--accent)_44%,transparent)] bg-[color-mix(in_srgb,var(--accent)_18%,rgba(32,32,33,0.82))] text-[var(--foreground)] hover:border-[color-mix(in_srgb,var(--accent)_58%,transparent)] hover:bg-[color-mix(in_srgb,var(--accent)_24%,rgba(32,32,33,0.88))]'
+                        : 'border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] text-[var(--muted-foreground)] hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)] hover:text-[var(--foreground)]',
+                    ].join(' ')}
+                  >
+                    <Zap className={['size-3.5 shrink-0', isFastModeEnabled ? 'text-[var(--accent)]' : ''].join(' ')} />
+                    Fast
+                  </button>
+
                   <div
                     className={[
-                      'pointer-events-auto inline-flex h-9 items-center rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] backdrop-blur-xl',
+                      'pointer-events-auto inline-flex h-9 shrink-0 items-center rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] backdrop-blur-xl',
                       'transition-[background-color,border-color] duration-200',
                     ].join(' ')}
                   >
@@ -2815,7 +3000,7 @@ export function App() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-2.5">
+              <div className="flex shrink-0 items-center gap-2">
                 <button
                   ref={wandButtonRef}
                   type="button"
@@ -2833,7 +3018,7 @@ export function App() {
                 <SendButton
                   hostRef={sendFxRef}
                   onClick={() => void handleGenerate()}
-                  disabled={!hasPrompt || isGenerating}
+                  disabled={!hasPrompt}
                 />
               </div>
             </div>

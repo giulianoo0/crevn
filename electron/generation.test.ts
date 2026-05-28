@@ -57,4 +57,13 @@ describe('generation codex runner environment', () => {
       applyToShimmers: false,
     });
   });
+
+  it('adds a fast-tier config override to codex exec when fast mode is enabled', () => {
+    const defaultArgs = generationModule.__test__.buildCodexExecArgs({ fastMode: false });
+    const fastArgs = generationModule.__test__.buildCodexExecArgs({ fastMode: true });
+
+    expect(defaultArgs).not.toContain('service_tier="fast"');
+    expect(fastArgs).toContain('-c');
+    expect(fastArgs).toContain('service_tier="fast"');
+  });
 });
