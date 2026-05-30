@@ -31,7 +31,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # electron-builder auto-detects the runner OS and builds that platform's target.
-      - run: pnpm build
+      # `--publish never` disables CI auto-publish; we ship via upload-artifact below.
+      - run: pnpm build -- --publish never
 
       - uses: actions/upload-artifact@v4
         with:
