@@ -31,8 +31,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # electron-builder auto-detects the runner OS and builds that platform's target.
-      # `--publish never` disables CI auto-publish; we ship via upload-artifact below.
-      - run: pnpm build -- --publish never
+      # `--publish always` uploads the installers to a GitHub Release (draft) for this repo.
+      - run: pnpm build -- --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
       - uses: actions/upload-artifact@v4
         with:
