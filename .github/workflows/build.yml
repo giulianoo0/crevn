@@ -8,6 +8,9 @@ on:
 
 jobs:
   build:
+    # Lets the built-in GITHUB_TOKEN create/upload GitHub Releases.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -34,7 +37,7 @@ jobs:
       # `--publish always` uploads the installers to a GitHub Release (draft) for this repo.
       - run: pnpm build -- --publish always
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/upload-artifact@v4
         with:
