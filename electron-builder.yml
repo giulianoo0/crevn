@@ -1,0 +1,32 @@
+appId: com.crenv.imagen
+productName: Imagen
+# Vite already owns `dist/`, so electron-builder writes installers elsewhere.
+directories:
+  output: release
+  buildResources: build
+# Runtime files only: the renderer bundle and the CommonJS main process.
+# electron-builder bundles production dependencies (nanoid, @libsql/client,
+# drizzle-orm) automatically.
+files:
+  - dist/**
+  - electron/**/*.cjs
+  - package.json
+# @libsql ships native .node binaries that cannot be loaded from inside the asar.
+asarUnpack:
+  - "**/*.node"
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Graphics
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.graphics-design
+win:
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

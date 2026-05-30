@@ -1,6 +1,8 @@
 {
   "name": "imagen",
   "version": "0.1.0",
+  "description": "Professional AI editing studio for image and video generation.",
+  "author": "minelli <minelli@users.noreply.github.com>",
   "main": "electron/main.cjs",
   "type": "module",
   "private": true,
@@ -10,6 +12,9 @@
     "dev:electron": "wait-on http://127.0.0.1:5173 && NODE_ENV=development electron .",
     "dev": "concurrently \"pnpm run dev:vite\" \"pnpm run dev:electron\"",
     "build": "vite build && electron-builder",
+    "build:linux": "vite build && electron-builder --linux",
+    "build:mac": "vite build && electron-builder --mac",
+    "build:win": "vite build && electron-builder --win",
     "test": "vitest run",
     "test:watch": "vitest"
   },

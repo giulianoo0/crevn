@@ -141,173 +141,251 @@ const generationModeOptions = [
   { value: 'scene', label: 'Scene' },
 ] as const;
 
+// Each angle carries a `prompt`: a precise, AI-facing cinematographic directive
+// written in standard film terminology. It states where the camera sits, how the
+// frame is filled, and the emotional intent, so the generation model renders the
+// shot deliberately instead of guessing from a bare label. See
+// .agents/skills/cinematic-angles/SKILL.md for the full rationale and vocabulary.
 const angleOptions = [
   {
     name: 'Eye Level',
     tone: 'Neutral, balanced framing',
+    prompt:
+      'Eye-level shot: place the camera at the subject\u2019s eye height for a neutral, relatable, conversational perspective with no power imbalance.',
     preview: eyeLevelPreview,
   },
   {
     name: 'Low Angle',
     tone: 'Powerful, dominant presence',
+    prompt:
+      'Low-angle shot: position the camera below the subject\u2019s eyeline and look upward so the subject feels powerful, dominant, and larger than life.',
     preview: lowAnglePreview,
   },
   {
     name: 'High Angle',
     tone: 'Vulnerable, exposed subject',
+    prompt:
+      'High-angle shot: position the camera above the subject and look down, making the subject appear smaller, vulnerable, or exposed.',
     preview: highAnglePreview,
   },
   {
     name: 'Dutch Angle',
     tone: 'Tension and instability',
+    prompt:
+      'Dutch angle: tilt the camera off its horizontal axis so the horizon line runs diagonally, creating tension, unease, and disorientation.',
     preview: dutchAnglePreview,
   },
   {
     name: 'Overhead',
     tone: 'Graphic top-down staging',
+    prompt:
+      'Overhead shot: place the camera directly above the subject at roughly 90 degrees for graphic, top-down staging of the scene.',
     preview: overheadPreview,
   },
   {
     name: 'Over-the-Shoulder',
     tone: 'Conversational perspective',
+    prompt:
+      'Over-the-shoulder shot: place the camera behind one subject\u2019s shoulder and head, framing the second subject beyond it with layered foreground depth.',
     preview: overTheShoulderPreview,
   },
   {
     name: 'POV',
     tone: 'Immersive first-person lens',
+    prompt:
+      'Point-of-view shot: place the camera exactly where the character\u2019s eyes would be, showing the scene as a first-person, immersive perspective.',
     preview: povPreview,
   },
   {
     name: 'Wide Establishing',
     tone: 'Spatial context and scale',
+    prompt:
+      'Wide establishing shot: frame the full environment with the subject small inside it to set location, scale, and spatial context.',
     preview: wideEstablishingPreview,
   },
   {
     name: "Worm's-Eye",
     tone: 'Extreme floor-level heroic scale',
+    prompt:
+      'Worm\u2019s-eye view: place the camera at ground level looking straight up for extreme foreshortening and towering, monumental scale.',
     preview: wormsEyePreview,
   },
   {
     name: "Bird's-Eye",
     tone: 'High aerial spatial control',
+    prompt:
+      'Bird\u2019s-eye view: place the camera high overhead looking down, emphasizing geometry, patterns, scale, and the geography of the scene.',
     preview: birdsEyePreview,
   },
   {
     name: 'Shoulder Level',
     tone: 'Natural character-height intimacy',
+    prompt:
+      'Shoulder-level shot: place the camera at the subject\u2019s shoulder height so the head reaches the top of frame with natural, character-height intimacy.',
     preview: shoulderLevelPreview,
   },
   {
     name: 'Hip Level',
     tone: 'Action-ready beltline framing',
+    prompt:
+      'Hip-level shot: place the camera at the subject\u2019s waist/hip height, ideal for action at the beltline and grounded, ready stances.',
     preview: hipLevelPreview,
   },
   {
     name: 'Knee Level',
     tone: 'Low kinetic adventure energy',
+    prompt:
+      'Knee-level shot: place the camera at the subject\u2019s knee height for low, kinetic energy and a sense of motion or stealth.',
     preview: kneeLevelPreview,
   },
   {
     name: 'Ground Level',
     tone: 'Floor-skimming dramatic presence',
+    prompt:
+      'Ground-level shot: place the camera on the ground skimming the floor for dramatic, low foreground presence.',
     preview: groundLevelPreview,
   },
   {
     name: 'Cowboy Shot',
     tone: 'Head-to-thigh character stance',
+    prompt:
+      'Cowboy shot: frame the subject from head to mid-thigh to feature stance, hips, and holster line in a classic western posture.',
     preview: cowboyShotPreview,
   },
   {
     name: 'Extreme Close-Up',
     tone: 'Intense eyes and expression',
+    prompt:
+      'Extreme close-up: fill the frame with a single small detail such as the eyes for intense focus and heightened emotion.',
     preview: extremeCloseUpPreview,
   },
   {
     name: 'Close-Up',
     tone: 'Face-first emotional detail',
+    prompt:
+      'Close-up: fill the frame with the subject\u2019s face to capture emotion and fine expressive detail.',
     preview: closeUpPreview,
   },
   {
     name: 'Medium Shot',
     tone: 'Waist-up performance framing',
+    prompt:
+      'Medium shot: frame the subject from the waist up to balance facial expression with body language and gesture.',
     preview: mediumShotPreview,
   },
   {
     name: 'Long Shot',
     tone: 'Full body with environment',
+    prompt:
+      'Long shot (full shot): frame the subject head to toe within the environment, keeping them the focal point.',
     preview: longShotPreview,
   },
   {
     name: 'Extreme Wide',
     tone: 'Tiny subject, big world',
+    prompt:
+      'Extreme wide shot: render the subject as a tiny element inside a vast environment to emphasize scale and isolation.',
     preview: extremeWideShotPreview,
   },
   {
     name: 'Profile Shot',
     tone: 'Graphic side-view silhouette',
+    prompt:
+      'Profile shot: frame the subject from a 90-degree side view for a graphic, silhouette-like outline.',
     preview: profileShotPreview,
   },
   {
     name: 'Two Shot',
     tone: 'Two-character relationship frame',
+    prompt:
+      'Two shot: frame two subjects together in one composition to establish their relationship and shared space.',
     preview: twoShotPreview,
   },
   {
     name: 'Group Three-Shot',
     tone: 'Triangular conversation blocking',
+    prompt:
+      'Three shot: frame three subjects in triangular blocking for balanced group conversation staging.',
     preview: groupThreeShotPreview,
   },
   {
     name: 'Clean Single',
     tone: 'One speaker isolated cleanly',
+    prompt:
+      'Clean single: isolate one subject in the frame with no other person visible.',
     preview: cleanSinglePreview,
   },
   {
     name: 'Dirty Single',
     tone: 'Speaker framed with foreground shoulder',
+    prompt:
+      'Dirty single: frame one subject while including a piece of another person, such as a shoulder or arm, in the soft foreground.',
     preview: dirtySinglePreview,
   },
   {
     name: 'Reaction Shot',
     tone: 'Emotion-first response coverage',
+    prompt:
+      'Reaction shot: frame a character receiving or responding to the moment, prioritizing their emotional reaction.',
     preview: reactionShotPreview,
   },
   {
     name: 'Shot-Reverse-Shot',
     tone: 'Alternating dialogue coverage',
+    prompt:
+      'Shot/reverse-shot coverage: frame one subject along the opposing eyeline of a conversation, matching the reverse of the other angle.',
     preview: shotReverseShotPreview,
   },
   {
     name: 'Over-the-Hip',
     tone: 'Low side foreground perspective',
+    prompt:
+      'Over-the-hip shot: like an over-the-shoulder but anchored at hip level, with a low foreground body mass framing the subject.',
     preview: overTheHipPreview,
   },
   {
     name: 'Group OTS',
     tone: 'Shoulder-framed group dialogue',
+    prompt:
+      'Group over-the-shoulder: frame a group conversation from behind one subject\u2019s shoulder, layering the others beyond it.',
     preview: groupOverTheShoulderPreview,
   },
   {
     name: 'Cross Shot',
     tone: 'Opposing eyelines and tension',
+    prompt:
+      'Cross shot: tight single on one subject along the opposing eyeline, without a foreground shoulder, heightening dialogue tension.',
     preview: crossShotPreview,
   },
   {
     name: 'Ensemble Wide',
     tone: 'Full group conversation geography',
+    prompt:
+      'Ensemble wide: frame the entire group within the scene to map the full geography of a multi-character conversation.',
     preview: ensembleWidePreview,
   },
   {
     name: 'Dialogue Insert',
     tone: 'Hands and gesture detail',
+    prompt:
+      'Insert shot: cut in tight on hands, objects, or gesture detail that punctuates the dialogue.',
     preview: dialogueInsertPreview,
   },
   {
     name: 'Silhouette Shot',
     tone: 'Backlit iconic character shape',
+    prompt:
+      'Silhouette shot: backlight the subject so it reads as a dark, iconic shape against a brighter background.',
     preview: silhouetteShotPreview,
   },
 ] as const;
+
+// Expand the selected angle into a full cinematographic directive for the AI.
+// Falls back to the bare name if the angle is somehow unknown.
+function buildAngleDirective(name: (typeof angleOptions)[number]['name']) {
+  const angle = angleOptions.find((option) => option.name === name);
+  return angle ? `Angle: ${angle.name} \u2014 ${angle.prompt}` : `Angle: ${name}`;
+}
 const APP_VERSION = '0.1.0';
 const APP_CHANNEL = 'ALPHA';
 
@@ -1412,7 +1490,7 @@ export function App() {
               mappedPrompt,
               '',
               `Aspect ratio: ${currentSelectedAspectRatio}`,
-              currentIsAngleEnabled ? `Angle: ${currentSelectedAngle}` : null,
+              currentIsAngleEnabled ? buildAngleDirective(currentSelectedAngle) : null,
             ]
               .filter((line): line is string => line !== null)
               .join('\n');
