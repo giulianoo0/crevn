@@ -30,9 +30,11 @@ import {
   FolderPlus,
   Folder,
   ImagePlus,
+  LoaderCircle,
   Pencil,
   Minus,
   PanelLeftOpen,
+  Play,
   Plus,
   Settings,
   Trash2,
@@ -96,12 +98,18 @@ import { PromptComposer, type PromptComposerHandle } from './components/prompt-c
 import { ModelPicker } from './components/model-picker';
 import { getErrorMessage } from './lib/errors';
 import {
+  cancelSceneGroupGeneration,
   copyGeneratedImage,
   createProject,
-  createEnvironmentReference,
+  createReferenceCollection,
   createReference,
+  createSceneFrame,
+  createSceneGroup,
   deleteReference,
+  describeReferenceCollection,
+  generateSceneGroup,
   updateEnvironmentReference,
+  updateReferenceCollection,
   updateReference,
   createThread,
   deleteGeneratedImage,
@@ -113,10 +121,16 @@ import {
   listGeneratedImages,
   listProjectsWithThreads,
   listReferences,
+  listSceneGroups,
   renameProject,
   renameThread,
+  subscribeToSceneFrameReady,
+  structureScenePrompt,
   subscribeToScenePlan,
+  type SceneGroupRecord,
   updateProjectSettings,
+  updateSceneFrame,
+  updateSceneGroup,
   type GeneratedImageRecord,
   type ProjectRecord,
   type ReferenceImageRecord,
@@ -478,6 +492,25 @@ function base64ToObjectUrl(bytesBase64: string, mimeType: string) {
   return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
 }
 
+function getSceneReferenceSignature(references: SceneReferenceAttachment[]) {
+  return references
+    .map((reference) =>
+      [
+        reference.id,
+        reference.referenceKind,
+        reference.referenceId ?? '',
+        reference.name,
+        reference.mimeType,
+        reference.bytesBase64,
+      ].join(':')
+    )
+    .join('|');
+}
+
+function isGenerationCanceledError(error: unknown) {
+  return error instanceof Error && error.message === 'Generation canceled.';
+}
+
 function revokeReferencePreviewUrl(referenceImage: ComposerReferenceImage) {
   if (referenceImage.shouldRevokePreviewUrl !== false) {
     URL.revokeObjectURL(referenceImage.previewUrl);
@@ -549,6 +582,7 @@ function toSavedReferenceImage(reference: ReferenceImageRecord): SavedReferenceI
     size: 0,
     createdAt: reference.createdAt,
     category: reference.category,
+    collectionId: reference.collectionId ?? reference.environmentId ?? undefined,
     environmentId: reference.environmentId ?? undefined,
     shouldRevokePreviewUrl: true,
   };
@@ -575,6 +609,7 @@ type SavedReferenceImage = ComposerReferenceImage & {
   description?: string;
   createdAt: string;
   category: ReferenceLibraryRoute;
+  collectionId?: string;
   environmentId?: string;
 };
 
@@ -582,11 +617,43 @@ type ReferenceLibraryRoute = 'characters' | 'environment' | 'objects';
 
 type ComposerGenerationMode = (typeof generationModeOptions)[number]['value'];
 type GenerationWorkspaceMode = 'classic' | 'scenes';
-type SceneFrame = { id: string; title: string; isCollapsed: boolean; isRenaming: boolean };
+type SceneFrame = {
+  id: string;
+  title: string;
+  prompt: string;
+  references: Array<{
+    id: string;
+    referenceKind: 'saved_reference' | 'uploaded_attachment';
+    referenceId: string | null;
+    name: string;
+    mimeType: string;
+    bytesBase64: string;
+    createdAt: string;
+  }>;
+  assets: SceneGroupRecord['frames'][number]['assets'];
+  isCollapsed: boolean;
+  isRenaming: boolean;
+};
+type SceneGroupUi = {
+  id: string;
+  threadId: string;
+  title: string;
+  prompt: string;
+  tocOrder: number;
+  frames: SceneFrame[];
+  runs: SceneGroupRecord['runs'];
+};
 type SceneReferenceAttachment = {
   id: string;
   name: string;
+  mimeType: string;
+  bytesBase64: string;
   previewUrl: string;
+  referenceKind: 'saved_reference' | 'uploaded_attachment';
+  referenceId: string | null;
+  createdAt: string;
+  title?: string;
+  description?: string;
   shouldRevokePreviewUrl?: boolean;
 };
 type GenerationMode = ComposerGenerationMode | 'pinpoint' | 'camera';
@@ -599,6 +666,15 @@ type ActiveGenerationRun = {
   modelLabel: string;
   generationStartedAt: string;
   loadingEntries: GeneratedImageRecord[];
+};
+
+type ActiveSceneGenerationRun = {
+  sceneGroupId: string;
+  frameIds: string[];
+  provider: 'codex' | 'antigravity';
+  modelId: string;
+  modelLabel: string;
+  generationStartedAt: string;
 };
 
 type CameraPose = {
@@ -677,11 +753,76 @@ function wrapCameraRotation(value: number) {
 }
 
 const INITIAL_SCENE_FRAMES: SceneFrame[] = [
-  { id: 'scene-frame-1', title: 'Frame 1', isCollapsed: false, isRenaming: false },
-  { id: 'scene-frame-2', title: 'Frame 2', isCollapsed: false, isRenaming: false },
+  { id: 'scene-frame-1', title: 'Frame 1', prompt: '', references: [], assets: [], isCollapsed: false, isRenaming: false },
+  { id: 'scene-frame-2', title: 'Frame 2', prompt: '', references: [], assets: [], isCollapsed: false, isRenaming: false },
 ];
 const DEFAULT_SCENES_SIDEBAR_WIDTH = 500;
 const MIN_SCENES_SIDEBAR_WIDTH = 250;
+
+function toSceneFrameUi(frame: SceneGroupRecord['frames'][number]): SceneFrame {
+  return {
+    id: frame.id,
+    title: frame.title,
+    prompt: frame.prompt,
+    references: frame.references,
+    assets: frame.assets,
+    isCollapsed: false,
+    isRenaming: false,
+  };
+}
+
+function toSceneGroupUi(sceneGroup: SceneGroupRecord): SceneGroupUi {
+  return {
+    id: sceneGroup.id,
+    threadId: sceneGroup.threadId,
+    title: sceneGroup.title,
+    prompt: sceneGroup.prompt,
+    tocOrder: sceneGroup.tocOrder,
+    frames: sceneGroup.frames.map(toSceneFrameUi),
+    runs: sceneGroup.runs,
+  };
+}
+
+function toSceneWorkspaceImage(
+  frame: SceneGroupRecord['frames'][number],
+  asset: SceneGroupRecord['frames'][number]['assets'][number],
+  run: SceneGroupRecord['runs'][number] | null
+): GeneratedImageRecord {
+  return {
+    id: asset.id,
+    fileName: `${frame.title} · ${asset.outputIndex + 1}`,
+    fileUrl: `crenv-asset://generated?path=${encodeURIComponent(asset.storedPath)}`,
+    createdAt: asset.createdAt,
+    provider: run?.provider ?? 'codex',
+    modelId: run?.modelId ?? null,
+    modelLabel: run?.modelLabel ?? null,
+    durationMs: run?.durationMs ?? null,
+  };
+}
+
+function toSceneWorkspaceLoadingImage(
+  frame: SceneFrame,
+  index: number,
+  metadata?: Pick<ActiveSceneGenerationRun, 'provider' | 'modelId' | 'modelLabel' | 'generationStartedAt'>
+): GeneratedImageRecord {
+  return {
+    id: `scene-loading-${frame.id}`,
+    fileName: `${frame.title} · ${index + 1}`,
+    createdAt: metadata?.generationStartedAt ?? new Date().toISOString(),
+    provider: metadata?.provider ?? 'codex',
+    modelId: metadata?.modelId ?? 'codex-gpt-5-4-mini',
+    modelLabel: metadata?.modelLabel ?? 'GPT-5.4 Mini',
+    generationStartedAt: metadata?.generationStartedAt,
+    isLoading: true,
+  };
+}
+
+type SceneWorkspaceFrameCard = {
+  frameId: string;
+  frameTitle: string;
+  images: GeneratedImageRecord[];
+  isGenerating: boolean;
+};
 
 export function App() {
   const inputId = useId();
@@ -689,6 +830,14 @@ export function App() {
   const [isFocused, setIsFocused] = useState(false);
   const [generationMode, setGenerationMode] = useState<ComposerGenerationMode>('manual');
   const [generationWorkspaceMode, setGenerationWorkspaceMode] = useState<GenerationWorkspaceMode>('classic');
+  const [sceneGroups, setSceneGroups] = useState<SceneGroupUi[]>([]);
+  const [activeSceneGroupId, setActiveSceneGroupId] = useState<string | null>(null);
+  const [activeSceneGenerationRunsByGroupId, setActiveSceneGenerationRunsByGroupId] = useState<
+    Record<string, ActiveSceneGenerationRun>
+  >({});
+  const [isStructuringSceneFromClipboard, setIsStructuringSceneFromClipboard] = useState(false);
+  const sceneGenerationCancelRequestedRef = useRef<Set<string>>(new Set());
+  const [sceneGroupReferences, setSceneGroupReferences] = useState<SceneReferenceAttachment[]>([]);
   const [sceneFrames, setSceneFrames] = useState<SceneFrame[]>(INITIAL_SCENE_FRAMES);
   const [scenesSidebarWidth, setScenesSidebarWidth] = useState(DEFAULT_SCENES_SIDEBAR_WIDTH);
   const [isScenesSidebarResizing, setIsScenesSidebarResizing] = useState(false);
@@ -722,9 +871,13 @@ export function App() {
   const [activeStudioView, setActiveStudioView] = useState<'generation' | 'references'>('generation');
   const [activeReferenceLibraryRoute, setActiveReferenceLibraryRoute] = useState<ReferenceLibraryRoute>('characters');
   const [isAddReferenceDialogOpen, setIsAddReferenceDialogOpen] = useState(false);
+  const [addReferenceDialogRoute, setAddReferenceDialogRoute] = useState<ReferenceLibraryRoute>('characters');
+  const [addReferenceDialogSeedFiles, setAddReferenceDialogSeedFiles] = useState<File[]>([]);
+  const [isPreparingSelectedImagesReference, setIsPreparingSelectedImagesReference] = useState(false);
   const [editingReference, setEditingReference] = useState<{
     id: string;
     category: ReferenceLibraryRoute;
+    collectionId?: string;
     environmentId?: string;
     title: string;
     description?: string;
@@ -739,6 +892,7 @@ export function App() {
   const [deletingReference, setDeletingReference] = useState<{
     id: string;
     category: ReferenceLibraryRoute;
+    collectionId?: string;
     environmentId?: string;
     title: string;
   } | null>(null);
@@ -811,6 +965,33 @@ export function App() {
     setIsModelPickerOpen(false);
     setIsAnglePanelOpen(false);
   }, [generationWorkspaceMode]);
+
+  useEffect(() => {
+    const activeSceneGroup =
+      sceneGroups.find((sceneGroup) => sceneGroup.id === activeSceneGroupId) ?? sceneGroups[0] ?? null;
+
+    if (!activeSceneGroup) {
+      setSceneFrames(INITIAL_SCENE_FRAMES);
+      setSceneGroupReferences([]);
+      return;
+    }
+
+    setSceneFrames((current) =>
+      activeSceneGroup.frames.map((frame) => {
+        const currentFrame = current.find((item) => item.id === frame.id);
+        return currentFrame
+          ? {
+              ...frame,
+              prompt: currentFrame.prompt,
+              references: currentFrame.references,
+              isCollapsed: currentFrame.isCollapsed,
+              isRenaming: currentFrame.isRenaming,
+            }
+          : frame;
+      })
+    );
+    setSceneGroupReferences([]);
+  }, [activeSceneGroupId, sceneGroups]);
 
   useEffect(() => {
     if (!isScenesSidebarResizing) {
@@ -949,6 +1130,19 @@ export function App() {
       .filter((option) => option.title.toLowerCase().includes(referenceMentionMatch.query))
       .slice(0, 24);
   }, [referenceMentionMatch, savedReferences, referenceImages]);
+  const referenceMentionCandidates = useMemo(
+    () => [
+      ...savedReferences.map((reference) => ({
+        id: reference.id,
+        title: reference.title,
+      })),
+      ...referenceImages.map((image) => ({
+        id: image.id,
+        title: image.name.replace(/\.[^/.]+$/, ''),
+      })),
+    ],
+    [referenceImages, savedReferences]
+  );
 
   useEffect(() => {
     setActiveReferenceMentionIndex(0);
@@ -1326,6 +1520,39 @@ export function App() {
     );
   }, [selectedGeneratedImages]);
 
+  const openAddReferenceDialog = useCallback((route: ReferenceLibraryRoute, files: File[] = []) => {
+    setAddReferenceDialogRoute(route);
+    setAddReferenceDialogSeedFiles(files);
+    setIsAddReferenceDialogOpen(true);
+  }, []);
+
+  const buildReferenceFilesFromGeneratedImages = useCallback(async (images: GeneratedImageRecord[]) => {
+    return Promise.all(
+      images.map(async (image, index) => {
+        const response = await fetch(image.fileUrl);
+        const blob = await response.blob();
+        return new File([blob], image.fileName || `reference-${index + 1}.png`, {
+          type: blob.type || 'image/png',
+          lastModified: Date.now() + index,
+        });
+      })
+    );
+  }, []);
+
+  const handleAddSelectedImagesAsReference = useCallback(async () => {
+    if (selectedGeneratedImages.length === 0) {
+      return;
+    }
+
+    setIsPreparingSelectedImagesReference(true);
+    try {
+      const files = await buildReferenceFilesFromGeneratedImages(selectedGeneratedImages);
+      openAddReferenceDialog('objects', files);
+    } finally {
+      setIsPreparingSelectedImagesReference(false);
+    }
+  }, [buildReferenceFilesFromGeneratedImages, openAddReferenceDialog, selectedGeneratedImages]);
+
   const handleAddSavedReference = useCallback(async ({
     files,
     title,
@@ -1339,41 +1566,38 @@ export function App() {
     route: ReferenceLibraryRoute;
     attachmentDescriptions?: Record<string, string>;
   }) => {
-    if (route === 'environment') {
-      const attachments = await Promise.all(
-        files.map(async (file) => {
-          const bytes = new Uint8Array(await file.arrayBuffer());
-          return {
-            name: file.name,
-            mimeType: file.type || 'image/png',
-            bytesBase64: bytesToBase64(bytes),
-            description: attachmentDescriptions?.[`${file.name}-${file.size}-${file.lastModified}`]?.trim() || undefined,
-          };
-        })
-      );
-      const nextReferences = await createEnvironmentReference({
-        title,
-        description: description?.trim() || undefined,
-        attachments,
-      });
-      setSavedReferences((current) => [...nextReferences.map(toSavedReferenceImage), ...current]);
-      toast.message(nextReferences.length > 1 ? `${nextReferences.length} references added` : 'Reference added');
-      return;
-    }
-
-    const nextReferences = await Promise.all(
+    const attachments = await Promise.all(
       files.map(async (file) => {
         const bytes = new Uint8Array(await file.arrayBuffer());
-        return createReference({
+        return {
           name: file.name,
-          title,
-          description: description?.trim() || undefined,
           mimeType: file.type || 'image/png',
           bytesBase64: bytesToBase64(bytes),
-          category: route,
-        });
+          description: attachmentDescriptions?.[`${file.name}-${file.size}-${file.lastModified}`]?.trim() || undefined,
+        };
       })
     );
+    const nextReferences =
+      route === 'environment' || files.length > 1
+        ? await createReferenceCollection({
+            category: route,
+            title,
+            description: description?.trim() || undefined,
+            attachments,
+          })
+        : await Promise.all(
+            files.map(async (file) => {
+              const bytes = new Uint8Array(await file.arrayBuffer());
+              return createReference({
+                name: file.name,
+                title,
+                description: description?.trim() || undefined,
+                mimeType: file.type || 'image/png',
+                bytesBase64: bytesToBase64(bytes),
+                category: route,
+              });
+            })
+          );
     setSavedReferences((current) => [...nextReferences.map(toSavedReferenceImage), ...current]);
     toast.message(nextReferences.length > 1 ? `${nextReferences.length} references added` : 'Reference added');
   }, []);
@@ -1447,6 +1671,35 @@ export function App() {
     return nextProjects;
   }, []);
 
+  const loadSceneGroups = useCallback(async (threadId: string) => {
+    const existingSceneGroups = await listSceneGroups(threadId);
+
+    if (existingSceneGroups.length === 0) {
+      const createdSceneGroup = await createSceneGroup(threadId, {
+        title: 'Scene 1',
+        prompt: '',
+        tocOrder: 1,
+      });
+
+      await createSceneFrame(createdSceneGroup.id, {
+        title: 'Frame 1',
+        prompt: '',
+        frameOrder: 1,
+      });
+      await createSceneFrame(createdSceneGroup.id, {
+        title: 'Frame 2',
+        prompt: '',
+        frameOrder: 2,
+      });
+    }
+
+    const nextSceneGroups = (await listSceneGroups(threadId)).map(toSceneGroupUi);
+    setSceneGroups(nextSceneGroups);
+    setActiveSceneGroupId((current) => current ?? nextSceneGroups[0]?.id ?? null);
+    setSceneFrames(nextSceneGroups[0]?.frames ?? INITIAL_SCENE_FRAMES);
+    return nextSceneGroups;
+  }, []);
+
   const loadThreadImages = useCallback(async (threadId: string) => {
     const images = await listGeneratedImages(threadId);
     syncVisibleThreadImages(threadId, images);
@@ -1455,8 +1708,23 @@ export function App() {
   const handleSelectThread = useCallback(async (projectId: string, threadId: string) => {
     setSelectedProjectId(projectId);
     setSelectedThreadId(threadId);
+    syncVisibleThreadImages(threadId, []);
+    await loadSceneGroups(threadId);
     await loadThreadImages(threadId);
-  }, [loadThreadImages]);
+  }, [loadSceneGroups, loadThreadImages, syncVisibleThreadImages]);
+
+  useEffect(() => {
+    if (!selectedThreadId) {
+      setSceneGroups([]);
+      setActiveSceneGroupId(null);
+      setSceneFrames(INITIAL_SCENE_FRAMES);
+      return;
+    }
+
+    void loadSceneGroups(selectedThreadId).catch((error) => {
+      console.error('Failed to load scene groups', error);
+    });
+  }, [loadSceneGroups, selectedThreadId]);
 
   const handleCreateProject = useCallback(async (projectName: string) => {
     try {
@@ -1471,6 +1739,362 @@ export function App() {
       toast.error('Failed to create project');
     }
   }, [refreshProjects]);
+
+  const activeSceneGroup =
+    sceneGroups.find((sceneGroup) => sceneGroup.id === activeSceneGroupId) ?? sceneGroups[0] ?? null;
+  const activeSceneGenerationRun = activeSceneGroup
+    ? activeSceneGenerationRunsByGroupId[activeSceneGroup.id] ?? null
+    : null;
+  const activeSceneGroupGeneratingFrameIds = activeSceneGenerationRun?.frameIds ?? [];
+  const isActiveSceneGroupGenerating = activeSceneGroupGeneratingFrameIds.length > 0;
+  const activeSceneWorkspaceRun = activeSceneGroup?.runs[0] ?? null;
+  const activeSceneWorkspaceFrameCards = useMemo(() => {
+    if (!activeSceneGroup) {
+      return [];
+    }
+
+    const runsById = new Map(activeSceneGroup.runs.map((run) => [run.id, run]));
+    const localFramesById = new Map(sceneFrames.map((frame) => [frame.id, frame]));
+    return activeSceneGroup.frames
+      .map((frame, index) => {
+        const persistedImages = (frame.assets ?? []).map((asset) =>
+          toSceneWorkspaceImage(frame, asset, runsById.get(asset.sceneGroupRunId) ?? null)
+        );
+        const localFrame = localFramesById.get(frame.id);
+        const loadingImages = activeSceneGroupGeneratingFrameIds.includes(frame.id) && localFrame
+          ? [
+              toSceneWorkspaceLoadingImage(localFrame, 0, activeSceneGenerationRun ?? undefined),
+            ]
+          : [];
+
+        return {
+          frameId: frame.id,
+          frameTitle: frame.title || `Frame ${index + 1}`,
+          images: [...loadingImages, ...persistedImages],
+          isGenerating: loadingImages.length > 0,
+        } satisfies SceneWorkspaceFrameCard;
+      })
+      .filter((card) => card.images.length > 0);
+  }, [activeSceneGenerationRun, activeSceneGroup, activeSceneGroupGeneratingFrameIds, sceneFrames]);
+
+  const handleRenameSceneFrame = useCallback(
+    async (frameId: string, title: string) => {
+      setSceneFrames((current) => current.map((frame) => (frame.id === frameId ? { ...frame, title } : frame)));
+
+      const frame = sceneFrames.find((entry) => entry.id === frameId);
+      if (!frame) {
+        return;
+      }
+
+      try {
+        const updatedSceneGroup = await updateSceneFrame(frameId, {
+          title,
+          prompt: frame.prompt,
+          frameOrder: (activeSceneGroup?.frames.findIndex((entry) => entry.id === frameId) ?? 0) + 1,
+        });
+        if (updatedSceneGroup) {
+          setSceneGroups((current) =>
+            current.map((sceneGroup) => (sceneGroup.id === updatedSceneGroup.id ? toSceneGroupUi(updatedSceneGroup) : sceneGroup))
+          );
+        }
+      } catch (error) {
+        console.error('Failed to rename scene frame', error);
+      }
+    },
+    [activeSceneGroup, sceneFrames]
+  );
+
+  const handleAddSceneFrame = useCallback(async () => {
+    let sceneGroup = activeSceneGroup;
+
+    if (!sceneGroup) {
+      if (!selectedThreadId) {
+        return;
+      }
+
+      sceneGroup = await createSceneGroup(selectedThreadId, {
+        title: 'Scene 1',
+        prompt: '',
+        tocOrder: 1,
+      });
+      setSceneGroups((current) => [toSceneGroupUi(sceneGroup), ...current]);
+      setActiveSceneGroupId(sceneGroup.id);
+    }
+
+    const optimisticFrame: SceneFrame = {
+      id: `optimistic-scene-frame-${Date.now()}`,
+      title: `Frame ${sceneGroup.frames.length + 1}`,
+      prompt: '',
+      references: [],
+      assets: [],
+      isCollapsed: false,
+      isRenaming: true,
+    };
+
+    setSceneFrames((current) => [...current, optimisticFrame]);
+
+    try {
+      const updatedSceneGroup = await createSceneFrame(sceneGroup.id, {
+        title: `Frame ${sceneGroup.frames.length + 1}`,
+        prompt: '',
+        frameOrder: sceneGroup.frames.length + 1,
+      });
+      setSceneGroups((current) =>
+        current.map((sceneGroup) => (sceneGroup.id === updatedSceneGroup.id ? toSceneGroupUi(updatedSceneGroup) : sceneGroup))
+      );
+    } catch (error) {
+      console.error('Failed to create scene frame', error);
+      setSceneFrames((current) => current.filter((frame) => frame.id !== optimisticFrame.id));
+      toast.error('Failed to create frame');
+    }
+  }, [activeSceneGroup, selectedThreadId]);
+
+  const buildSceneGenerationInput = useCallback(
+    (sceneGroup: SceneGroupUi, targetFrameId?: string) => ({
+      sceneGroupId: sceneGroup.id,
+      targetFrameId,
+      promptOverride: sceneGroup.prompt,
+      frameOverrides: sceneFrames.map((frame) => ({
+        id: frame.id,
+        title: frame.title,
+        prompt: frame.prompt,
+        references: frame.references.map((reference) => ({
+          id: reference.id,
+          referenceKind: reference.referenceKind,
+          referenceId: reference.referenceId,
+          name: reference.name,
+          mimeType: reference.mimeType,
+          bytesBase64: reference.bytesBase64,
+          createdAt: reference.createdAt,
+        })),
+      })),
+      referenceImages: sceneGroupReferences.map((reference) => ({
+        name: reference.name,
+        title: reference.title,
+        description: reference.description,
+        mimeType: reference.mimeType,
+        bytesBase64: reference.bytesBase64,
+      })),
+      fastMode: effectiveFastMode,
+    }),
+    [effectiveFastMode, sceneFrames, sceneGroupReferences]
+  );
+
+  const handleGenerateSceneFrames = useCallback(async () => {
+    if (!activeSceneGroup) {
+      toast.error('Scene group is still loading.');
+      return;
+    }
+
+    if (activeSceneGroupGeneratingFrameIds.length > 0) {
+      return;
+    }
+
+    const generationStartedAt = new Date().toISOString();
+    setActiveSceneGenerationRunsByGroupId((current) => ({
+      ...current,
+      [activeSceneGroup.id]: {
+        sceneGroupId: activeSceneGroup.id,
+        frameIds: sceneFrames.map((frame) => frame.id),
+        provider: selectedProviderId,
+        modelId: selectedModel.id,
+        modelLabel: selectedModel.label,
+        generationStartedAt,
+      },
+    }));
+    sceneGenerationCancelRequestedRef.current.delete(activeSceneGroup.id);
+
+    try {
+      const updatedSceneGroup = await generateSceneGroup(buildSceneGenerationInput(activeSceneGroup));
+      if (updatedSceneGroup) {
+        setSceneGroups((current) =>
+          current.map((sceneGroup) => (sceneGroup.id === updatedSceneGroup.id ? toSceneGroupUi(updatedSceneGroup) : sceneGroup))
+        );
+      }
+    } catch (error) {
+      console.error('Failed to generate scene group', error);
+      if (!sceneGenerationCancelRequestedRef.current.has(activeSceneGroup.id) && !isGenerationCanceledError(error)) {
+        toast.error(getErrorMessage(error, 'Failed to generate scene frames.'));
+      }
+    } finally {
+      sceneGenerationCancelRequestedRef.current.delete(activeSceneGroup.id);
+      setActiveSceneGenerationRunsByGroupId((current) => {
+        const next = { ...current };
+        delete next[activeSceneGroup.id];
+        return next;
+      });
+    }
+  }, [
+    activeSceneGroup,
+    activeSceneGroupGeneratingFrameIds.length,
+    buildSceneGenerationInput,
+    sceneFrames,
+    selectedModel.id,
+    selectedModel.label,
+    selectedProviderId,
+  ]);
+
+  const handleGenerateSingleSceneFrame = useCallback(
+    async (frameId: string) => {
+      if (!activeSceneGroup) {
+        toast.error('Scene group is still loading.');
+        return;
+      }
+
+      if (activeSceneGroupGeneratingFrameIds.length > 0) {
+        return;
+      }
+
+      const generationStartedAt = new Date().toISOString();
+      setActiveSceneGenerationRunsByGroupId((current) => ({
+        ...current,
+        [activeSceneGroup.id]: {
+          sceneGroupId: activeSceneGroup.id,
+          frameIds: [frameId],
+          provider: selectedProviderId,
+          modelId: selectedModel.id,
+          modelLabel: selectedModel.label,
+          generationStartedAt,
+        },
+      }));
+      sceneGenerationCancelRequestedRef.current.delete(activeSceneGroup.id);
+
+      try {
+        const updatedSceneGroup = await generateSceneGroup(buildSceneGenerationInput(activeSceneGroup, frameId));
+        if (updatedSceneGroup) {
+          setSceneGroups((current) =>
+            current.map((sceneGroup) => (sceneGroup.id === updatedSceneGroup.id ? toSceneGroupUi(updatedSceneGroup) : sceneGroup))
+          );
+        }
+      } catch (error) {
+        console.error('Failed to generate scene frame', error);
+        if (!sceneGenerationCancelRequestedRef.current.has(activeSceneGroup.id) && !isGenerationCanceledError(error)) {
+          toast.error(getErrorMessage(error, 'Failed to generate scene frame.'));
+        }
+      } finally {
+        sceneGenerationCancelRequestedRef.current.delete(activeSceneGroup.id);
+        setActiveSceneGenerationRunsByGroupId((current) => {
+          const next = { ...current };
+          delete next[activeSceneGroup.id];
+          return next;
+        });
+      }
+    },
+    [
+      activeSceneGroup,
+      activeSceneGroupGeneratingFrameIds.length,
+      buildSceneGenerationInput,
+      selectedModel.id,
+      selectedModel.label,
+      selectedProviderId,
+    ]
+  );
+
+  const handleStopSceneGeneration = useCallback(async () => {
+    if (!activeSceneGroup) {
+      return;
+    }
+
+    sceneGenerationCancelRequestedRef.current.add(activeSceneGroup.id);
+    setActiveSceneGenerationRunsByGroupId((current) => {
+      const next = { ...current };
+      delete next[activeSceneGroup.id];
+      return next;
+    });
+
+    try {
+      await cancelSceneGroupGeneration(activeSceneGroup.id);
+    } catch (error) {
+      sceneGenerationCancelRequestedRef.current.delete(activeSceneGroup.id);
+      console.error('Failed to stop scene generation', error);
+      toast.error(getErrorMessage(error, 'Failed to stop scene generation.'));
+    }
+  }, [activeSceneGroup]);
+
+  const handleStructureSceneFromClipboard = useCallback(async () => {
+    if (isStructuringSceneFromClipboard) {
+      return;
+    }
+
+    let clipboardText = '';
+    try {
+      clipboardText = (await navigator.clipboard.readText()).trim();
+    } catch (error) {
+      console.error('Failed to read clipboard for scene structuring', error);
+      toast.error('Failed to read clipboard.');
+      return;
+    }
+
+    if (!clipboardText) {
+      toast.error('Clipboard is empty.');
+      return;
+    }
+
+    setIsStructuringSceneFromClipboard(true);
+
+    try {
+      const structured = await structureScenePrompt({
+        sourceText: clipboardText,
+        modelId: 'codex-gpt-5-4-mini',
+      });
+
+      let workingSceneGroup = activeSceneGroup;
+      if (!workingSceneGroup) {
+        if (!selectedThreadId) {
+          throw new Error('Thread is still loading.');
+        }
+
+        workingSceneGroup = await createSceneGroup(selectedThreadId, {
+          title: 'Scene 1',
+          prompt: '',
+          tocOrder: 1,
+        });
+        setSceneGroups((current) => [toSceneGroupUi(workingSceneGroup), ...current]);
+        setActiveSceneGroupId(workingSceneGroup.id);
+      }
+
+      let updatedSceneGroup = workingSceneGroup;
+      for (let index = updatedSceneGroup.frames.length; index < structured.frames.length; index += 1) {
+        updatedSceneGroup = await createSceneFrame(updatedSceneGroup.id, {
+          title: `Frame ${index + 1}`,
+          prompt: '',
+          frameOrder: index + 1,
+        });
+        setSceneGroups((current) =>
+          current.some((sceneGroup) => sceneGroup.id === updatedSceneGroup.id)
+            ? current.map((sceneGroup) =>
+                sceneGroup.id === updatedSceneGroup.id ? toSceneGroupUi(updatedSceneGroup) : sceneGroup
+              )
+            : [toSceneGroupUi(updatedSceneGroup), ...current]
+        );
+      }
+
+      const nextFrames = updatedSceneGroup.frames.map((frame, index) => {
+        const currentFrame = sceneFrames.find((item) => item.id === frame.id);
+        return {
+          ...toSceneFrameUi(frame),
+          prompt: structured.frames[index]?.prompt ?? '',
+          references: currentFrame?.references ?? frame.references,
+          isCollapsed: currentFrame?.isCollapsed ?? false,
+          isRenaming: currentFrame?.isRenaming ?? false,
+        };
+      });
+
+      setSceneGroups((current) =>
+        current.map((sceneGroup) =>
+          sceneGroup.id === updatedSceneGroup.id
+            ? { ...sceneGroup, prompt: structured.sceneDescription, frames: nextFrames }
+            : sceneGroup
+        )
+      );
+      setSceneFrames(nextFrames);
+    } catch (error) {
+      console.error('Failed to structure scene from clipboard', error);
+      toast.error(getErrorMessage(error, 'Failed to structure scene from clipboard.'));
+    } finally {
+      setIsStructuringSceneFromClipboard(false);
+    }
+  }, [activeSceneGroup, isStructuringSceneFromClipboard, sceneFrames, selectedThreadId]);
 
   const handlePrepareThreadDraft = useCallback((projectId: string) => {
     setSelectedProjectId(projectId);
@@ -2327,6 +2951,36 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    return subscribeToSceneFrameReady((event) => {
+      void listSceneGroups(event.threadId)
+        .then((nextSceneGroups) => {
+          setSceneGroups(nextSceneGroups.map(toSceneGroupUi));
+          setActiveSceneGenerationRunsByGroupId((current) => {
+            const activeRun = current[event.sceneGroupId];
+            if (!activeRun) {
+              return current;
+            }
+
+            const nextFrameIds = activeRun.frameIds.filter((frameId) => frameId !== event.frameId);
+            const nextState = { ...current };
+            if (nextFrameIds.length === 0) {
+              delete nextState[event.sceneGroupId];
+            } else {
+              nextState[event.sceneGroupId] = {
+                ...activeRun,
+                frameIds: nextFrameIds,
+              };
+            }
+            return nextState;
+          });
+        })
+        .catch((error) => {
+          console.error('Failed to refresh scene group after frame completion', error);
+        });
+    });
+  }, []);
+
+  useEffect(() => {
     return () => {
       if (blurTimeoutRef.current !== null) {
         window.clearTimeout(blurTimeoutRef.current);
@@ -2454,9 +3108,16 @@ export function App() {
 
       <AddReferenceDialog
         open={isAddReferenceDialogOpen}
-        onOpenChange={setIsAddReferenceDialogOpen}
+        onOpenChange={(open) => {
+          setIsAddReferenceDialogOpen(open);
+          if (!open) {
+            setAddReferenceDialogSeedFiles([]);
+          }
+        }}
         onSubmit={handleAddSavedReference}
-        route={activeReferenceLibraryRoute}
+        initialRoute={addReferenceDialogRoute}
+        initialFiles={addReferenceDialogSeedFiles}
+        onGenerateDescriptions={async (input) => describeReferenceCollection(input)}
       />
       <EditReferenceDialog
         open={editingReference !== null}
@@ -2467,16 +3128,26 @@ export function App() {
         }}
         reference={editingReference}
         onSubmit={async (input) => {
-          if (input.category === 'environment' && input.environmentId) {
-            const updatedReferences = await updateEnvironmentReference({
-              environmentId: input.environmentId,
-              title: input.title,
-              description: input.description,
-              attachments: input.attachments ?? [],
-            });
+          if ((input.category === 'environment' && input.environmentId) || input.collectionId) {
+            const updatedReferences = input.collectionId
+              ? await updateReferenceCollection({
+                  category: input.category,
+                  collectionId: input.collectionId,
+                  title: input.title,
+                  description: input.description,
+                  attachments: input.attachments ?? [],
+                })
+              : await updateEnvironmentReference({
+                  environmentId: input.environmentId!,
+                  title: input.title,
+                  description: input.description,
+                  attachments: input.attachments ?? [],
+                });
             setSavedReferences((current) => [
               ...updatedReferences.map(toSavedReferenceImage),
-              ...current.filter((reference) => reference.environmentId !== input.environmentId),
+              ...current.filter(
+                (reference) => reference.collectionId !== (input.collectionId ?? input.environmentId)
+              ),
             ]);
             toast.success('Reference updated');
             return;
@@ -2527,10 +3198,13 @@ export function App() {
             await deleteReference({
               id: deletingReference.id,
               category: deletingReference.category,
+              collectionId: deletingReference.collectionId,
               environmentId: deletingReference.environmentId,
             });
             setSavedReferences((current) =>
-              deletingReference.category === 'environment'
+              deletingReference.collectionId
+                ? current.filter((reference) => reference.collectionId !== deletingReference.collectionId)
+                : deletingReference.category === 'environment'
                 ? current.filter((reference) => reference.environmentId !== deletingReference.environmentId)
                 : current.filter((reference) => reference.id !== deletingReference.id)
             );
@@ -2561,16 +3235,26 @@ export function App() {
               key="references-workspace"
               references={savedReferences}
               route={activeReferenceLibraryRoute}
-              onAddReference={() => setIsAddReferenceDialogOpen(true)}
+              onAddReference={() => openAddReferenceDialog(activeReferenceLibraryRoute)}
               onEditReference={(reference) =>
                 setEditingReference({
                   id: reference.id,
                   category: reference.category,
+                  collectionId: reference.collectionId,
                   environmentId: reference.environmentId,
                   title: reference.title,
                   description: reference.description,
-                  attachments:
-                    reference.category === 'environment'
+                  attachments: reference.collectionId
+                    ? savedReferences
+                        .filter((item) => item.collectionId === reference.collectionId)
+                        .map((item) => ({
+                          id: item.id,
+                          name: item.name,
+                          mimeType: item.mimeType,
+                          bytesBase64: item.bytesBase64,
+                          description: item.description,
+                        }))
+                    : reference.category === 'environment'
                       ? savedReferences
                           .filter((item) => item.environmentId === reference.environmentId)
                           .map((item) => ({
@@ -2587,6 +3271,7 @@ export function App() {
                 setDeletingReference({
                   id: reference.id,
                   category: reference.category,
+                  collectionId: reference.collectionId,
                   environmentId: reference.environmentId,
                   title: reference.title,
                 })
@@ -2641,7 +3326,13 @@ export function App() {
               </section>
 
               <section className="t-page min-h-full w-full" data-page-id="2">
-                {isScenesWorkspace ? <ScenesWorkspace /> : null}
+                {isScenesWorkspace ? (
+                  <ScenesWorkspace
+                    frameCards={activeSceneWorkspaceFrameCards}
+                    latestRun={activeSceneWorkspaceRun}
+                    onOpenImage={openGeneratedImagePlayer}
+                  />
+                ) : null}
               </section>
             </div>
           )}
@@ -2846,6 +3537,27 @@ export function App() {
                     </motion.div>
                   ) : null}
                 </motion.div>
+
+                <Button
+                  variant="surface"
+                  size="sm"
+                  aria-label="Add selected images as reference"
+                  className="h-8 rounded-full border-white/8 bg-transparent px-3 text-[13px] hover:bg-white/6"
+                  disabled={isPreparingSelectedImagesReference}
+                  onClick={() => {
+                    void handleAddSelectedImagesAsReference().catch((error) => {
+                      console.error('Failed to prepare selected generated images as references', error);
+                      toast.error(getErrorMessage(error, 'Failed to prepare reference images.'));
+                    });
+                  }}
+                >
+                  {isPreparingSelectedImagesReference ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : (
+                    <ImagePlus className="size-3.5" />
+                  )}
+                  Add as reference
+                </Button>
 
                 <Button
                   variant="surface"
@@ -3127,8 +3839,39 @@ export function App() {
               data-open="true"
             >
               <ScenesSidebar
+                scenePrompt={activeSceneGroup?.prompt ?? ''}
+                sceneReferences={sceneGroupReferences}
                 frames={sceneFrames}
                 savedReferences={savedReferences}
+                isGenerating={isActiveSceneGroupGenerating}
+                generatingFrameIds={activeSceneGroupGeneratingFrameIds}
+                isStructuringFromClipboard={isStructuringSceneFromClipboard}
+                isFastModeEnabled={effectiveFastMode}
+                onStructureFromClipboard={() => {
+                  void handleStructureSceneFromClipboard();
+                }}
+                onToggleFastMode={() => setIsFastModeEnabled((current) => !current)}
+                onGenerateFrames={() => {
+                  void handleGenerateSceneFrames();
+                }}
+                onGenerateFrame={(frameId) => {
+                  void handleGenerateSingleSceneFrame(frameId);
+                }}
+                onStopGeneration={() => {
+                  void handleStopSceneGeneration();
+                }}
+                onScenePromptChange={(prompt) => {
+                  setSceneGroups((current) =>
+                    current.map((sceneGroup) => {
+                      const targetId = activeSceneGroup?.id ?? current[0]?.id;
+                      if (sceneGroup.id !== targetId || sceneGroup.prompt === prompt) {
+                        return sceneGroup;
+                      }
+                      return { ...sceneGroup, prompt };
+                    })
+                  );
+                }}
+                onSceneReferencesChange={setSceneGroupReferences}
                 onToggleFrame={(frameId) => {
                   setSceneFrames((current) =>
                     current.map((frame) =>
@@ -3136,9 +3879,17 @@ export function App() {
                     )
                   );
                 }}
-                onRenameFrame={(frameId, title) => {
+                onRenameFrame={handleRenameSceneFrame}
+                onUpdateFramePrompt={(frameId, prompt) => {
                   setSceneFrames((current) =>
-                    current.map((frame) => (frame.id === frameId ? { ...frame, title } : frame))
+                    current.map((frame) =>
+                      frame.id === frameId && frame.prompt !== prompt ? { ...frame, prompt } : frame
+                    )
+                  );
+                }}
+                onUpdateFrameReferences={(frameId, references) => {
+                  setSceneFrames((current) =>
+                    current.map((frame) => (frame.id === frameId ? { ...frame, references } : frame))
                   );
                 }}
                 onToggleRenameFrame={(frameId) => {
@@ -3149,15 +3900,7 @@ export function App() {
                   );
                 }}
                 onAddFrame={() => {
-                  setSceneFrames((current) => [
-                    ...current,
-                    {
-                      id: `scene-frame-${current.length + 1}`,
-                      title: `Frame ${current.length + 1}`,
-                      isCollapsed: false,
-                      isRenaming: true,
-                    },
-                  ]);
+                  void handleAddSceneFrame();
                 }}
               />
             </div>
@@ -3376,6 +4119,7 @@ export function App() {
                 placeholder="Escreva algo..."
                 isExpanded={isExpanded}
                 hasReferenceImages={hasReferenceImages}
+                mentionCandidates={referenceMentionCandidates}
                 onTextChange={setPrompt}
                 onMentionMatch={() => {}}
                 onMentionIdsChange={setSelectedPromptReferenceIds}
@@ -3679,16 +4423,40 @@ function SendButton({
   );
 }
 
-function SceneGenerateButton() {
+function SceneGenerateButton({
+  onClick,
+  onStop,
+  isGenerating,
+}: {
+  onClick: () => void;
+  onStop: () => void;
+  isGenerating: boolean;
+}) {
   return (
-    <Button
+    <motion.button
+      layout
       type="button"
-      aria-label="Generate frames"
-      onClick={() => {}}
-      className="h-9 rounded-full bg-[var(--accent)] px-4 text-white hover:opacity-95"
+      aria-label={isGenerating ? 'Stop generation' : 'Generate frames'}
+      onClick={isGenerating ? onStop : onClick}
+      className={[
+        'inline-flex h-9 items-center gap-2 rounded-full border px-4 text-[13px] font-medium backdrop-blur-xl transition-[background-color,border-color,color] duration-250',
+        isGenerating
+          ? 'border-[color-mix(in_srgb,#cf5c5c_55%,transparent)] bg-[rgba(51,24,24,0.72)] text-[rgb(244,208,208)] hover:bg-[rgba(66,28,28,0.84)]'
+          : 'border-[color-mix(in_srgb,var(--accent)_58%,transparent)] bg-[color-mix(in_srgb,var(--accent)_18%,rgba(32,32,33,0.82))] text-white hover:bg-[color-mix(in_srgb,var(--accent)_28%,rgba(32,32,33,0.88))]',
+      ].join(' ')}
     >
-      Generate frames
-    </Button>
+      <motion.span
+        key={isGenerating ? 'stop' : 'generate'}
+        initial={{ opacity: 0, y: 4, filter: 'blur(6px)' }}
+        animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+        exit={{ opacity: 0, y: -4, filter: 'blur(6px)' }}
+        transition={{ duration: 0.18 }}
+        className="inline-flex items-center gap-2"
+      >
+        {isGenerating ? <X className="size-3.5" /> : null}
+        <span>{isGenerating ? 'Stop' : 'Generate frames'}</span>
+      </motion.span>
+    </motion.button>
   );
 }
 
@@ -3739,7 +4507,78 @@ function GenerationWorkspaceTabs({
   );
 }
 
-function ScenesWorkspace() {
+function ScenesWorkspace({
+  frameCards,
+  latestRun,
+  onOpenImage,
+}: {
+  frameCards: SceneWorkspaceFrameCard[];
+  latestRun: SceneGroupRecord['runs'][number] | null;
+  onOpenImage: (image: GeneratedImageRecord) => void;
+}) {
+  if (frameCards.length > 0) {
+    const outputCount = frameCards.reduce(
+      (total, card) => total + card.images.filter((image) => !image.isLoading).length,
+      0
+    );
+
+    return (
+      <motion.div
+        data-testid="scenes-workspace"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+        className="min-h-[calc(100vh-60px)] w-full px-8 pb-10 pt-8"
+      >
+        <div className="mx-auto flex w-full max-w-[1240px] flex-col gap-4">
+          <div className="flex items-center justify-between rounded-[24px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.82)] px-5 py-4 backdrop-blur-xl">
+            <div className="flex items-center gap-3">
+              <div className="rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-3 py-1 text-[12px] font-medium text-[var(--foreground)]">
+                <NumberFlow value={outputCount} />
+                <span className="ml-1 text-[var(--muted-foreground)]">outputs</span>
+              </div>
+            </div>
+            {latestRun?.modelLabel ? (
+              <div className="rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-3 py-1 text-[12px] font-medium text-[var(--muted-foreground)]">
+                {latestRun.modelLabel}
+              </div>
+            ) : null}
+          </div>
+          {frameCards.map((card) => (
+            <div
+              key={card.frameId}
+              className="overflow-hidden rounded-[26px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.82)]"
+            >
+              <div className="flex items-center justify-between border-b border-[var(--border-soft)] px-5 py-4">
+                <div>
+                  <div className="text-[14px] font-medium text-[var(--foreground)]">{card.frameTitle}</div>
+                  <div className="mt-1 text-[12px] text-[var(--muted-foreground)]">
+                    {card.isGenerating ? 'Generating frame output...' : `${card.images.filter((image) => !image.isLoading).length} output${card.images.filter((image) => !image.isLoading).length === 1 ? '' : 's'}`}
+                  </div>
+                </div>
+                <div className="rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-3 py-1 text-[11px] text-[var(--muted-foreground)]">
+                  {card.isGenerating ? 'Loading' : `${card.images.filter((image) => !image.isLoading).length} output${card.images.filter((image) => !image.isLoading).length === 1 ? '' : 's'}`}
+                </div>
+              </div>
+              <div className="p-5">
+                <GeneratedImageGrid
+                  images={card.images}
+                  className="w-full"
+                  columnCount={card.images.length > 1 ? 2 : 1}
+                  cardHeight={card.images.length > 1 ? 280 : 360}
+                  rowGap={16}
+                  fitHeight
+                  onImageOpen={(image) => onOpenImage(image as GeneratedImageRecord)}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      </motion.div>
+    );
+  }
+
   return (
     <motion.div
       data-testid="scenes-workspace"
@@ -3759,25 +4598,93 @@ function ScenesWorkspace() {
 }
 
 function ScenesSidebar({
+  scenePrompt,
+  sceneReferences,
   frames,
   savedReferences,
+  onGenerateFrames,
+  onGenerateFrame,
+  onStopGeneration,
+  isGenerating,
+  generatingFrameIds,
+  isStructuringFromClipboard,
+  isFastModeEnabled,
+  onStructureFromClipboard,
+  onToggleFastMode,
+  onScenePromptChange,
+  onSceneReferencesChange,
   onToggleFrame,
   onRenameFrame,
+  onUpdateFramePrompt,
+  onUpdateFrameReferences,
   onToggleRenameFrame,
   onAddFrame,
 }: {
+  scenePrompt: string;
+  sceneReferences: SceneReferenceAttachment[];
   frames: SceneFrame[];
   savedReferences: SavedReferenceImage[];
+  onGenerateFrames: () => void;
+  onGenerateFrame: (frameId: string) => void;
+  onStopGeneration: () => void;
+  isGenerating: boolean;
+  generatingFrameIds: string[];
+  isStructuringFromClipboard: boolean;
+  isFastModeEnabled: boolean;
+  onStructureFromClipboard: () => void;
+  onToggleFastMode: () => void;
+  onScenePromptChange: (prompt: string) => void;
+  onSceneReferencesChange: (references: SceneReferenceAttachment[]) => void;
   onToggleFrame: (frameId: string) => void;
   onRenameFrame: (frameId: string, title: string) => void;
+  onUpdateFramePrompt: (frameId: string, prompt: string) => void;
+  onUpdateFrameReferences: (frameId: string, references: SceneReferenceAttachment[]) => void;
   onToggleRenameFrame: (frameId: string) => void;
   onAddFrame: () => void;
 }) {
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-14 items-center justify-between border-b border-[var(--border-soft)] px-5">
-        <div className="text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">Scenes</div>
-        <SceneGenerateButton />
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">Scenes</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            aria-label="Structure scene from clipboard"
+            aria-busy={isStructuringFromClipboard}
+            onClick={onStructureFromClipboard}
+            disabled={isStructuringFromClipboard || isGenerating}
+            className={[
+              'inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border backdrop-blur-xl transition-[background-color,border-color,color] duration-200',
+              isStructuringFromClipboard
+                ? 'border-[var(--border-soft)] bg-[rgba(39,39,40,0.86)] text-[var(--foreground)]'
+                : 'border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] text-[var(--muted-foreground)] hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)] hover:text-[var(--foreground)]',
+            ].join(' ')}
+          >
+            {isStructuringFromClipboard ? (
+              <LoaderCircle className="size-3.5 shrink-0 animate-spin text-[var(--accent)]" />
+            ) : (
+              <WandSparkles className="size-3.5 shrink-0" />
+            )}
+          </button>
+          <button
+            type="button"
+            aria-label="Fast"
+            aria-pressed={isFastModeEnabled}
+            onClick={onToggleFastMode}
+            className={[
+              'inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3 text-[13px] font-medium backdrop-blur-xl transition-[background-color,border-color,color] duration-200',
+              isFastModeEnabled
+                ? 'border-[color-mix(in_srgb,var(--accent)_44%,transparent)] bg-[color-mix(in_srgb,var(--accent)_18%,rgba(32,32,33,0.82))] text-[var(--foreground)] hover:border-[color-mix(in_srgb,var(--accent)_58%,transparent)] hover:bg-[color-mix(in_srgb,var(--accent)_24%,rgba(32,32,33,0.88))]'
+                : 'border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] text-[var(--muted-foreground)] hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)] hover:text-[var(--foreground)]',
+            ].join(' ')}
+          >
+            <Zap className={['size-3.5 shrink-0', isFastModeEnabled ? 'text-[var(--accent)]' : ''].join(' ')} />
+            Fast
+          </button>
+          <SceneGenerateButton onClick={onGenerateFrames} onStop={onStopGeneration} isGenerating={isGenerating} />
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
@@ -3786,7 +4693,11 @@ function ScenesSidebar({
           label="Scene Description"
           placeholder="Describe the overall scene, continuity, mood, and shared references"
           savedReferences={savedReferences}
-          heightClassName="h-[252px]"
+          initialPrompt={scenePrompt}
+          initialReferences={sceneReferences}
+          onPromptChange={onScenePromptChange}
+          onReferencesChange={onSceneReferencesChange}
+          baseHeight={252}
           topPaddingClassName="pt-4"
           labelClassName="text-[14px] font-medium text-[var(--foreground)]"
         />
@@ -3799,6 +4710,11 @@ function ScenesSidebar({
             savedReferences={savedReferences}
             onRename={(title) => onRenameFrame(frame.id, title)}
             onToggleRename={() => onToggleRenameFrame(frame.id)}
+            onPromptChange={(prompt) => onUpdateFramePrompt(frame.id, prompt)}
+            onReferencesChange={(references) => onUpdateFrameReferences(frame.id, references)}
+            onGenerate={() => onGenerateFrame(frame.id)}
+            isGenerating={generatingFrameIds.includes(frame.id)}
+            isGenerationDisabled={isGenerating}
             onToggle={() => onToggleFrame(frame.id)}
           />
         ))}
@@ -3823,47 +4739,78 @@ function SceneInputCard({
   label,
   placeholder,
   savedReferences,
+  initialPrompt,
+  initialReferences,
+  onPromptChange,
+  onReferencesChange,
   testId,
-  heightClassName,
+  baseHeight,
   topPaddingClassName,
   labelClassName,
 }: {
   label: string | null;
   placeholder: string;
   savedReferences: SavedReferenceImage[];
+  initialPrompt?: string;
+  initialReferences?: SceneReferenceAttachment[];
+  onPromptChange?: (prompt: string) => void;
+  onReferencesChange?: (references: SceneReferenceAttachment[]) => void;
   testId?: string;
-  heightClassName?: string;
+  baseHeight?: number;
   topPaddingClassName?: string;
   labelClassName?: string;
 }) {
   const composerRef = useRef<PromptComposerHandle>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
-  const [prompt, setPrompt] = useState('');
+  const topReferencesRef = useRef<HTMLDivElement>(null);
+  const [prompt, setPrompt] = useState(initialPrompt ?? '');
   const [mentionIds, setMentionIds] = useState<string[]>([]);
   const [mentionMatch, setMentionMatch] = useState<{ query: string; start: number } | null>(null);
   const [activeMentionIndex, setActiveMentionIndex] = useState(0);
   const [cursorIndex, setCursorIndex] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
-  const [attachedReferences, setAttachedReferences] = useState<SceneReferenceAttachment[]>([]);
+  const [attachedReferences, setAttachedReferences] = useState<SceneReferenceAttachment[]>(initialReferences ?? []);
+  const [topReferencesHeight, setTopReferencesHeight] = useState(0);
+  const lastSentReferencesSignatureRef = useRef(getSceneReferenceSignature(initialReferences ?? []));
+
+  useEffect(() => {
+    const nextReferences = initialReferences ?? [];
+    const currentSignature = getSceneReferenceSignature(attachedReferences);
+    const nextSignature = getSceneReferenceSignature(nextReferences);
+    if (currentSignature !== nextSignature) {
+      setAttachedReferences(nextReferences);
+    }
+    lastSentReferencesSignatureRef.current = nextSignature;
+  }, [initialReferences]);
 
   const mentionCandidates = useMemo(
     () => [
       ...savedReferences.map((reference) => ({
         id: reference.id,
+        name: reference.name,
         title: reference.title,
         description: reference.description ?? 'Saved library reference',
         previewUrl: reference.previewUrl,
+        mimeType: reference.mimeType,
+        bytesBase64: reference.bytesBase64,
+        referenceKind: 'saved_reference' as const,
+        referenceId: reference.id,
+        createdAt: reference.createdAt,
       })),
-      ...attachedReferences.map((attachment) => ({
-        id: attachment.id,
-        title: attachment.name.replace(/\.[^/.]+$/, ''),
-        description: 'Attached scene reference',
-        previewUrl: attachment.previewUrl,
-      })),
+      ...attachedReferences,
     ],
     [attachedReferences, savedReferences]
   );
+
+  useEffect(() => {
+    const nextPrompt = initialPrompt ?? '';
+    if (nextPrompt === prompt) {
+      return;
+    }
+    setPrompt(nextPrompt);
+    composerRef.current?.setText(nextPrompt, mentionCandidates);
+  }, [initialPrompt, mentionCandidates, prompt]);
 
   const mentionOptions = useMemo(() => {
     if (!mentionMatch) return [];
@@ -3921,11 +4868,47 @@ function SceneInputCard({
     () => mentionCandidates.filter((reference) => mentionIds.includes(reference.id)),
     [mentionCandidates, mentionIds]
   );
+  const generationReferences = useMemo(() => {
+    const selectedSavedReferences = selectedReferences.filter(
+      (reference) => reference.referenceKind === 'saved_reference'
+    );
+    return [...selectedSavedReferences, ...attachedReferences];
+  }, [attachedReferences, selectedReferences]);
+
+  useEffect(() => {
+    const nextSignature = getSceneReferenceSignature(generationReferences);
+    if (nextSignature === lastSentReferencesSignatureRef.current) {
+      return;
+    }
+    lastSentReferencesSignatureRef.current = nextSignature;
+    onReferencesChange?.(generationReferences);
+  }, [generationReferences, onReferencesChange]);
 
   const hasTopReferences = selectedReferences.length > 0;
   const hasBottomAttachments = attachedReferences.length > 0;
-  const composerTopPadding = hasTopReferences ? 64 : 8;
-  const composerBottomPadding = hasBottomAttachments ? 118 : 64;
+  const composerTopPadding = 8;
+  const composerBottomPadding = hasBottomAttachments ? 12 : 8;
+  const resolvedBaseHeight = baseHeight ?? 212;
+
+  useLayoutEffect(() => {
+    const element = topReferencesRef.current;
+    if (!element) {
+      setTopReferencesHeight(0);
+      return;
+    }
+
+    const updateHeight = () => {
+      setTopReferencesHeight(element.getBoundingClientRect().height);
+    };
+
+    updateHeight();
+    if (typeof ResizeObserver === 'undefined') {
+      return;
+    }
+    const observer = new ResizeObserver(() => updateHeight());
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [selectedReferences]);
 
   const mentionPopoverStyle = useMemo(() => {
     if (!surfaceRef.current || mentionOptions.length === 0) return null;
@@ -3949,12 +4932,26 @@ function SceneInputCard({
     const files = Array.from(fileList).filter((item) => item.type.startsWith('image/'));
     if (files.length === 0) return;
 
-    const nextAttachments = files.map((file, index) => ({
-      id: `${file.name}-${file.size}-${file.lastModified}-${Date.now()}-${index}`,
-      name: file.name,
-      previewUrl: URL.createObjectURL(file),
-      shouldRevokePreviewUrl: true,
-    }));
+    const nextAttachments = await Promise.all(
+      files.map(async (file, index) => {
+        const fileBuffer =
+          typeof file.arrayBuffer === 'function' ? await file.arrayBuffer() : new ArrayBuffer(0);
+
+        return {
+          id: `${file.name}-${file.size}-${file.lastModified}-${Date.now()}-${index}`,
+          name: file.name,
+          mimeType: file.type || 'image/png',
+          bytesBase64: bytesToBase64(new Uint8Array(fileBuffer)),
+          previewUrl: URL.createObjectURL(file),
+          referenceKind: 'uploaded_attachment' as const,
+          referenceId: null,
+          createdAt: new Date().toISOString(),
+          title: file.name.replace(/\.[^/.]+$/, ''),
+          description: 'Attached scene reference',
+          shouldRevokePreviewUrl: true,
+        };
+      })
+    );
 
     setAttachedReferences((current) => [...current, ...nextAttachments]);
   }, []);
@@ -3984,12 +4981,20 @@ function SceneInputCard({
         ref={surfaceRef}
         data-scene-input={inputId}
         className={[
-          'relative overflow-visible rounded-[26px] border border-[var(--border-soft)] bg-[rgba(21,21,22,0.92)] px-4 pb-4 pt-3',
-          heightClassName ?? 'h-[212px]',
+          'relative flex flex-col overflow-visible rounded-[26px] border border-[var(--border-soft)] bg-[rgba(21,21,22,0.92)] px-4 pb-4 pt-3 transition-[height] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
         ].join(' ')}
+        style={{
+          height: resolvedBaseHeight + (hasTopReferences ? topReferencesHeight + 12 : 0),
+        }}
       >
-        {hasTopReferences ? (
-          <div className="pointer-events-none absolute left-4 top-3 z-20 flex max-w-[calc(100%-32px)] flex-wrap items-start gap-2">
+        <div
+          className={[
+            'overflow-hidden transition-[max-height,opacity,margin-bottom] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
+            hasTopReferences ? 'mb-3 opacity-100' : 'mb-0 opacity-0',
+          ].join(' ')}
+          style={{ maxHeight: hasTopReferences ? topReferencesHeight || 120 : 0 }}
+        >
+          <div ref={topReferencesRef} className="pointer-events-none flex max-w-full flex-wrap items-start gap-2">
             {selectedReferences.map((reference) => (
               <span
                 key={reference.id}
@@ -4000,27 +5005,59 @@ function SceneInputCard({
               </span>
             ))}
           </div>
-        ) : null}
+        </div>
 
-        <div className="absolute bottom-4 left-4 z-20">
-          <div className="flex items-end gap-2">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  aria-label="Add Reference"
-                  onClick={() => inputRef.current?.click()}
-                  className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.88)] text-[var(--foreground)] transition-colors hover:bg-[rgba(39,39,40,0.92)]"
-                >
-                  <Plus className="size-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Add Reference</TooltipContent>
-            </Tooltip>
+        <div
+          data-testid={`${inputId}-composer-shell`}
+          className="min-h-0 flex-1 overflow-hidden rounded-[20px]"
+        >
+          <PromptComposer
+            ref={composerRef}
+            ariaLabel={label ?? placeholder}
+            placeholder={placeholder}
+            isExpanded
+            hasReferenceImages={hasTopReferences || hasBottomAttachments}
+            mentionCandidates={mentionCandidates}
+            onTextChange={(value) => {
+              setPrompt(value);
+              onPromptChange?.(value);
+            }}
+            onMentionMatch={setMentionMatch}
+            onMentionIdsChange={setMentionIds}
+            onCursorIndexChange={setCursorIndex}
+            onScrollTopChange={setScrollTop}
+            onMentionNavigationKey={handleMentionNavigation}
+            onPasteFiles={appendReferenceFiles}
+            onEnterWithMention={
+              mentionOptions[activeMentionIndex]
+                ? () => insertMention(mentionOptions[activeMentionIndex])
+                : undefined
+            }
+          />
+        </div>
+
+        <div
+          data-testid={`${inputId}-attachments-row`}
+          className="mt-3 flex items-end gap-2"
+        >
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label="Add Reference"
+                onClick={() => inputRef.current?.click()}
+                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.88)] text-[var(--foreground)] transition-colors hover:bg-[rgba(39,39,40,0.92)]"
+              >
+                <Plus className="size-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Add Reference</TooltipContent>
+          </Tooltip>
+          <div className="flex min-w-0 items-end gap-2 overflow-x-auto">
             {attachedReferences.map((attachment) => (
               <div
                 key={attachment.id}
-                className="group relative h-[70px] w-[120px] overflow-hidden rounded-[22px] border border-[var(--border-soft)]"
+                className="group relative h-[70px] w-[120px] shrink-0 overflow-hidden rounded-[22px] border border-[var(--border-soft)]"
               >
                 <img
                   src={attachment.previewUrl}
@@ -4050,28 +5087,6 @@ function SceneInputCard({
               void appendReferenceFiles(event.target.files);
               event.target.value = '';
             }}
-          />
-        </div>
-
-        <div className="h-full overflow-hidden rounded-[20px]">
-          <PromptComposer
-            ref={composerRef}
-            ariaLabel={label ?? placeholder}
-            placeholder={placeholder}
-            isExpanded
-            hasReferenceImages={hasTopReferences || hasBottomAttachments}
-            onTextChange={setPrompt}
-            onMentionMatch={setMentionMatch}
-            onMentionIdsChange={setMentionIds}
-            onCursorIndexChange={setCursorIndex}
-            onScrollTopChange={setScrollTop}
-            onMentionNavigationKey={handleMentionNavigation}
-            onPasteFiles={appendReferenceFiles}
-            onEnterWithMention={
-              mentionOptions[activeMentionIndex]
-                ? () => insertMention(mentionOptions[activeMentionIndex])
-                : undefined
-            }
           />
         </div>
 
@@ -4142,6 +5157,11 @@ function SceneFrameAccordion({
   savedReferences,
   onRename,
   onToggleRename,
+  onPromptChange,
+  onReferencesChange,
+  onGenerate,
+  isGenerating,
+  isGenerationDisabled,
   onToggle,
 }: {
   frame: SceneFrame;
@@ -4150,6 +5170,11 @@ function SceneFrameAccordion({
   savedReferences: SavedReferenceImage[];
   onRename: (title: string) => void;
   onToggleRename: () => void;
+  onPromptChange: (prompt: string) => void;
+  onReferencesChange: (references: SceneReferenceAttachment[]) => void;
+  onGenerate: () => void;
+  isGenerating: boolean;
+  isGenerationDisabled: boolean;
   onToggle: () => void;
 }) {
   return (
@@ -4187,6 +5212,18 @@ function SceneFrameAccordion({
         )}
         <button
           type="button"
+          aria-label={isGenerating ? `Generating ${frame.title}` : `Generate ${frame.title}`}
+          disabled={isGenerationDisabled}
+          onClick={(event) => {
+            event.stopPropagation();
+            onGenerate();
+          }}
+          className="inline-flex h-9 w-9 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)] disabled:cursor-default disabled:opacity-100"
+        >
+          {isGenerating ? <LoaderCircle className="size-4 animate-spin text-[var(--accent)]" /> : <Play className="size-4 fill-current" />}
+        </button>
+        <button
+          type="button"
           aria-label={`Rename ${frame.title}`}
           onClick={(event) => {
             event.stopPropagation();
@@ -4217,7 +5254,11 @@ function SceneFrameAccordion({
             label={null}
             placeholder={index === 0 ? 'Describe the opening frame' : 'Describe this frame'}
             savedReferences={savedReferences}
+            initialPrompt={frame.prompt}
+            onPromptChange={onPromptChange}
+            onReferencesChange={onReferencesChange}
             testId={`scene-frame-${index + 1}`}
+            baseHeight={212}
           />
         </div>
       </div>
@@ -4413,6 +5454,20 @@ function ImagePlayerDialog({
   const generationModelLabel = session?.image.modelLabel ?? session?.image.modelId ?? null;
   const generationDuration = formatGenerationDuration(session?.image.durationMs);
   const generationReferences = session?.image.references ?? [];
+  const extraPromptMentionCandidates = useMemo(() => {
+    if (!session) return [];
+
+    return [
+      ...savedReferences.map((reference) => ({
+        id: reference.id,
+        title: reference.title,
+      })),
+      ...session.characterReferences.map((reference) => ({
+        id: reference.id,
+        title: reference.name.replace(/\.[^/.]+$/, ''),
+      })),
+    ];
+  }, [savedReferences, session]);
   const extraPromptMentionOptions = useMemo(() => {
     if (!session || !extraPromptMentionMatch) return [];
 
@@ -4728,6 +5783,7 @@ function ImagePlayerDialog({
                         placeholder="Optional guidance for zoom, placement, or action"
                         isExpanded
                         hasReferenceImages={false}
+                        mentionCandidates={extraPromptMentionCandidates}
                         onTextChange={onExtraPromptChange}
                         onMentionMatch={setExtraPromptMentionMatch}
                         onMentionIdsChange={onExtraPromptMentionIdsChange}
@@ -5179,30 +6235,28 @@ function ReferencesWorkspace({
 }) {
   const filteredReferences = useMemo(() => {
     const scoped = references.filter((reference) => reference.category === route);
-    if (route !== 'environment') return scoped;
-
-    const byEnvironment = new Map<string, SavedReferenceImage>();
+    const groupedReferences = new Map<string, SavedReferenceImage>();
     for (const reference of scoped) {
-      const key = reference.environmentId ?? reference.id;
-      const current = byEnvironment.get(key);
+      const key = reference.collectionId ?? reference.environmentId ?? reference.id;
+      const current = groupedReferences.get(key);
       if (!current) {
-        byEnvironment.set(key, reference);
+        groupedReferences.set(key, reference);
         continue;
       }
       const isEarlier =
         reference.createdAt < current.createdAt ||
         (reference.createdAt === current.createdAt && reference.id < current.id);
       if (isEarlier) {
-        byEnvironment.set(key, reference);
+        groupedReferences.set(key, reference);
       }
     }
-    return [...byEnvironment.values()];
+    return [...groupedReferences.values()];
   }, [references, route]);
   const copyByRoute: Record<ReferenceLibraryRoute, { title: string; description: string; addLabel: string }> = {
     characters: {
       title: 'Characters',
       description: 'Save character visuals and identity notes for consistent people across generations.',
-      addLabel: 'Add character',
+      addLabel: 'Add character images',
     },
     environment: {
       title: 'Environment',
@@ -5212,7 +6266,7 @@ function ReferencesWorkspace({
     objects: {
       title: 'Objects',
       description: 'Save props, products, and object details the model should preserve between shots.',
-      addLabel: 'Add object',
+      addLabel: 'Add item images',
     },
   };
   const routeCopy = copyByRoute[route];
@@ -5316,7 +6370,9 @@ function AddReferenceDialog({
   open,
   onOpenChange,
   onSubmit,
-  route,
+  initialRoute,
+  initialFiles,
+  onGenerateDescriptions,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -5327,8 +6383,27 @@ function AddReferenceDialog({
     route: ReferenceLibraryRoute;
     attachmentDescriptions?: Record<string, string>;
   }) => void | Promise<void>;
-  route: ReferenceLibraryRoute;
+  initialRoute: ReferenceLibraryRoute;
+  initialFiles?: File[];
+  onGenerateDescriptions: (input: {
+    category: ReferenceLibraryRoute;
+    title?: string;
+    attachments: Array<{
+      id: string;
+      name: string;
+      mimeType: string;
+      bytesBase64: string;
+    }>;
+  }) => Promise<{
+    title: string;
+    description: string;
+    attachments: Array<{
+      id: string;
+      description: string;
+    }>;
+  }>;
 }) {
+  const [route, setRoute] = useState<ReferenceLibraryRoute>(initialRoute);
   const [files, setFiles] = useState<File[]>([]);
   const [isDragActive, setIsDragActive] = useState(false);
   const [title, setTitle] = useState('');
@@ -5337,10 +6412,9 @@ function AddReferenceDialog({
   const [isAttachmentDescriptionDialogOpen, setIsAttachmentDescriptionDialogOpen] = useState(false);
   const [editingAttachmentKey, setEditingAttachmentKey] = useState<string | null>(null);
   const [attachmentDescriptionDraft, setAttachmentDescriptionDraft] = useState('');
+  const [isGeneratingDescriptions, setIsGeneratingDescriptions] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
-  const shouldAppendAttachmentsRef = useRef(false);
   const trimmedTitle = title.trim();
-  const supportsMultiple = route === 'environment';
   const selectedFilePreviews = useMemo(
     () =>
       files.map((file) => ({
@@ -5352,18 +6426,33 @@ function AddReferenceDialog({
   );
 
   useEffect(() => {
-    if (!open) {
-      setFiles([]);
-      setIsDragActive(false);
-      setTitle('');
-      setDescription('');
-      setAttachmentDescriptions({});
-      setIsAttachmentDescriptionDialogOpen(false);
-      setEditingAttachmentKey(null);
-      setAttachmentDescriptionDraft('');
-      shouldAppendAttachmentsRef.current = false;
+      if (!open) {
+        setFiles([]);
+        setRoute(initialRoute);
+        setIsDragActive(false);
+        setTitle('');
+        setDescription('');
+        setAttachmentDescriptions({});
+        setIsAttachmentDescriptionDialogOpen(false);
+        setEditingAttachmentKey(null);
+        setAttachmentDescriptionDraft('');
+        setIsGeneratingDescriptions(false);
+        return;
+      }
+
+      if (initialFiles && initialFiles.length > 0) {
+        setFiles(initialFiles);
+        setAttachmentDescriptions(
+          Object.fromEntries(initialFiles.map((file) => [`${file.name}-${file.size}-${file.lastModified}`, '']))
+        );
+      }
+  }, [initialFiles, initialRoute, open]);
+
+  useEffect(() => {
+    if (open) {
+      setRoute(initialRoute);
     }
-  }, [open]);
+  }, [initialRoute, open]);
 
   useEffect(() => {
     return () => {
@@ -5380,13 +6469,8 @@ function AddReferenceDialog({
   function acceptFileList(nextInputFiles: FileList | File[]) {
     const nextFiles = Array.from(nextInputFiles).filter((item) => item.type.startsWith('image/'));
     if (nextFiles.length === 0) return;
-    const shouldAppend = supportsMultiple && shouldAppendAttachmentsRef.current;
 
     setFiles((current) => {
-      const canAppend = shouldAppend && current.length > 0;
-      if (!canAppend) {
-        return nextFiles;
-      }
       const byKey = new Map(current.map((file) => [buildAttachmentKey(file), file]));
       for (const file of nextFiles) {
         byKey.set(buildAttachmentKey(file), file);
@@ -5394,14 +6478,6 @@ function AddReferenceDialog({
       return [...byKey.values()];
     });
     setAttachmentDescriptions((current) => {
-      if (!shouldAppend) {
-        const reset: Record<string, string> = {};
-        for (const file of nextFiles) {
-          const key = buildAttachmentKey(file);
-          reset[key] = current[key] ?? '';
-        }
-        return reset;
-      }
       const next = { ...current };
       for (const file of nextFiles) {
         const key = buildAttachmentKey(file);
@@ -5409,7 +6485,6 @@ function AddReferenceDialog({
       }
       return next;
     });
-    shouldAppendAttachmentsRef.current = false;
   }
 
   function removeSelectedFile(fileKey: string) {
@@ -5453,32 +6528,134 @@ function AddReferenceDialog({
       title: trimmedTitle,
       description: description.trim() || undefined,
       route,
-      attachmentDescriptions: supportsMultiple ? attachmentDescriptions : undefined,
+      attachmentDescriptions,
     });
     onOpenChange(false);
   }
+
+  async function handleGenerateDescriptions() {
+    if (files.length === 0) return;
+    setIsGeneratingDescriptions(true);
+    try {
+      const attachments = await Promise.all(
+        files.map(async (file) => {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          return {
+            id: buildAttachmentKey(file),
+            name: file.name,
+            mimeType: file.type || 'image/png',
+            bytesBase64: bytesToBase64(bytes),
+          };
+        })
+      );
+      const result = await onGenerateDescriptions({
+        category: route,
+        title: trimmedTitle || undefined,
+        attachments,
+      });
+      setTitle((current) => current.trim() || result.title);
+      setDescription(result.description);
+      setAttachmentDescriptions((current) => {
+        const next = { ...current };
+        for (const attachment of result.attachments) {
+          next[attachment.id] = attachment.description;
+        }
+        return next;
+      });
+      toast.success('Descriptions generated');
+    } finally {
+      setIsGeneratingDescriptions(false);
+    }
+  }
+
+  const routeCopy: Record<ReferenceLibraryRoute, { title: string; description: string; titlePlaceholder: string }> = {
+    objects: {
+      title: 'Item reference',
+      description: 'Group product, prop, or object images under one reusable reference.',
+      titlePlaceholder: 'Orange race bike',
+    },
+    environment: {
+      title: 'Environment reference',
+      description: 'Group multiple environment views under one shared continuity reference.',
+      titlePlaceholder: 'Sunlit transit hangar',
+    },
+    characters: {
+      title: 'Character reference',
+      description: 'Group multiple character images under one reusable identity reference.',
+      titlePlaceholder: 'Curly-haired pilot kid',
+    },
+  };
+  const routeOptions = [
+    { value: 'objects', label: 'Item' },
+    { value: 'environment', label: 'Environment' },
+    { value: 'characters', label: 'Character' },
+  ] as const;
+  const currentCopy = routeCopy[route];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-[860px]">
         <DialogHeader>
-          <DialogTitle>{supportsMultiple ? 'Add environment references' : 'Add reference'}</DialogTitle>
-          <DialogDescription>
-            {supportsMultiple
-              ? 'Save multiple environment images with shared guidance Codex can reuse during generation.'
-              : 'Save an image and guidance Codex can reuse during generation.'}
-          </DialogDescription>
+          <DialogTitle>Add reference</DialogTitle>
+          <DialogDescription>{currentCopy.description}</DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="mt-5 space-y-4">
           <div className="space-y-2">
-            <label htmlFor="reference-image" className="text-[13px] font-medium text-[var(--foreground)]">
-              Image
-            </label>
+            <div className="text-[13px] font-medium text-[var(--foreground)]">Type</div>
+            <div className="inline-flex rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] p-1">
+              {routeOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => setRoute(option.value)}
+                  className={[
+                    'relative inline-flex min-w-[104px] items-center justify-center rounded-full px-3 py-2 text-[13px] transition-colors',
+                    route === option.value ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
+                  ].join(' ')}
+                >
+                  {route === option.value ? (
+                    <motion.span
+                      layoutId="reference-route-pill"
+                      className="absolute inset-0 rounded-full bg-[var(--surface)]"
+                      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                    />
+                  ) : null}
+                  <span className="relative z-10">{option.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="reference-image" className="text-[13px] font-medium text-[var(--foreground)]">
+                Images
+              </label>
+              <Button
+                type="button"
+                variant="surface"
+                size="sm"
+                className="h-8 rounded-full border-white/8 bg-[var(--surface2)] px-3 hover:bg-[var(--surface)]"
+                onClick={() => {
+                  void handleGenerateDescriptions().catch((error) => {
+                    console.error('Failed to generate reference descriptions', error);
+                    toast.error(getErrorMessage(error, 'Failed to generate descriptions.'));
+                  });
+                }}
+                disabled={files.length === 0 || isGeneratingDescriptions}
+              >
+                {isGeneratingDescriptions ? (
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                ) : (
+                  <WandSparkles className="size-3.5" />
+                )}
+                Describe all
+              </Button>
+            </div>
             <div
               onClick={() => {
                 if (files.length === 0) {
-                  shouldAppendAttachmentsRef.current = false;
                   attachmentInputRef.current?.click();
                 }
               }}
@@ -5508,15 +6685,15 @@ function AddReferenceDialog({
                   : 'border-[var(--border-soft)] hover:border-[var(--border-strong)] hover:bg-[var(--surface3)]',
               ].join(' ')}
             >
-              <Input
-                id="reference-image"
-                ref={attachmentInputRef}
-                type="file"
-                accept="image/*"
-                multiple={supportsMultiple}
-                className="sr-only"
-                onChange={(event) => acceptFileList(event.target.files ?? [])}
-              />
+                <Input
+                  id="reference-image"
+                  ref={attachmentInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="sr-only"
+                  onChange={(event) => acceptFileList(event.target.files ?? [])}
+                />
               {files.length === 0 ? (
                 <motion.div
                   initial={false}
@@ -5532,7 +6709,6 @@ function AddReferenceDialog({
                     type="button"
                     onClick={(event) => {
                       event.stopPropagation();
-                      shouldAppendAttachmentsRef.current = false;
                       attachmentInputRef.current?.click();
                     }}
                     className="mb-4 inline-flex h-14 w-14 items-center justify-center rounded-[20px] border border-[var(--border-soft)] bg-[var(--surface)] text-[var(--foreground)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface3)]"
@@ -5543,7 +6719,7 @@ function AddReferenceDialog({
                     {isDragActive ? 'Release to add images' : 'Drop an image here'}
                   </div>
                   <div className="mt-1 text-[12px] text-[var(--muted-foreground)]">
-                    {supportsMultiple ? 'Use + or drop multiple files' : 'Use + or drop one file'}
+                    Use + or drop multiple files
                   </div>
                 </motion.div>
               ) : (
@@ -5552,10 +6728,7 @@ function AddReferenceDialog({
                     <div className="text-[12px] text-[var(--muted-foreground)]">{files.length} selected</div>
                     <button
                       type="button"
-                      onClick={() => {
-                        shouldAppendAttachmentsRef.current = supportsMultiple;
-                        attachmentInputRef.current?.click();
-                      }}
+                      onClick={() => attachmentInputRef.current?.click()}
                       className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[var(--surface)] text-[var(--foreground)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface3)]"
                       aria-label="Add images"
                     >
@@ -5596,11 +6769,9 @@ function AddReferenceDialog({
                             </button>
                           </div>
                         </div>
-                        {supportsMultiple ? (
-                          <div className="border-t border-[var(--border-soft)] px-2 py-1.5 text-[11px] text-[var(--muted-foreground)]">
-                            {attachmentDescriptions[file.key]?.trim() ? 'Description added' : 'No description yet'}
-                          </div>
-                        ) : null}
+                        <div className="border-t border-[var(--border-soft)] px-2 py-1.5 text-[11px] text-[var(--muted-foreground)]">
+                          {attachmentDescriptions[file.key]?.trim() ? 'Description added' : 'No description yet'}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -5617,7 +6788,7 @@ function AddReferenceDialog({
               id="reference-title"
               value={title}
               onChange={(event) => setTitle(event.target.value)}
-              placeholder={supportsMultiple ? 'Studio apartment loft' : 'Character face, product angle, palette...'}
+              placeholder={currentCopy.titlePlaceholder}
               autoFocus
             />
           </div>
@@ -5630,11 +6801,7 @@ function AddReferenceDialog({
               id="reference-description"
               value={description}
               onChange={(event) => setDescription(event.target.value)}
-              placeholder={
-                supportsMultiple
-                  ? 'Shared environment guidance (optional). Individual image notes are edited with the pencil icon.'
-                  : 'Optional direction for how Codex should use this reference'
-              }
+              placeholder="Shared guidance. Individual image notes are edited with the pencil icon."
               className="min-h-[104px] w-full resize-none rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] px-4 py-3 text-[14px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[var(--border-strong)]"
             />
           </div>
@@ -5649,7 +6816,7 @@ function AddReferenceDialog({
               Cancel
             </Button>
             <Button type="submit" disabled={files.length === 0 || !trimmedTitle}>
-              {supportsMultiple ? 'Save references' : 'Save reference'}
+              Save reference
             </Button>
           </div>
         </form>
@@ -5658,7 +6825,7 @@ function AddReferenceDialog({
         <DialogContent className="max-w-[520px]">
           <DialogHeader>
             <DialogTitle>Attachment Description</DialogTitle>
-            <DialogDescription>Add image-specific notes for this environment attachment.</DialogDescription>
+            <DialogDescription>Add image-specific notes for this reference image.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3 pt-2">
             <textarea
@@ -5699,6 +6866,7 @@ function EditReferenceDialog({
   reference: {
     id: string;
     category: ReferenceLibraryRoute;
+    collectionId?: string;
     environmentId?: string;
     title: string;
     description?: string;
@@ -5713,6 +6881,7 @@ function EditReferenceDialog({
   onSubmit: (input: {
     id: string;
     category: ReferenceLibraryRoute;
+    collectionId?: string;
     environmentId?: string;
     title: string;
     description?: string;
@@ -5776,7 +6945,6 @@ function EditReferenceDialog({
           URL.revokeObjectURL(attachment.previewUrl);
         }
       }
-      if (reference.category !== 'environment') return [];
       return (reference.attachments ?? []).map((attachment, index) => ({
         localKey: attachment.id ?? `${attachment.name}-${index}`,
         id: attachment.id,
@@ -5797,7 +6965,7 @@ function EditReferenceDialog({
       : reference?.category === 'objects'
         ? 'object'
         : 'character';
-  const isEnvironment = reference?.category === 'environment';
+  const isCollection = (reference?.attachments?.length ?? 0) > 0 || Boolean(reference?.collectionId) || reference?.category === 'environment';
 
   function openAttachmentDescriptionDialog(localKey: string) {
     const attachment = attachments.find((item) => item.localKey === localKey);
@@ -5855,7 +7023,7 @@ function EditReferenceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className={isEnvironment ? 'max-w-[860px]' : 'max-w-[560px]'}>
+      <DialogContent className={isCollection ? 'max-w-[860px]' : 'max-w-[560px]'}>
         <DialogHeader>
           <DialogTitle>Edit {categoryLabel}</DialogTitle>
           <DialogDescription>Update the reference metadata.</DialogDescription>
@@ -5868,10 +7036,11 @@ function EditReferenceDialog({
             await onSubmit({
               id: reference.id,
               category: reference.category,
+              collectionId: reference.collectionId,
               environmentId: reference.environmentId,
               title: trimmedTitle,
               description: description.trim() || undefined,
-              attachments: isEnvironment
+              attachments: isCollection
                 ? attachments.map((attachment) => ({
                     id: attachment.id,
                     name: attachment.name,
@@ -5884,7 +7053,7 @@ function EditReferenceDialog({
             onOpenChange(false);
           }}
         >
-          {isEnvironment ? (
+          {isCollection ? (
             <div className="space-y-2">
               <div className="text-[13px] font-medium text-[var(--foreground)]">Images</div>
               <div className="rounded-[20px] border border-[var(--border-soft)] bg-[var(--surface2)] p-3">
@@ -5986,7 +7155,7 @@ function EditReferenceDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={!trimmedTitle || (isEnvironment && attachments.length === 0)}>
+            <Button type="submit" disabled={!trimmedTitle || (isCollection && attachments.length === 0)}>
               Save changes
             </Button>
           </div>
@@ -5996,7 +7165,7 @@ function EditReferenceDialog({
         <DialogContent className="max-w-[520px]">
           <DialogHeader>
             <DialogTitle>Attachment Description</DialogTitle>
-            <DialogDescription>Add image-specific notes for this environment attachment.</DialogDescription>
+            <DialogDescription>Add image-specific notes for this reference image.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3 pt-2">
             <textarea

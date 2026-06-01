@@ -31,6 +31,8 @@ describe('createGenerationDatabase', () => {
     const project = await database.createProject({
       id: 'project_1',
       name: 'Documents',
+      systemInstructions: '',
+      artStyle: '',
       createdAt: '2026-05-26T10:59:00.000Z',
       updatedAt: '2026-05-26T10:59:00.000Z',
     });
@@ -267,6 +269,8 @@ describe('createGenerationDatabase', () => {
     await database.createProject({
       id: 'project_1',
       name: 'Documents',
+      systemInstructions: '',
+      artStyle: '',
       createdAt: '2026-05-26T11:00:00.000Z',
       updatedAt: '2026-05-26T11:00:00.000Z',
     });
@@ -324,6 +328,8 @@ describe('createGenerationDatabase', () => {
     await database.createProject({
       id: 'project_1',
       name: 'Documents',
+      systemInstructions: '',
+      artStyle: '',
       createdAt: '2026-05-26T11:00:00.000Z',
       updatedAt: '2026-05-26T11:00:00.000Z',
     });
@@ -410,6 +416,293 @@ describe('createGenerationDatabase', () => {
         createdAt: '2026-05-26T11:00:00.000Z',
       },
     ]);
+
+    database.close();
+  });
+
+  it('stores scene groups, frames, references, runs, and frame assets by thread', async () => {
+    const database = createGenerationDatabase(makeTempDatabasePath());
+
+    await database.createProject({
+      id: 'project_1',
+      name: 'Scenes',
+      systemInstructions: '',
+      artStyle: '',
+      createdAt: '2026-06-01T10:00:00.000Z',
+      updatedAt: '2026-06-01T10:00:00.000Z',
+    });
+    await database.createThread({
+      id: 'thread_1',
+      projectId: 'project_1',
+      name: 'Thread One',
+      createdAt: '2026-06-01T10:01:00.000Z',
+      updatedAt: '2026-06-01T10:01:00.000Z',
+    });
+
+    await database.createSceneGroup({
+      id: 'scene_1',
+      threadId: 'thread_1',
+      title: 'Scene 1',
+      prompt: 'Base control room continuity.',
+      tocOrder: 1,
+      createdAt: '2026-06-01T10:02:00.000Z',
+      updatedAt: '2026-06-01T10:02:00.000Z',
+    });
+    await database.createSceneFrame({
+      id: 'frame_1',
+      sceneGroupId: 'scene_1',
+      title: 'Frame 1',
+      prompt: 'Wide arrival shot.',
+      frameOrder: 1,
+      createdAt: '2026-06-01T10:03:00.000Z',
+      updatedAt: '2026-06-01T10:03:00.000Z',
+    });
+    await database.createSceneFrame({
+      id: 'frame_2',
+      sceneGroupId: 'scene_1',
+      title: 'Frame 2',
+      prompt: 'Closer console angle.',
+      frameOrder: 2,
+      createdAt: '2026-06-01T10:04:00.000Z',
+      updatedAt: '2026-06-01T10:04:00.000Z',
+    });
+    await database.replaceSceneFrameReferences('frame_2', [
+      {
+        id: 'frame_ref_1',
+        sceneFrameId: 'frame_2',
+        referenceKind: 'uploaded_attachment',
+        referenceId: null,
+        name: 'console.png',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-06-01T10:05:00.000Z',
+      },
+    ]);
+    await database.createSceneGroupRun({
+      id: 'scene_run_1',
+      sceneGroupId: 'scene_1',
+      threadId: 'thread_1',
+      status: 'succeeded',
+      provider: 'codex',
+      modelId: 'gpt-5.4-mini',
+      modelLabel: 'Codex / GPT-5.4 mini',
+      requestedFrameCount: 2,
+      errorMessage: null,
+      durationMs: 12500,
+      createdAt: '2026-06-01T10:06:00.000Z',
+      updatedAt: '2026-06-01T10:06:12.000Z',
+    });
+    await database.insertSceneFrameAsset({
+      id: 'scene_asset_1',
+      sceneGroupRunId: 'scene_run_1',
+      sceneFrameId: 'frame_2',
+      outputIndex: 0,
+      originalPath: '/tmp/scenes/frame-2-a.png',
+      storedPath: '/data/scenes/frame-2-a.png',
+      fileName: 'frame-2-a.png',
+      mimeType: 'image/png',
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-06-01T10:06:13.000Z',
+    });
+    await database.insertSceneFrameAsset({
+      id: 'scene_asset_2',
+      sceneGroupRunId: 'scene_run_1',
+      sceneFrameId: 'frame_2',
+      outputIndex: 1,
+      originalPath: '/tmp/scenes/frame-2-b.png',
+      storedPath: '/data/scenes/frame-2-b.png',
+      fileName: 'frame-2-b.png',
+      mimeType: 'image/png',
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-06-01T10:06:14.000Z',
+    });
+
+    await database.updateSceneFrame('frame_1', {
+      title: 'Frame 1 Updated',
+      prompt: 'Updated wide arrival shot.',
+      frameOrder: 1,
+      updatedAt: '2026-06-01T10:07:00.000Z',
+    });
+
+    expect(await database.listSceneGroupsByThread('thread_1')).toEqual([
+      {
+        id: 'scene_1',
+        threadId: 'thread_1',
+        title: 'Scene 1',
+        prompt: 'Base control room continuity.',
+        tocOrder: 1,
+        createdAt: '2026-06-01T10:02:00.000Z',
+        updatedAt: '2026-06-01T10:02:00.000Z',
+        frames: [
+          {
+            id: 'frame_1',
+            sceneGroupId: 'scene_1',
+            title: 'Frame 1 Updated',
+            prompt: 'Updated wide arrival shot.',
+            frameOrder: 1,
+            createdAt: '2026-06-01T10:03:00.000Z',
+            updatedAt: '2026-06-01T10:07:00.000Z',
+            references: [],
+            assets: [],
+          },
+          {
+            id: 'frame_2',
+            sceneGroupId: 'scene_1',
+            title: 'Frame 2',
+            prompt: 'Closer console angle.',
+            frameOrder: 2,
+            createdAt: '2026-06-01T10:04:00.000Z',
+            updatedAt: '2026-06-01T10:04:00.000Z',
+            references: [
+              {
+                id: 'frame_ref_1',
+                sceneFrameId: 'frame_2',
+                referenceKind: 'uploaded_attachment',
+                referenceId: null,
+                name: 'console.png',
+                mimeType: 'image/png',
+                bytesBase64: 'AQID',
+                createdAt: '2026-06-01T10:05:00.000Z',
+              },
+            ],
+            assets: [
+              {
+                id: 'scene_asset_1',
+                sceneGroupRunId: 'scene_run_1',
+                sceneFrameId: 'frame_2',
+                outputIndex: 0,
+                originalPath: '/tmp/scenes/frame-2-a.png',
+                storedPath: '/data/scenes/frame-2-a.png',
+                fileName: 'frame-2-a.png',
+                mimeType: 'image/png',
+                width: 1920,
+                height: 1080,
+                createdAt: '2026-06-01T10:06:13.000Z',
+              },
+              {
+                id: 'scene_asset_2',
+                sceneGroupRunId: 'scene_run_1',
+                sceneFrameId: 'frame_2',
+                outputIndex: 1,
+                originalPath: '/tmp/scenes/frame-2-b.png',
+                storedPath: '/data/scenes/frame-2-b.png',
+                fileName: 'frame-2-b.png',
+                mimeType: 'image/png',
+                width: 1920,
+                height: 1080,
+                createdAt: '2026-06-01T10:06:14.000Z',
+              },
+            ],
+          },
+        ],
+        runs: [
+          {
+            id: 'scene_run_1',
+            sceneGroupId: 'scene_1',
+            threadId: 'thread_1',
+            status: 'succeeded',
+            provider: 'codex',
+            modelId: 'gpt-5.4-mini',
+            modelLabel: 'Codex / GPT-5.4 mini',
+            requestedFrameCount: 2,
+            errorMessage: null,
+            durationMs: 12500,
+            createdAt: '2026-06-01T10:06:00.000Z',
+            updatedAt: '2026-06-01T10:06:12.000Z',
+          },
+        ],
+      },
+    ]);
+
+    database.close();
+  });
+
+  it('deletes thread-scoped scene data before deleting the thread row', async () => {
+    const database = createGenerationDatabase(makeTempDatabasePath());
+
+    await database.createProject({
+      id: 'project_1',
+      name: 'Scenes',
+      systemInstructions: '',
+      artStyle: '',
+      createdAt: '2026-06-01T10:00:00.000Z',
+      updatedAt: '2026-06-01T10:00:00.000Z',
+    });
+    await database.createThread({
+      id: 'thread_1',
+      projectId: 'project_1',
+      name: 'Thread One',
+      createdAt: '2026-06-01T10:01:00.000Z',
+      updatedAt: '2026-06-01T10:01:00.000Z',
+    });
+    await database.createSceneGroup({
+      id: 'scene_1',
+      threadId: 'thread_1',
+      title: 'Scene 1',
+      prompt: 'Keep the room coherent.',
+      tocOrder: 1,
+      createdAt: '2026-06-01T10:02:00.000Z',
+      updatedAt: '2026-06-01T10:02:00.000Z',
+    });
+    await database.createSceneFrame({
+      id: 'frame_1',
+      sceneGroupId: 'scene_1',
+      title: 'Frame 1',
+      prompt: 'Wide room shot.',
+      frameOrder: 1,
+      createdAt: '2026-06-01T10:03:00.000Z',
+      updatedAt: '2026-06-01T10:03:00.000Z',
+    });
+    await database.replaceSceneFrameReferences('frame_1', [
+      {
+        id: 'frame_ref_1',
+        sceneFrameId: 'frame_1',
+        referenceKind: 'uploaded_attachment',
+        referenceId: null,
+        name: 'layout.png',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-06-01T10:04:00.000Z',
+      },
+    ]);
+    await database.createSceneGroupRun({
+      id: 'scene_run_1',
+      sceneGroupId: 'scene_1',
+      threadId: 'thread_1',
+      status: 'succeeded',
+      provider: 'codex',
+      modelId: 'gpt-5.4-mini',
+      modelLabel: 'Codex / GPT-5.4 mini',
+      requestedFrameCount: 1,
+      errorMessage: null,
+      durationMs: 1000,
+      createdAt: '2026-06-01T10:05:00.000Z',
+      updatedAt: '2026-06-01T10:05:01.000Z',
+    });
+    await database.insertSceneFrameAsset({
+      id: 'scene_asset_1',
+      sceneGroupRunId: 'scene_run_1',
+      sceneFrameId: 'frame_1',
+      outputIndex: 0,
+      originalPath: '/tmp/scenes/frame-1-a.png',
+      storedPath: '/data/scenes/frame-1-a.png',
+      fileName: 'frame-1-a.png',
+      mimeType: 'image/png',
+      width: 1280,
+      height: 720,
+      createdAt: '2026-06-01T10:05:02.000Z',
+    });
+
+    await expect(database.deleteThread('thread_1')).resolves.toEqual([]);
+    await expect(database.listProjectsWithThreads()).resolves.toEqual([
+      expect.objectContaining({
+        id: 'project_1',
+        threads: [],
+      }),
+    ]);
+    await expect(database.listSceneGroupsByThread('thread_1')).resolves.toEqual([]);
 
     database.close();
   });

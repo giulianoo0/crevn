@@ -17,6 +17,8 @@ const MANUAL_PROJECT_NAME = 'New Project';
 const DEFAULT_GENERATION_PROVIDER = 'codex';
 const DEFAULT_CODEX_MODEL_ID = 'codex-gpt-5-4-mini';
 const DEFAULT_ANTIGRAVITY_MODEL_ID = 'antigravity-gemini-3-5-flash-low';
+const CODEX_DEEP_TRACE_ENABLED = process.env.CRENV_CODEX_TRACE !== '0';
+const CANCEL_EXIT_GRACE_MS = 2000;
 
 const CODEX_MODEL_BY_ID = {
   'codex-gpt-5-4-mini': 'gpt-5.4-mini',
@@ -46,6 +48,145 @@ const ANTIGRAVITY_MODEL_BY_ID = {
   'antigravity-claude-opus-4-6': 'Claude Opus 4.6',
   'antigravity-gpt-oss-120b': 'GPT-OSS-120b',
 };
+
+function formatTraceElapsedMs(startedAtMs) {
+  return `+${Date.now() - startedAtMs}ms`;
+}
+
+function registerSceneGroupCancelableRun(activeSceneGroupCancellations, sceneGroupId, cancelableRun) {
+  const current = activeSceneGroupCancellations.get(sceneGroupId) ?? [];
+  current.push(cancelableRun);
+  activeSceneGroupCancellations.set(sceneGroupId, current);
+}
+
+function cancelSceneGroupCancelableRuns(activeSceneGroupCancellations, sceneGroupId, reason = 'user_requested_scene_stop') {
+  const activeRuns = activeSceneGroupCancellations.get(sceneGroupId) ?? [];
+  let canceled = false;
+  for (const activeRun of activeRuns) {
+    canceled = activeRun.cancel(reason) === true || canceled;
+  }
+  return canceled;
+}
+
+function buildSceneFramePrompt({
+  sceneGroupTitle,
+  scenePrompt,
+  frames,
+  targetFrameId,
+  frameOverrideMap,
+  referencesByFrameId,
+}) {
+  const targetIndex = frames.findIndex((frame) => frame.id === targetFrameId);
+  if (targetIndex === -1) {
+    throw new Error('Target frame not found.');
+  }
+
+  const targetFrame = frames[targetIndex];
+  const targetOverride = frameOverrideMap.get(targetFrame.id);
+  const targetReferences = referencesByFrameId.get(targetFrame.id) ?? [];
+
+  return [
+    `Scene group: ${sceneGroupTitle}`,
+    scenePrompt
+      ? `Scene continuity brief: ${scenePrompt}`
+      : 'Scene continuity brief: keep the environment coherent across all frames.',
+    `You are generating only one frame from a larger scene sequence: Frame ${targetIndex + 1}.`,
+    `Generate only this target frame: ${targetOverride?.title || targetFrame.title}.`,
+    'Use only the scene continuity brief, attached references, and this target frame prompt.',
+    'Keep environment identity, materials, layout, lighting direction, palette, and character continuity stable.',
+    'Let angle, framing, and conversational coverage change only as needed for this target frame.',
+    targetReferences.length > 0 ? `Target frame references: ${targetReferences.map((reference) => reference.name).join(', ')}.` : 'Target frame references: none.',
+    `Target frame prompt: ${targetOverride?.prompt || targetFrame.prompt || 'Preserve scene continuity and choose an appropriate shot.'}`,
+  ].join('\n');
+}
+
+function buildSceneFrameGenerationTasks({
+  sceneGroupTitle,
+  scenePrompt,
+  frames,
+  targetFrameId = null,
+  frameOverrideMap,
+  referencesByFrameId,
+  sceneReferenceImages,
+}) {
+  const sharedReferenceImages = [
+    ...sceneReferenceImages,
+    ...frames.flatMap((frame) =>
+      (referencesByFrameId.get(frame.id) ?? []).map((reference) => ({
+        name: reference.name,
+        title: frameOverrideMap.get(frame.id)?.title || frame.title,
+        description:
+          reference.referenceKind === 'saved_reference'
+            ? 'Saved frame reference'
+            : 'Uploaded frame attachment',
+        mimeType: reference.mimeType,
+        bytesBase64: reference.bytesBase64,
+      }))
+    ),
+  ];
+
+  const targetFrames = targetFrameId ? frames.filter((frame) => frame.id === targetFrameId) : frames;
+  return targetFrames.map((frame) => ({
+    frameId: frame.id,
+    prompt: buildSceneFramePrompt({
+      sceneGroupTitle,
+      scenePrompt,
+      frames,
+      targetFrameId: frame.id,
+      frameOverrideMap,
+      referencesByFrameId,
+    }),
+    referenceImages: sharedReferenceImages,
+  }));
+}
+
+function buildReferenceCollectionDescriptionPrompt({ category, title, attachmentPaths }) {
+  const categoryLabel =
+    category === 'environment' ? 'environment' : category === 'objects' ? 'item' : 'character';
+
+  return [
+    'You are helping an Electron app turn a grouped set of image references into reusable production metadata.',
+    'Inspect every attached image file before answering.',
+    `Reference category: ${categoryLabel}.`,
+    title ? `Existing title hint: ${title}` : 'No reliable title was provided. Infer one from the images.',
+    'Return exactly one JSON object with this shape:',
+    '{"title":"...","description":"...","attachments":[{"id":"...","description":"..."}]}',
+    'Rules:',
+    '- `title` must be concise and production-friendly.',
+    '- `description` must describe the shared identity, style, materials, silhouette, and constraints that should persist across shots.',
+    '- Each attachment description must focus only on what is specific to that single image angle or crop.',
+    '- Keep descriptions plain text. No markdown.',
+    '- Preserve the provided attachment ids exactly.',
+    'Attachment files:',
+    ...attachmentPaths.map((attachment) => `- id=${attachment.id} path=${attachment.path}`),
+  ].join('\n');
+}
+
+function classifyCodexTraceLine(line) {
+  const normalized = line.trim().toLowerCase();
+  if (!normalized) {
+    return 'plain';
+  }
+  if (
+    normalized.startsWith('thinking') ||
+    normalized.startsWith('reasoning') ||
+    normalized.startsWith('analyzing') ||
+    normalized.startsWith('analysis:') ||
+    normalized.startsWith('plan:')
+  ) {
+    return 'reasoning';
+  }
+  if (
+    normalized.includes('calling tool') ||
+    normalized.includes('running tool') ||
+    normalized.includes('invoking tool') ||
+    normalized.includes('tool call') ||
+    normalized.includes('using tool')
+  ) {
+    return 'tool_call';
+  }
+  return 'plain';
+}
 
 const projectsTable = sqliteTable('projects', {
   id: text('id').primaryKey(),
@@ -120,6 +261,44 @@ const objectReferencesTable = sqliteTable('object_references', {
   createdAt: text('created_at').notNull(),
 });
 
+const characterReferenceCollectionsTable = sqliteTable('character_reference_collections', {
+  id: text('id').primaryKey(),
+  title: text('title').notNull(),
+  description: text('description'),
+  createdAt: text('created_at').notNull(),
+});
+
+const characterReferenceAttachmentsTable = sqliteTable('character_reference_attachments', {
+  id: text('id').primaryKey(),
+  collectionId: text('collection_id')
+    .notNull()
+    .references(() => characterReferenceCollectionsTable.id),
+  name: text('name').notNull(),
+  mimeType: text('mime_type').notNull(),
+  bytesBase64: text('bytes_base64').notNull(),
+  description: text('description'),
+  createdAt: text('created_at').notNull(),
+});
+
+const objectReferenceCollectionsTable = sqliteTable('object_reference_collections', {
+  id: text('id').primaryKey(),
+  title: text('title').notNull(),
+  description: text('description'),
+  createdAt: text('created_at').notNull(),
+});
+
+const objectReferenceAttachmentsTable = sqliteTable('object_reference_attachments', {
+  id: text('id').primaryKey(),
+  collectionId: text('collection_id')
+    .notNull()
+    .references(() => objectReferenceCollectionsTable.id),
+  name: text('name').notNull(),
+  mimeType: text('mime_type').notNull(),
+  bytesBase64: text('bytes_base64').notNull(),
+  description: text('description'),
+  createdAt: text('created_at').notNull(),
+});
+
 const environmentReferencesTable = sqliteTable('environment_references', {
   id: text('id').primaryKey(),
   title: text('title').notNull(),
@@ -136,6 +315,80 @@ const environmentReferenceAttachmentsTable = sqliteTable('environment_reference_
   mimeType: text('mime_type').notNull(),
   bytesBase64: text('bytes_base64').notNull(),
   description: text('description'),
+  createdAt: text('created_at').notNull(),
+});
+
+const sceneGroupsTable = sqliteTable('scene_groups', {
+  id: text('id').primaryKey(),
+  threadId: text('thread_id')
+    .notNull()
+    .references(() => threadsTable.id),
+  title: text('title').notNull(),
+  prompt: text('prompt').notNull(),
+  tocOrder: integer('toc_order').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+const sceneFramesTable = sqliteTable('scene_frames', {
+  id: text('id').primaryKey(),
+  sceneGroupId: text('scene_group_id')
+    .notNull()
+    .references(() => sceneGroupsTable.id),
+  title: text('title').notNull(),
+  prompt: text('prompt').notNull(),
+  frameOrder: integer('frame_order').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+const sceneFrameReferencesTable = sqliteTable('scene_frame_references', {
+  id: text('id').primaryKey(),
+  sceneFrameId: text('scene_frame_id')
+    .notNull()
+    .references(() => sceneFramesTable.id),
+  referenceKind: text('reference_kind').notNull(),
+  referenceId: text('reference_id'),
+  name: text('name').notNull(),
+  mimeType: text('mime_type').notNull(),
+  bytesBase64: text('bytes_base64').notNull(),
+  createdAt: text('created_at').notNull(),
+});
+
+const sceneGroupRunsTable = sqliteTable('scene_group_runs', {
+  id: text('id').primaryKey(),
+  sceneGroupId: text('scene_group_id')
+    .notNull()
+    .references(() => sceneGroupsTable.id),
+  threadId: text('thread_id')
+    .notNull()
+    .references(() => threadsTable.id),
+  status: text('status').notNull(),
+  provider: text('provider').notNull(),
+  modelId: text('model_id').notNull(),
+  modelLabel: text('model_label').notNull(),
+  requestedFrameCount: integer('requested_frame_count').notNull(),
+  errorMessage: text('error_message'),
+  durationMs: integer('duration_ms'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+const sceneFrameAssetsTable = sqliteTable('scene_frame_assets', {
+  id: text('id').primaryKey(),
+  sceneGroupRunId: text('scene_group_run_id')
+    .notNull()
+    .references(() => sceneGroupRunsTable.id),
+  sceneFrameId: text('scene_frame_id')
+    .notNull()
+    .references(() => sceneFramesTable.id),
+  outputIndex: integer('output_index').notNull(),
+  originalPath: text('original_path').notNull(),
+  storedPath: text('stored_path').notNull(),
+  fileName: text('file_name').notNull(),
+  mimeType: text('mime_type').notNull(),
+  width: integer('width'),
+  height: integer('height'),
   createdAt: text('created_at').notNull(),
 });
 
@@ -221,6 +474,50 @@ const CREATE_OBJECT_REFERENCES_TABLE_SQL = `
   )
 `;
 
+const CREATE_CHARACTER_REFERENCE_COLLECTIONS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS character_reference_collections (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT,
+    created_at TEXT NOT NULL
+  )
+`;
+
+const CREATE_CHARACTER_REFERENCE_ATTACHMENTS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS character_reference_attachments (
+    id TEXT PRIMARY KEY,
+    collection_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    bytes_base64 TEXT NOT NULL,
+    description TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (collection_id) REFERENCES character_reference_collections(id)
+  )
+`;
+
+const CREATE_OBJECT_REFERENCE_COLLECTIONS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS object_reference_collections (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT,
+    created_at TEXT NOT NULL
+  )
+`;
+
+const CREATE_OBJECT_REFERENCE_ATTACHMENTS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS object_reference_attachments (
+    id TEXT PRIMARY KEY,
+    collection_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    bytes_base64 TEXT NOT NULL,
+    description TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (collection_id) REFERENCES object_reference_collections(id)
+  )
+`;
+
 const CREATE_ENVIRONMENT_REFERENCES_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS environment_references (
     id TEXT PRIMARY KEY,
@@ -240,6 +537,83 @@ const CREATE_ENVIRONMENT_REFERENCE_ATTACHMENTS_TABLE_SQL = `
     description TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (environment_id) REFERENCES environment_references(id)
+  )
+`;
+
+const CREATE_SCENE_GROUPS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS scene_groups (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    toc_order INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (thread_id) REFERENCES threads(id)
+  )
+`;
+
+const CREATE_SCENE_FRAMES_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS scene_frames (
+    id TEXT PRIMARY KEY,
+    scene_group_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    frame_order INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (scene_group_id) REFERENCES scene_groups(id)
+  )
+`;
+
+const CREATE_SCENE_FRAME_REFERENCES_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS scene_frame_references (
+    id TEXT PRIMARY KEY,
+    scene_frame_id TEXT NOT NULL,
+    reference_kind TEXT NOT NULL,
+    reference_id TEXT,
+    name TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    bytes_base64 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (scene_frame_id) REFERENCES scene_frames(id)
+  )
+`;
+
+const CREATE_SCENE_GROUP_RUNS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS scene_group_runs (
+    id TEXT PRIMARY KEY,
+    scene_group_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    model_label TEXT NOT NULL,
+    requested_frame_count INTEGER NOT NULL,
+    error_message TEXT,
+    duration_ms INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (scene_group_id) REFERENCES scene_groups(id),
+    FOREIGN KEY (thread_id) REFERENCES threads(id)
+  )
+`;
+
+const CREATE_SCENE_FRAME_ASSETS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS scene_frame_assets (
+    id TEXT PRIMARY KEY,
+    scene_group_run_id TEXT NOT NULL,
+    scene_frame_id TEXT NOT NULL,
+    output_index INTEGER NOT NULL,
+    original_path TEXT NOT NULL,
+    stored_path TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    width INTEGER,
+    height INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (scene_group_run_id) REFERENCES scene_group_runs(id),
+    FOREIGN KEY (scene_frame_id) REFERENCES scene_frames(id)
   )
 `;
 
@@ -309,6 +683,7 @@ function resolveJobWorkingDirectory({ provider, jobId, codexJobsTempDir }) {
 
 async function createGenerationStore(userDataDir, options = {}) {
   const paths = getAppDataPaths(userDataDir);
+  const activeSceneGroupCancellations = new Map();
   fs.mkdirSync(path.dirname(paths.databasePath), { recursive: true });
   await resetCodexJobsDirectory(paths.codexJobsTempDir);
 
@@ -329,8 +704,17 @@ async function createGenerationStore(userDataDir, options = {}) {
   await db.run(sql.raw(CREATE_GENERATED_ASSETS_TABLE_SQL));
   await db.run(sql.raw(CREATE_CHARACTER_REFERENCES_TABLE_SQL));
   await db.run(sql.raw(CREATE_OBJECT_REFERENCES_TABLE_SQL));
+  await db.run(sql.raw(CREATE_CHARACTER_REFERENCE_COLLECTIONS_TABLE_SQL));
+  await db.run(sql.raw(CREATE_CHARACTER_REFERENCE_ATTACHMENTS_TABLE_SQL));
+  await db.run(sql.raw(CREATE_OBJECT_REFERENCE_COLLECTIONS_TABLE_SQL));
+  await db.run(sql.raw(CREATE_OBJECT_REFERENCE_ATTACHMENTS_TABLE_SQL));
   await db.run(sql.raw(CREATE_ENVIRONMENT_REFERENCES_TABLE_SQL));
   await db.run(sql.raw(CREATE_ENVIRONMENT_REFERENCE_ATTACHMENTS_TABLE_SQL));
+  await db.run(sql.raw(CREATE_SCENE_GROUPS_TABLE_SQL));
+  await db.run(sql.raw(CREATE_SCENE_FRAMES_TABLE_SQL));
+  await db.run(sql.raw(CREATE_SCENE_FRAME_REFERENCES_TABLE_SQL));
+  await db.run(sql.raw(CREATE_SCENE_GROUP_RUNS_TABLE_SQL));
+  await db.run(sql.raw(CREATE_SCENE_FRAME_ASSETS_TABLE_SQL));
   await migrateLegacyReferencesTable(db);
   await ensureEnvironmentAttachmentDescriptionColumn(db);
   await ensureProjectSettingsColumns(db);
@@ -507,6 +891,85 @@ async function createGenerationStore(userDataDir, options = {}) {
     return reference;
   }
 
+  function normalizeReferenceCollectionCategory(category) {
+    if (category === 'environment') {
+      return 'environment';
+    }
+    return category === 'objects' ? 'objects' : 'characters';
+  }
+
+  function mapReferenceCollectionAttachment({
+    attachment,
+    category,
+    collectionId,
+    collectionTitle,
+    collectionDescription,
+    timestamp,
+  }) {
+    return {
+      id: attachment.id ?? nanoid(),
+      collectionId,
+      name: attachment.name,
+      title: collectionTitle,
+      description: attachment.description?.trim() || collectionDescription || null,
+      mimeType: attachment.mimeType || 'image/png',
+      bytesBase64: attachment.bytesBase64,
+      createdAt: timestamp,
+      category,
+      environmentId: category === 'environment' ? collectionId : null,
+    };
+  }
+
+  async function createReferenceCollection(payload) {
+    const category = normalizeReferenceCollectionCategory(payload.category);
+    if (!Array.isArray(payload.attachments) || payload.attachments.length === 0) {
+      return [];
+    }
+
+    if (category === 'environment') {
+      return createEnvironmentReference(payload);
+    }
+
+    const timestamp = new Date().toISOString();
+    const collectionId = nanoid();
+    const title = payload.title.trim();
+    const description = payload.description?.trim() || null;
+    const collectionTable =
+      category === 'objects' ? objectReferenceCollectionsTable : characterReferenceCollectionsTable;
+    const attachmentTable =
+      category === 'objects' ? objectReferenceAttachmentsTable : characterReferenceAttachmentsTable;
+
+    await db.insert(collectionTable).values({
+      id: collectionId,
+      title,
+      description,
+      createdAt: timestamp,
+    });
+
+    const attachments = payload.attachments.map((attachment) => ({
+      id: nanoid(),
+      collectionId,
+      name: attachment.name,
+      mimeType: attachment.mimeType || 'image/png',
+      bytesBase64: attachment.bytesBase64,
+      description: attachment.description?.trim() || null,
+      createdAt: timestamp,
+    }));
+
+    await db.insert(attachmentTable).values(attachments);
+
+    return attachments.map((attachment) =>
+      mapReferenceCollectionAttachment({
+        attachment,
+        category,
+        collectionId,
+        collectionTitle: title,
+        collectionDescription: description,
+        timestamp: attachment.createdAt,
+      })
+    );
+  }
+
   async function createEnvironmentReference(payload) {
     if (!Array.isArray(payload.attachments) || payload.attachments.length === 0) {
       return [];
@@ -535,6 +998,7 @@ async function createGenerationStore(userDataDir, options = {}) {
 
     return attachments.map((attachment) => ({
       id: attachment.id,
+      collectionId: environmentId,
       environmentId,
       name: attachment.name,
       title: payload.title.trim(),
@@ -574,6 +1038,7 @@ async function createGenerationStore(userDataDir, options = {}) {
       }
       return {
         id: firstAttachment.id,
+        collectionId: environmentId,
         environmentId,
         name: firstAttachment.name,
         title,
@@ -601,6 +1066,7 @@ async function createGenerationStore(userDataDir, options = {}) {
     return {
       ...updated,
       category: payload.category,
+      collectionId: null,
       environmentId: null,
     };
   }
@@ -639,6 +1105,7 @@ async function createGenerationStore(userDataDir, options = {}) {
 
     return attachments.map((attachment) => ({
       id: attachment.id,
+      collectionId: environmentId,
       environmentId,
       name: attachment.name,
       title,
@@ -650,9 +1117,65 @@ async function createGenerationStore(userDataDir, options = {}) {
     }));
   }
 
+  async function updateReferenceCollection(payload) {
+    const category = normalizeReferenceCollectionCategory(payload.category);
+    if (category === 'environment') {
+      return updateEnvironmentReference({
+        environmentId: payload.collectionId,
+        title: payload.title,
+        description: payload.description,
+        attachments: payload.attachments,
+      });
+    }
+
+    const title = payload.title.trim();
+    const description = payload.description?.trim() || null;
+    const collectionId = payload.collectionId;
+    const collectionTable =
+      category === 'objects' ? objectReferenceCollectionsTable : characterReferenceCollectionsTable;
+    const attachmentTable =
+      category === 'objects' ? objectReferenceAttachmentsTable : characterReferenceAttachmentsTable;
+
+    await db
+      .update(collectionTable)
+      .set({
+        title,
+        description,
+      })
+      .where(eq(collectionTable.id, collectionId));
+
+    await db.delete(attachmentTable).where(eq(attachmentTable.collectionId, collectionId));
+
+    const timestamp = new Date().toISOString();
+    const attachments = (payload.attachments ?? []).map((attachment) => ({
+      id: attachment.id ?? nanoid(),
+      collectionId,
+      name: attachment.name,
+      mimeType: attachment.mimeType || 'image/png',
+      bytesBase64: attachment.bytesBase64,
+      description: attachment.description?.trim() || null,
+      createdAt: timestamp,
+    }));
+
+    if (attachments.length > 0) {
+      await db.insert(attachmentTable).values(attachments);
+    }
+
+    return attachments.map((attachment) =>
+      mapReferenceCollectionAttachment({
+        attachment,
+        category,
+        collectionId,
+        collectionTitle: title,
+        collectionDescription: description,
+        timestamp: attachment.createdAt,
+      })
+    );
+  }
+
   async function deleteReference(payload) {
     if (payload.category === 'environment') {
-      const environmentId = payload.environmentId;
+      const environmentId = payload.collectionId ?? payload.environmentId;
       if (!environmentId) {
         throw new Error('Environment reference delete requires environmentId.');
       }
@@ -665,12 +1188,22 @@ async function createGenerationStore(userDataDir, options = {}) {
       return;
     }
 
+    if (payload.collectionId) {
+      const collectionTable =
+        payload.category === 'objects' ? objectReferenceCollectionsTable : characterReferenceCollectionsTable;
+      const attachmentTable =
+        payload.category === 'objects' ? objectReferenceAttachmentsTable : characterReferenceAttachmentsTable;
+      await db.delete(attachmentTable).where(eq(attachmentTable.collectionId, payload.collectionId));
+      await db.delete(collectionTable).where(eq(collectionTable.id, payload.collectionId));
+      return;
+    }
+
     const table = payload.category === 'objects' ? objectReferencesTable : characterReferencesTable;
     await db.delete(table).where(eq(table.id, payload.id));
   }
 
   async function listReferences() {
-    const [characters, objects, environments] = await Promise.all([
+    const [characters, objects, groupedCharacters, groupedObjects, environments] = await Promise.all([
       db
         .select()
         .from(characterReferencesTable)
@@ -679,6 +1212,42 @@ async function createGenerationStore(userDataDir, options = {}) {
         .select()
         .from(objectReferencesTable)
         .orderBy(desc(objectReferencesTable.createdAt), desc(objectReferencesTable.id)),
+      db
+        .select({
+          id: characterReferenceAttachmentsTable.id,
+          collectionId: characterReferenceAttachmentsTable.collectionId,
+          name: characterReferenceAttachmentsTable.name,
+          title: characterReferenceCollectionsTable.title,
+          collectionDescription: characterReferenceCollectionsTable.description,
+          description: characterReferenceAttachmentsTable.description,
+          mimeType: characterReferenceAttachmentsTable.mimeType,
+          bytesBase64: characterReferenceAttachmentsTable.bytesBase64,
+          createdAt: characterReferenceAttachmentsTable.createdAt,
+        })
+        .from(characterReferenceAttachmentsTable)
+        .innerJoin(
+          characterReferenceCollectionsTable,
+          eq(characterReferenceAttachmentsTable.collectionId, characterReferenceCollectionsTable.id)
+        )
+        .orderBy(desc(characterReferenceAttachmentsTable.createdAt), desc(characterReferenceAttachmentsTable.id)),
+      db
+        .select({
+          id: objectReferenceAttachmentsTable.id,
+          collectionId: objectReferenceAttachmentsTable.collectionId,
+          name: objectReferenceAttachmentsTable.name,
+          title: objectReferenceCollectionsTable.title,
+          collectionDescription: objectReferenceCollectionsTable.description,
+          description: objectReferenceAttachmentsTable.description,
+          mimeType: objectReferenceAttachmentsTable.mimeType,
+          bytesBase64: objectReferenceAttachmentsTable.bytesBase64,
+          createdAt: objectReferenceAttachmentsTable.createdAt,
+        })
+        .from(objectReferenceAttachmentsTable)
+        .innerJoin(
+          objectReferenceCollectionsTable,
+          eq(objectReferenceAttachmentsTable.collectionId, objectReferenceCollectionsTable.id)
+        )
+        .orderBy(desc(objectReferenceAttachmentsTable.createdAt), desc(objectReferenceAttachmentsTable.id)),
       db
         .select({
           id: environmentReferenceAttachmentsTable.id,
@@ -700,11 +1269,36 @@ async function createGenerationStore(userDataDir, options = {}) {
     ]);
 
     const allReferences = [
-      ...characters.map((reference) => ({ ...reference, category: 'characters', environmentId: null })),
-      ...objects.map((reference) => ({ ...reference, category: 'objects', environmentId: null })),
+      ...characters.map((reference) => ({
+        ...reference,
+        category: 'characters',
+        collectionId: null,
+        environmentId: null,
+      })),
+      ...objects.map((reference) => ({
+        ...reference,
+        category: 'objects',
+        collectionId: null,
+        environmentId: null,
+      })),
+      ...groupedCharacters.map((reference) => ({
+        ...reference,
+        category: 'characters',
+        collectionId: reference.collectionId,
+        environmentId: null,
+        description: reference.description ?? reference.collectionDescription ?? null,
+      })),
+      ...groupedObjects.map((reference) => ({
+        ...reference,
+        category: 'objects',
+        collectionId: reference.collectionId,
+        environmentId: null,
+        description: reference.description ?? reference.collectionDescription ?? null,
+      })),
       ...environments.map((reference) => ({
         ...reference,
         category: 'environment',
+        collectionId: reference.environmentId,
         description: reference.description ?? reference.environmentDescription ?? null,
       })),
     ];
@@ -731,6 +1325,8 @@ async function createGenerationStore(userDataDir, options = {}) {
     clientRunId = null,
     provider = DEFAULT_GENERATION_PROVIDER,
     modelId = null,
+    onScenePlan,
+    onCancelableRun,
   }) {
     const jobId = nanoid();
     const startedAtMs = Date.now();
@@ -759,6 +1355,21 @@ async function createGenerationStore(userDataDir, options = {}) {
     console.info(`${logPrefix} requestedCount: ${count}`);
     console.info(`${logPrefix} threadId: ${threadId}`);
     console.info(`${logPrefix} modelId: ${selection.modelId}`);
+    if (CODEX_DEEP_TRACE_ENABLED) {
+      console.info(`${logPrefix} deepTrace: enabled`);
+      console.info(`${logPrefix} stagedReferenceCount: ${stagedReferenceImages.length}`);
+      for (const referenceImage of stagedReferenceImages) {
+        const metadata = [
+          referenceImage.title ? `title=${referenceImage.title}` : null,
+          referenceImage.description ? `description=${referenceImage.description}` : null,
+        ]
+          .filter(Boolean)
+          .join(' ');
+        console.info(
+          `${logPrefix} stagedReference: ${referenceImage.path}${metadata ? ` ${metadata}` : ''}`
+        );
+      }
+    }
 
     await upsertJob({
       id: jobId,
@@ -802,7 +1413,14 @@ async function createGenerationStore(userDataDir, options = {}) {
               requestedCount: count,
               threadId,
               model: selection.antigravityModel,
-              onScenePlan: options.onScenePlan,
+              onScenePlan: (payload) => {
+                options.onScenePlan?.(payload);
+                onScenePlan?.(payload);
+              },
+              onCancelableRun: (cancelableRun) => {
+                options.onCancelableRun?.(cancelableRun);
+                onCancelableRun?.(cancelableRun);
+              },
             })
           : await runCodexJob({
               jobId,
@@ -813,19 +1431,40 @@ async function createGenerationStore(userDataDir, options = {}) {
               threadId,
               fastMode,
               model: selection.codexModel,
-              onScenePlan: options.onScenePlan,
+              onScenePlan: (payload) => {
+                options.onScenePlan?.(payload);
+                onScenePlan?.(payload);
+              },
+              onCancelableRun: (cancelableRun) => {
+                options.onCancelableRun?.(cancelableRun);
+                onCancelableRun?.(cancelableRun);
+              },
             });
 
       if (!result.success) {
+        if (result.canceled) {
+          console.info(`${logPrefix} generation canceled`);
+          const canceledError = new Error(result.errorMessage);
+          canceledError.name = 'GenerationCanceledError';
+          canceledError.code = 'GENERATION_CANCELED';
+          throw canceledError;
+        }
+
         console.error(`${logPrefix} generation failed`);
         throw new Error(result.errorMessage);
       }
 
       let manifest = result.manifest ?? null;
       if (manifest) {
+        if (CODEX_DEEP_TRACE_ENABLED) {
+          console.info(`${logPrefix} manifest sourced from stdout`);
+        }
         await fsp.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
       } else {
         await fsp.access(manifestPath);
+        if (CODEX_DEEP_TRACE_ENABLED) {
+          console.info(`${logPrefix} manifest sourced from disk`);
+        }
         manifest = parseGenerationManifest(await fsp.readFile(manifestPath, 'utf8'));
       }
       console.info(`${logPrefix} manifest contains ${manifest.images.length} image(s)`);
@@ -946,6 +1585,503 @@ async function createGenerationStore(userDataDir, options = {}) {
     return assets.map(toRendererAsset);
   }
 
+  async function listSceneGroups(threadId) {
+    if (!threadId) {
+      return [];
+    }
+
+    const sceneGroups = await db
+      .select()
+      .from(sceneGroupsTable)
+      .where(eq(sceneGroupsTable.threadId, threadId))
+      .orderBy(sceneGroupsTable.tocOrder, desc(sceneGroupsTable.createdAt), desc(sceneGroupsTable.id));
+    const sceneGroupIds = sceneGroups.map((sceneGroup) => sceneGroup.id);
+    const sceneFrames =
+      sceneGroupIds.length === 0
+        ? []
+        : await db
+            .select()
+            .from(sceneFramesTable)
+            .where(inArray(sceneFramesTable.sceneGroupId, sceneGroupIds))
+            .orderBy(sceneFramesTable.frameOrder, desc(sceneFramesTable.createdAt), desc(sceneFramesTable.id));
+    const sceneFrameIds = sceneFrames.map((sceneFrame) => sceneFrame.id);
+    const sceneFrameReferences =
+      sceneFrameIds.length === 0
+        ? []
+        : await db
+            .select()
+            .from(sceneFrameReferencesTable)
+            .where(inArray(sceneFrameReferencesTable.sceneFrameId, sceneFrameIds))
+            .orderBy(desc(sceneFrameReferencesTable.createdAt), desc(sceneFrameReferencesTable.id));
+    const runs =
+      sceneGroupIds.length === 0
+        ? []
+        : await db
+            .select()
+            .from(sceneGroupRunsTable)
+            .where(inArray(sceneGroupRunsTable.sceneGroupId, sceneGroupIds))
+            .orderBy(desc(sceneGroupRunsTable.createdAt), desc(sceneGroupRunsTable.id));
+    const runIds = runs.map((run) => run.id);
+    const assets =
+      runIds.length === 0
+        ? []
+        : await db
+            .select()
+            .from(sceneFrameAssetsTable)
+            .where(inArray(sceneFrameAssetsTable.sceneGroupRunId, runIds))
+            .orderBy(sceneFrameAssetsTable.outputIndex, desc(sceneFrameAssetsTable.createdAt), desc(sceneFrameAssetsTable.id));
+
+    const referencesByFrameId = new Map();
+    for (const reference of sceneFrameReferences) {
+      const current = referencesByFrameId.get(reference.sceneFrameId) ?? [];
+      current.push(reference);
+      referencesByFrameId.set(reference.sceneFrameId, current);
+    }
+
+    const assetsByFrameId = new Map();
+    for (const asset of assets) {
+      const current = assetsByFrameId.get(asset.sceneFrameId) ?? [];
+      current.push(asset);
+      assetsByFrameId.set(asset.sceneFrameId, current);
+    }
+
+    const framesBySceneGroupId = new Map();
+    for (const frame of sceneFrames) {
+      const current = framesBySceneGroupId.get(frame.sceneGroupId) ?? [];
+      current.push({
+        ...frame,
+        references: referencesByFrameId.get(frame.id) ?? [],
+        assets: assetsByFrameId.get(frame.id) ?? [],
+      });
+      framesBySceneGroupId.set(frame.sceneGroupId, current);
+    }
+
+    const runsBySceneGroupId = new Map();
+    for (const run of runs) {
+      const current = runsBySceneGroupId.get(run.sceneGroupId) ?? [];
+      current.push(run);
+      runsBySceneGroupId.set(run.sceneGroupId, current);
+    }
+
+    return sceneGroups.map((sceneGroup) => ({
+      ...sceneGroup,
+      frames: framesBySceneGroupId.get(sceneGroup.id) ?? [],
+      runs: runsBySceneGroupId.get(sceneGroup.id) ?? [],
+    }));
+  }
+
+  async function createSceneGroup(threadId, input) {
+    const timestamp = new Date().toISOString();
+    const sceneGroup = {
+      id: nanoid(),
+      threadId,
+      title: typeof input?.title === 'string' && input.title.trim() ? input.title.trim() : 'Scene 1',
+      prompt: typeof input?.prompt === 'string' ? input.prompt : '',
+      tocOrder: Number.isInteger(input?.tocOrder) ? input.tocOrder : 1,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    await db.insert(sceneGroupsTable).values(sceneGroup);
+    return (await listSceneGroups(threadId))[0];
+  }
+
+  async function updateSceneGroup(sceneGroupId, input) {
+    const existing = await db.select().from(sceneGroupsTable).where(eq(sceneGroupsTable.id, sceneGroupId)).limit(1);
+    const sceneGroup = existing[0];
+    if (!sceneGroup) {
+      throw new Error('Scene group not found.');
+    }
+    await db
+      .update(sceneGroupsTable)
+      .set({
+        title: typeof input?.title === 'string' ? input.title : sceneGroup.title,
+        prompt: typeof input?.prompt === 'string' ? input.prompt : sceneGroup.prompt,
+        tocOrder: Number.isInteger(input?.tocOrder) ? input.tocOrder : sceneGroup.tocOrder,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(sceneGroupsTable.id, sceneGroupId));
+    const sceneGroups = await listSceneGroups(sceneGroup.threadId);
+    return sceneGroups.find((item) => item.id === sceneGroupId) ?? null;
+  }
+
+  async function createSceneFrame(sceneGroupId, input) {
+    const existing = await db.select().from(sceneGroupsTable).where(eq(sceneGroupsTable.id, sceneGroupId)).limit(1);
+    const sceneGroup = existing[0];
+    if (!sceneGroup) {
+      throw new Error('Scene group not found.');
+    }
+    const timestamp = new Date().toISOString();
+    await db.insert(sceneFramesTable).values({
+      id: nanoid(),
+      sceneGroupId,
+      title: typeof input?.title === 'string' && input.title.trim() ? input.title.trim() : 'Frame',
+      prompt: typeof input?.prompt === 'string' ? input.prompt : '',
+      frameOrder: Number.isInteger(input?.frameOrder) ? input.frameOrder : 1,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    const sceneGroups = await listSceneGroups(sceneGroup.threadId);
+    return sceneGroups.find((item) => item.id === sceneGroupId) ?? null;
+  }
+
+  async function updateSceneFrame(sceneFrameId, input) {
+    const existing = await db.select().from(sceneFramesTable).where(eq(sceneFramesTable.id, sceneFrameId)).limit(1);
+    const sceneFrame = existing[0];
+    if (!sceneFrame) {
+      throw new Error('Scene frame not found.');
+    }
+    const sceneGroups = await db
+      .select()
+      .from(sceneGroupsTable)
+      .where(eq(sceneGroupsTable.id, sceneFrame.sceneGroupId))
+      .limit(1);
+    const sceneGroup = sceneGroups[0];
+    await db
+      .update(sceneFramesTable)
+      .set({
+        title: typeof input?.title === 'string' ? input.title : sceneFrame.title,
+        prompt: typeof input?.prompt === 'string' ? input.prompt : sceneFrame.prompt,
+        frameOrder: Number.isInteger(input?.frameOrder) ? input.frameOrder : sceneFrame.frameOrder,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(sceneFramesTable.id, sceneFrameId));
+    const details = await listSceneGroups(sceneGroup.threadId);
+    return details.find((item) => item.id === sceneGroup.id) ?? null;
+  }
+
+  async function saveSceneFrameReferences(sceneFrameId, references) {
+    const existing = await db.select().from(sceneFramesTable).where(eq(sceneFramesTable.id, sceneFrameId)).limit(1);
+    const sceneFrame = existing[0];
+    if (!sceneFrame) {
+      throw new Error('Scene frame not found.');
+    }
+    const sceneGroups = await db
+      .select()
+      .from(sceneGroupsTable)
+      .where(eq(sceneGroupsTable.id, sceneFrame.sceneGroupId))
+      .limit(1);
+    const sceneGroup = sceneGroups[0];
+    await db.delete(sceneFrameReferencesTable).where(eq(sceneFrameReferencesTable.sceneFrameId, sceneFrameId));
+    if (Array.isArray(references) && references.length > 0) {
+      await db.insert(sceneFrameReferencesTable).values(
+        references.map((reference) => ({
+          id: reference.id ?? nanoid(),
+          sceneFrameId,
+          referenceKind: reference.referenceKind,
+          referenceId: reference.referenceId ?? null,
+          name: reference.name,
+          mimeType: reference.mimeType,
+          bytesBase64: reference.bytesBase64,
+          createdAt: reference.createdAt ?? new Date().toISOString(),
+        }))
+      );
+    }
+    const details = await listSceneGroups(sceneGroup.threadId);
+    return details.find((item) => item.id === sceneGroup.id) ?? null;
+  }
+
+  async function generateSceneGroup(input) {
+    const sceneGroupId = typeof input === 'string' ? input : input?.sceneGroupId;
+    const targetFrameId =
+      typeof input?.targetFrameId === 'string' && input.targetFrameId.trim() ? input.targetFrameId.trim() : null;
+    const promptOverride = typeof input?.promptOverride === 'string' ? input.promptOverride : null;
+    const frameOverrideMap = new Map(
+      Array.isArray(input?.frameOverrides)
+        ? input.frameOverrides
+            .filter((frame) => frame && typeof frame.id === 'string')
+            .map((frame) => [frame.id, frame])
+        : []
+    );
+    const sceneReferenceImages = Array.isArray(input?.referenceImages) ? input.referenceImages : [];
+    const fastMode = input?.fastMode === true;
+    const existing = await db.select().from(sceneGroupsTable).where(eq(sceneGroupsTable.id, sceneGroupId)).limit(1);
+    const sceneGroup = existing[0];
+    if (!sceneGroup) {
+      throw new Error('Scene group not found.');
+    }
+    const frames = await db
+      .select()
+      .from(sceneFramesTable)
+      .where(eq(sceneFramesTable.sceneGroupId, sceneGroupId))
+      .orderBy(sceneFramesTable.frameOrder, desc(sceneFramesTable.createdAt), desc(sceneFramesTable.id));
+
+    if (frames.length === 0) {
+      throw new Error('Scene group has no frames to generate.');
+    }
+    if (targetFrameId && !frames.some((frame) => frame.id === targetFrameId)) {
+      throw new Error('Target frame not found.');
+    }
+
+    const frameIds = frames.map((frame) => frame.id);
+    const persistedFrameReferences =
+      frameIds.length === 0
+        ? []
+        : await db
+            .select()
+            .from(sceneFrameReferencesTable)
+            .where(inArray(sceneFrameReferencesTable.sceneFrameId, frameIds))
+            .orderBy(desc(sceneFrameReferencesTable.createdAt), desc(sceneFrameReferencesTable.id));
+
+    const startedAtMs = Date.now();
+    const timestamp = new Date(startedAtMs).toISOString();
+    const runId = nanoid();
+    const modelId = DEFAULT_CODEX_MODEL_ID;
+    const modelLabel = `Codex / ${MODEL_LABEL_BY_ID[modelId]}`;
+
+    await db.insert(sceneGroupRunsTable).values({
+      id: runId,
+      sceneGroupId,
+      threadId: sceneGroup.threadId,
+      status: 'running',
+      provider: 'codex',
+      modelId: 'gpt-5.4-mini',
+      modelLabel,
+      requestedFrameCount: targetFrameId ? 1 : frames.length,
+      errorMessage: null,
+      durationMs: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    const referencesByFrameId = new Map();
+    for (const reference of persistedFrameReferences) {
+      const current = referencesByFrameId.get(reference.sceneFrameId) ?? [];
+      current.push(reference);
+      referencesByFrameId.set(reference.sceneFrameId, current);
+    }
+
+    for (const frame of frames) {
+      const override = frameOverrideMap.get(frame.id);
+      if (!Array.isArray(override?.references)) {
+        continue;
+      }
+      referencesByFrameId.set(
+        frame.id,
+        override.references.map((reference) => ({
+          sceneFrameId: frame.id,
+          ...reference,
+        }))
+      );
+    }
+
+    const tasks = buildSceneFrameGenerationTasks({
+      sceneGroupTitle: sceneGroup.title,
+      scenePrompt: promptOverride || sceneGroup.prompt,
+      frames,
+      targetFrameId,
+      frameOverrideMap,
+      referencesByFrameId,
+      sceneReferenceImages,
+    });
+
+    try {
+      const settledResults = await Promise.allSettled(
+        tasks.map(async (task) => {
+          const result = await generateImages({
+            prompt: task.prompt,
+            count: 1,
+            threadId: sceneGroup.threadId,
+            mode: 'scene',
+            provider: 'codex',
+            modelId,
+            referenceImages: task.referenceImages,
+            fastMode,
+            onCancelableRun: (cancelableRun) => {
+              registerSceneGroupCancelableRun(activeSceneGroupCancellations, sceneGroupId, cancelableRun);
+            },
+          });
+          return { task, result };
+        })
+      );
+
+      const firstRejected = settledResults.find((result) => result.status === 'rejected');
+      if (firstRejected) {
+        cancelSceneGroupCancelableRuns(activeSceneGroupCancellations, sceneGroupId, 'peer_failed_scene_generation');
+        throw firstRejected.reason;
+      }
+
+      for (const settledResult of settledResults) {
+        const { task, result } = settledResult.value;
+        for (const [index, asset] of result.assets.entries()) {
+          const generatedAsset = await getGeneratedImage(asset.id);
+          if (!generatedAsset) {
+            continue;
+          }
+
+          await db.insert(sceneFrameAssetsTable).values({
+            id: nanoid(),
+            sceneGroupRunId: runId,
+            sceneFrameId: task.frameId,
+            outputIndex: index,
+            originalPath: generatedAsset.originalPath,
+            storedPath: generatedAsset.storedPath,
+            fileName: generatedAsset.fileName,
+            mimeType: generatedAsset.mimeType,
+            width: generatedAsset.width ?? null,
+            height: generatedAsset.height ?? null,
+            createdAt: generatedAsset.createdAt,
+          });
+        }
+
+          options.onSceneFrameReady?.({
+            threadId: sceneGroup.threadId,
+            sceneGroupId,
+            frameId: task.frameId,
+          });
+      }
+
+      await db
+        .update(sceneGroupRunsTable)
+        .set({
+          status: 'succeeded',
+          durationMs: Date.now() - startedAtMs,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(sceneGroupRunsTable.id, runId));
+    } catch (error) {
+      await db
+        .update(sceneGroupRunsTable)
+        .set({
+          status: 'failed',
+          errorMessage: error instanceof Error ? error.message : String(error),
+          durationMs: Date.now() - startedAtMs,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(sceneGroupRunsTable.id, runId));
+      throw error;
+    } finally {
+      activeSceneGroupCancellations.delete(sceneGroupId);
+    }
+
+    const sceneGroups = await listSceneGroups(sceneGroup.threadId);
+    return sceneGroups.find((item) => item.id === sceneGroupId) ?? null;
+  }
+
+  async function cancelSceneGroupGeneration(sceneGroupId) {
+    const activeRuns = activeSceneGroupCancellations.get(sceneGroupId);
+    if (!activeRuns || activeRuns.length === 0) {
+      return false;
+    }
+
+    return cancelSceneGroupCancelableRuns(activeSceneGroupCancellations, sceneGroupId);
+  }
+
+  async function structureScenePrompt(input) {
+    const sourceText = typeof input?.sourceText === 'string' ? input.sourceText.trim() : '';
+    const selection = resolveGenerationSelection('codex', input?.modelId ?? DEFAULT_CODEX_MODEL_ID);
+
+    if (!sourceText) {
+      throw new Error('Clipboard is empty.');
+    }
+
+    const jobId = nanoid();
+    const workingDirectory = resolveJobWorkingDirectory({
+      provider: 'codex',
+      jobId,
+      codexJobsTempDir: paths.codexJobsTempDir,
+    });
+
+    await fsp.mkdir(workingDirectory, { recursive: true });
+
+    const result = await runCodexStructuredOutputJob({
+      jobId,
+      workingDirectory,
+      prompt: buildCodexSceneStructuringPrompt(sourceText),
+      model: selection.codexModel,
+    });
+
+    if (!result.success) {
+      throw new Error(result.errorMessage);
+    }
+
+    const parsed = parseStructuredJsonObject(result.output);
+    const sceneDescription =
+      typeof parsed?.sceneDescription === 'string' ? parsed.sceneDescription.trim() : '';
+    const frames = Array.isArray(parsed?.frames)
+      ? parsed.frames
+          .filter((frame) => frame && typeof frame.prompt === 'string')
+          .map((frame) => ({ prompt: frame.prompt.trim() }))
+          .filter((frame) => frame.prompt.length > 0)
+      : [];
+
+    if (!sceneDescription || frames.length === 0) {
+      throw new Error('Codex returned an incomplete scene breakdown.');
+    }
+
+    return {
+      sceneDescription,
+      frames,
+    };
+  }
+
+  async function describeReferenceCollection(input) {
+    const attachments = Array.isArray(input?.attachments) ? input.attachments : [];
+    if (attachments.length === 0) {
+      throw new Error('Reference description generation requires at least one image.');
+    }
+
+    const category = normalizeReferenceCollectionCategory(input?.category);
+    const selection = resolveGenerationSelection('codex', DEFAULT_CODEX_MODEL_ID);
+    const jobId = nanoid();
+    const workingDirectory = resolveJobWorkingDirectory({
+      provider: 'codex',
+      jobId,
+      codexJobsTempDir: paths.codexJobsTempDir,
+    });
+
+    await fsp.mkdir(workingDirectory, { recursive: true });
+
+    const stagedAttachments = await Promise.all(
+      attachments.map(async (attachment, index) => {
+        const extension = attachment.mimeType === 'image/jpeg' ? '.jpg' : '.png';
+        const filePath = path.join(workingDirectory, `${attachment.id || `attachment-${index + 1}`}${extension}`);
+        await fsp.writeFile(filePath, Buffer.from(attachment.bytesBase64, 'base64'));
+        return {
+          id: attachment.id,
+          path: filePath,
+        };
+      })
+    );
+
+    const result = await runCodexStructuredOutputJob({
+      jobId,
+      workingDirectory,
+      prompt: buildReferenceCollectionDescriptionPrompt({
+        category,
+        title: typeof input?.title === 'string' ? input.title.trim() : '',
+        attachmentPaths: stagedAttachments,
+      }),
+      model: selection.codexModel,
+    });
+
+    if (!result.success) {
+      throw new Error(result.errorMessage);
+    }
+
+    const parsed = parseStructuredJsonObject(result.output);
+    const suggestedTitle = typeof parsed?.title === 'string' ? parsed.title.trim() : '';
+    const suggestedDescription = typeof parsed?.description === 'string' ? parsed.description.trim() : '';
+    const describedAttachments = Array.isArray(parsed?.attachments)
+      ? parsed.attachments
+          .filter((attachment) => attachment && typeof attachment.id === 'string' && typeof attachment.description === 'string')
+          .map((attachment) => ({
+            id: attachment.id,
+            description: attachment.description.trim(),
+          }))
+          .filter((attachment) => attachment.description.length > 0)
+      : [];
+
+    if (!suggestedTitle || !suggestedDescription) {
+      throw new Error('Codex returned an incomplete reference description result.');
+    }
+
+    return {
+      title: suggestedTitle,
+      description: suggestedDescription,
+      attachments: describedAttachments,
+    };
+  }
+
   async function getGeneratedImage(imageId) {
     const assets = await db
       .select({
@@ -1000,13 +2136,25 @@ async function createGenerationStore(userDataDir, options = {}) {
     getGeneratedImage,
     deleteGeneratedImage,
     listGeneratedImages,
+    listSceneGroups,
     listProjectsWithThreads,
     listReferences,
     createReference,
     createEnvironmentReference,
+    createReferenceCollection,
     updateReference,
     updateEnvironmentReference,
+    updateReferenceCollection,
     deleteReference,
+    describeReferenceCollection,
+    createSceneGroup,
+    updateSceneGroup,
+    createSceneFrame,
+    updateSceneFrame,
+    saveSceneFrameReferences,
+    generateSceneGroup,
+    structureScenePrompt,
+    cancelSceneGroupGeneration,
     close,
   };
 
@@ -1103,6 +2251,41 @@ async function createGenerationStore(userDataDir, options = {}) {
     if (jobIds.length > 0) {
       await db.delete(generatedAssetsTable).where(inArray(generatedAssetsTable.jobId, jobIds));
       await db.delete(generationJobsTable).where(inArray(generationJobsTable.id, jobIds));
+    }
+
+    const sceneGroups = await db
+      .select({ id: sceneGroupsTable.id })
+      .from(sceneGroupsTable)
+      .where(inArray(sceneGroupsTable.threadId, threadIds));
+    const sceneGroupIds = sceneGroups.map((sceneGroup) => sceneGroup.id);
+
+    if (sceneGroupIds.length > 0) {
+      const sceneFrames = await db
+        .select({ id: sceneFramesTable.id })
+        .from(sceneFramesTable)
+        .where(inArray(sceneFramesTable.sceneGroupId, sceneGroupIds));
+      const sceneFrameIds = sceneFrames.map((sceneFrame) => sceneFrame.id);
+      const sceneRuns = await db
+        .select({ id: sceneGroupRunsTable.id })
+        .from(sceneGroupRunsTable)
+        .where(inArray(sceneGroupRunsTable.sceneGroupId, sceneGroupIds));
+      const sceneRunIds = sceneRuns.map((sceneRun) => sceneRun.id);
+
+      if (sceneRunIds.length > 0) {
+        await db
+          .delete(sceneFrameAssetsTable)
+          .where(inArray(sceneFrameAssetsTable.sceneGroupRunId, sceneRunIds));
+        await db.delete(sceneGroupRunsTable).where(inArray(sceneGroupRunsTable.id, sceneRunIds));
+      }
+
+      if (sceneFrameIds.length > 0) {
+        await db
+          .delete(sceneFrameReferencesTable)
+          .where(inArray(sceneFrameReferencesTable.sceneFrameId, sceneFrameIds));
+        await db.delete(sceneFramesTable).where(inArray(sceneFramesTable.id, sceneFrameIds));
+      }
+
+      await db.delete(sceneGroupsTable).where(inArray(sceneGroupsTable.id, sceneGroupIds));
     }
 
     await deleteThreadsRow();
@@ -1293,6 +2476,8 @@ function buildProviderImageGenerationPrompt(input, providerLabel, capabilityInst
           'Set count to the total number of final image files you plan to create.',
           'Set applyToShimmers to true only when the UI should expand its loading shimmer placeholders to match count.',
           'If the UI should keep the original placeholder count, emit applyToShimmers as false.',
+          'Print that JSON line directly to stdout yourself.',
+          'Do not use shell commands, exec, tool calls, or helper scripts to emit the scene plan.',
           '',
         ]
       : mode === 'pinpoint'
@@ -1364,6 +2549,28 @@ function buildCodexImageGenerationPrompt(input) {
     'Codex',
     'Use Codex image generation capabilities to create image files for the following prompt.'
   );
+}
+
+function buildCodexSceneStructuringPrompt(sourceText) {
+  return [
+    'You are restructuring a pasted scene document for an Electron app.',
+    'Return exactly one JSON object and nothing else.',
+    'Do not use markdown fences.',
+    'Do not call tools.',
+    'Do not run shell commands.',
+    'Extract the general scene description and every frame prompt from the pasted document.',
+    'If the document contains both Portuguese and English versions, prefer the English frame prompts.',
+    'If the general scene description is only in Portuguese, translate it to English.',
+    'All output text must be in English.',
+    'Preserve character @mentions exactly when they appear.',
+    'Output JSON in this exact shape:',
+    '{"sceneDescription":"string","frames":[{"prompt":"string"}]}',
+    'Include one frames entry for each frame found in the source, in order.',
+    'If a frame title exists, do not output it separately; keep only the prompt text.',
+    '',
+    'Source document:',
+    sourceText,
+  ].join('\n');
 }
 
 function buildAntigravityImageGenerationPrompt(input) {
@@ -1517,6 +2724,24 @@ function parseGenerationManifest(manifestContent) {
   };
 }
 
+function parseStructuredJsonObject(outputText) {
+  const trimmed = outputText.trim();
+  if (!trimmed) {
+    throw new Error('Codex returned an empty response.');
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {}
+
+  const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fencedMatch) {
+    return JSON.parse(fencedMatch[1].trim());
+  }
+
+  throw new Error('Codex did not return valid JSON.');
+}
+
 async function importGeneratedImage(input) {
   const extension = path.extname(input.sourcePath).toLowerCase();
   const mimeTypes = {
@@ -1556,6 +2781,7 @@ function buildCodexExecArgs({ model = CODEX_MODEL_BY_ID[DEFAULT_CODEX_MODEL_ID],
 
   if (fastMode) {
     args.push('-c', 'service_tier="fast"');
+    args.push('-c', 'features.fast_mode=true');
   }
 
   args.push('exec', '--sandbox', 'workspace-write', '--skip-git-repo-check', '-');
@@ -1663,9 +2889,21 @@ async function prepareAntigravityHomeDirectory({ workingDirectory, model }) {
   };
 }
 
-function runCodexJob({ jobId, clientRunId, workingDirectory, prompt, requestedCount = 1, threadId, fastMode = false, model, onScenePlan }) {
+function runCodexJob({
+  jobId,
+  clientRunId,
+  workingDirectory,
+  prompt,
+  requestedCount = 1,
+  threadId,
+  fastMode = false,
+  model,
+  onScenePlan,
+  onCancelableRun,
+}) {
   return new Promise((resolve) => {
     const logPrefix = `[crenv:codex:${jobId}]`;
+    const startedAtMs = Date.now();
     const env = buildCodexSpawnEnv(workingDirectory);
     const codexArgs = buildCodexExecArgs({ model, fastMode });
 
@@ -1688,12 +2926,42 @@ function runCodexJob({ jobId, clientRunId, workingDirectory, prompt, requestedCo
     let stdoutLineBuffer = '';
     let stderr = '';
     let hasDispatchedScenePlan = false;
+    let cancellationRequested = false;
+    let firstStdoutAtMs = null;
+    let firstStderrAtMs = null;
 
     console.info(`${logPrefix} spawn: codex ${codexArgs.join(' ')}`);
     console.info(`${logPrefix} cwd: ${workingDirectory}`);
+    console.info(`${logPrefix} pid: ${child.pid ?? 'unknown'}`);
+    onCancelableRun?.({
+      jobId,
+      cancel(reason = 'user_requested') {
+        if (child.exitCode !== null || child.killed) {
+          return false;
+        }
+
+        cancellationRequested = true;
+        console.warn(`${logPrefix} cancel requested (${reason}) ${formatTraceElapsedMs(startedAtMs)}`);
+        child.kill('SIGTERM');
+        setTimeout(() => {
+          if (child.exitCode === null && !child.killed) {
+            console.warn(`${logPrefix} cancel escalation: SIGKILL ${formatTraceElapsedMs(startedAtMs)}`);
+            child.kill('SIGKILL');
+          }
+        }, CANCEL_EXIT_GRACE_MS).unref();
+        return true;
+      },
+    });
 
     child.stdout.on('data', (chunk) => {
       const text = chunk.toString();
+      if (firstStdoutAtMs === null) {
+        firstStdoutAtMs = Date.now();
+        console.info(`${logPrefix} first stdout ${formatTraceElapsedMs(startedAtMs)}`);
+      }
+      if (CODEX_DEEP_TRACE_ENABLED) {
+        console.info(`${logPrefix} stdout chunk (${text.length} chars) ${formatTraceElapsedMs(startedAtMs)}`);
+      }
       stdoutLineBuffer += text;
       const lines = stdoutLineBuffer.split('\n');
       stdoutLineBuffer = lines.pop() ?? '';
@@ -1705,36 +2973,54 @@ function runCodexJob({ jobId, clientRunId, workingDirectory, prompt, requestedCo
 
     child.stderr.on('data', (chunk) => {
       const text = chunk.toString();
+      if (firstStderrAtMs === null) {
+        firstStderrAtMs = Date.now();
+        console.info(`${logPrefix} first stderr ${formatTraceElapsedMs(startedAtMs)}`);
+      }
+      if (CODEX_DEEP_TRACE_ENABLED) {
+        console.info(`${logPrefix} stderr chunk (${text.length} chars) ${formatTraceElapsedMs(startedAtMs)}`);
+      }
       stderr += text;
       for (const line of text.split('\n')) {
         if (line.trim()) {
           processPotentialScenePlan(line);
-          console.error(`${logPrefix} stderr: ${line}`);
+          const traceKind = classifyCodexTraceLine(line);
+          console.error(`${logPrefix} stderr:${traceKind}: ${line}`);
         }
       }
     });
 
     child.on('error', (error) => {
-      console.error(`${logPrefix} process error: ${error.message}`);
+      console.error(`${logPrefix} process error ${formatTraceElapsedMs(startedAtMs)}: ${error.message}`);
       resolve({
         success: false,
         errorMessage: error.code === 'ENOENT' ? 'Codex CLI is not installed.' : error.message,
       });
     });
 
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       if (stdoutLineBuffer.trim()) {
         processStdoutLine(stdoutLineBuffer);
       }
 
       if (code === 0) {
-        console.info(`${logPrefix} process exited successfully`);
+        console.info(`${logPrefix} process exited successfully ${formatTraceElapsedMs(startedAtMs)}`);
         resolve({ success: true });
         return;
       }
 
+      if (cancellationRequested) {
+        console.warn(`${logPrefix} process canceled ${formatTraceElapsedMs(startedAtMs)} signal=${signal ?? 'none'}`);
+        resolve({
+          success: false,
+          canceled: true,
+          errorMessage: 'Generation canceled.',
+        });
+        return;
+      }
+
       const errorMessage = stderr.trim() || stdout.trim() || `Codex exited with code ${code}.`;
-      console.error(`${logPrefix} process exited with code ${code}`);
+      console.error(`${logPrefix} process exited with code ${code} ${formatTraceElapsedMs(startedAtMs)}`);
       resolve({
         success: false,
         errorMessage,
@@ -1743,6 +3029,7 @@ function runCodexJob({ jobId, clientRunId, workingDirectory, prompt, requestedCo
 
     child.stdin.write(prompt);
     child.stdin.end();
+    console.info(`${logPrefix} stdin:end ${formatTraceElapsedMs(startedAtMs)}`);
 
     function processStdoutLine(line) {
       const trimmedLine = line.trim();
@@ -1755,7 +3042,8 @@ function runCodexJob({ jobId, clientRunId, workingDirectory, prompt, requestedCo
       }
 
       stdout += `${line}\n`;
-      console.info(`${logPrefix} stdout: ${line}`);
+      const traceKind = classifyCodexTraceLine(line);
+      console.info(`${logPrefix} stdout:${traceKind}: ${line}`);
     }
 
     function processPotentialScenePlan(line) {
@@ -1780,6 +3068,92 @@ function runCodexJob({ jobId, clientRunId, workingDirectory, prompt, requestedCo
       console.info(`${logPrefix} scene plan: ${JSON.stringify({ ...scenePlan, count: plannedCount })}`);
       return true;
     }
+  });
+}
+
+function runCodexStructuredOutputJob({ jobId, workingDirectory, prompt, model }) {
+  return new Promise((resolve) => {
+    const logPrefix = `[crenv:codex:${jobId}]`;
+    const startedAtMs = Date.now();
+    const env = buildCodexSpawnEnv(workingDirectory);
+    const codexArgs = buildCodexExecArgs({ model, fastMode: false });
+
+    for (const directoryPath of [env.XDG_CACHE_HOME, env.XDG_CONFIG_HOME, env.XDG_STATE_HOME, env.TMPDIR]) {
+      fs.mkdirSync(directoryPath, { recursive: true });
+    }
+
+    const child = spawn('codex', codexArgs, {
+      cwd: workingDirectory,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stdoutLineBuffer = '';
+    let stderr = '';
+
+    console.info(`${logPrefix} structured spawn: codex ${codexArgs.join(' ')}`);
+    console.info(`${logPrefix} structured cwd: ${workingDirectory}`);
+    console.info(`${logPrefix} structured pid: ${child.pid ?? 'unknown'}`);
+
+    child.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      stdout += text;
+      stdoutLineBuffer += text;
+      const lines = stdoutLineBuffer.split('\n');
+      stdoutLineBuffer = lines.pop() ?? '';
+
+      if (CODEX_DEEP_TRACE_ENABLED) {
+        console.info(`${logPrefix} structured stdout chunk (${text.length} chars) ${formatTraceElapsedMs(startedAtMs)}`);
+      }
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        console.info(`${logPrefix} structured stdout:${classifyCodexTraceLine(line)}: ${line}`);
+      }
+    });
+
+    child.stderr.on('data', (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      if (CODEX_DEEP_TRACE_ENABLED) {
+        console.info(`${logPrefix} structured stderr chunk (${text.length} chars) ${formatTraceElapsedMs(startedAtMs)}`);
+      }
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        console.error(`${logPrefix} structured stderr:${classifyCodexTraceLine(line)}: ${line}`);
+      }
+    });
+
+    child.on('error', (error) => {
+      resolve({
+        success: false,
+        errorMessage: error.code === 'ENOENT' ? 'Codex CLI is not installed.' : error.message,
+      });
+    });
+
+    child.on('close', (code) => {
+      if (stdoutLineBuffer.trim()) {
+        console.info(
+          `${logPrefix} structured stdout:${classifyCodexTraceLine(stdoutLineBuffer)}: ${stdoutLineBuffer}`
+        );
+      }
+
+      if (code === 0) {
+        resolve({
+          success: true,
+          output: stdout,
+        });
+        return;
+      }
+
+      resolve({
+        success: false,
+        errorMessage: stderr.trim() || stdout.trim() || `Codex exited with code ${code}.`,
+      });
+    });
+
+    child.stdin.write(prompt);
+    child.stdin.end();
   });
 }
 
@@ -2098,9 +3472,14 @@ module.exports = {
   __test__: {
     buildAntigravityExecArgs,
     buildAntigravityImageGenerationPrompt,
+    buildCodexImageGenerationPrompt,
+    buildCodexSceneStructuringPrompt,
     buildCodexExecArgs,
+    classifyCodexTraceLine,
     buildAntigravitySpawnEnv,
     buildCodexSpawnEnv,
+    buildSceneFrameGenerationTasks,
+    buildSceneFramePrompt,
     prepareAntigravityHomeDirectory,
     parseImageManifestLine,
     parseScenePlanLine,

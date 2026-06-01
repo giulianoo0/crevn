@@ -49,6 +49,7 @@ interface ElectronReferenceImageRecord {
   bytesBase64: string;
   createdAt: string;
   category: 'characters' | 'environment' | 'objects';
+  collectionId?: string | null;
   environmentId?: string | null;
 }
 
@@ -62,6 +63,18 @@ interface ElectronCreateReferencePayload {
 }
 
 interface ElectronCreateEnvironmentReferencePayload {
+  title: string;
+  description?: string;
+  attachments: Array<{
+    name: string;
+    mimeType: string;
+    bytesBase64: string;
+    description?: string;
+  }>;
+}
+
+interface ElectronCreateReferenceCollectionPayload {
+  category: 'characters' | 'environment' | 'objects';
   title: string;
   description?: string;
   attachments: Array<{
@@ -93,9 +106,44 @@ interface ElectronUpdateEnvironmentReferencePayload {
   }>;
 }
 
+interface ElectronUpdateReferenceCollectionPayload {
+  category: 'characters' | 'environment' | 'objects';
+  collectionId: string;
+  title: string;
+  description?: string;
+  attachments: Array<{
+    id?: string;
+    name: string;
+    mimeType: string;
+    bytesBase64: string;
+    description?: string;
+  }>;
+}
+
+interface ElectronDescribeReferenceCollectionPayload {
+  category: 'characters' | 'environment' | 'objects';
+  title?: string;
+  attachments: Array<{
+    id: string;
+    name: string;
+    mimeType: string;
+    bytesBase64: string;
+  }>;
+}
+
+interface ElectronDescribeReferenceCollectionResult {
+  title: string;
+  description: string;
+  attachments: Array<{
+    id: string;
+    description: string;
+  }>;
+}
+
 interface ElectronDeleteReferencePayload {
   id: string;
   category: 'characters' | 'environment' | 'objects';
+  collectionId?: string;
   environmentId?: string;
 }
 
@@ -139,6 +187,83 @@ interface ElectronScenePlanEvent {
   applyToShimmers: boolean;
 }
 
+interface ElectronSceneFrameReadyEvent {
+  threadId: string;
+  sceneGroupId: string;
+  frameId: string;
+}
+
+interface ElectronStructuredScenePrompt {
+  sceneDescription: string;
+  frames: Array<{
+    prompt: string;
+  }>;
+}
+
+interface ElectronSceneFrameReferenceRecord {
+  id: string;
+  sceneFrameId: string;
+  referenceKind: 'saved_reference' | 'uploaded_attachment';
+  referenceId: string | null;
+  name: string;
+  mimeType: string;
+  bytesBase64: string;
+  createdAt: string;
+}
+
+interface ElectronSceneFrameAssetRecord {
+  id: string;
+  sceneGroupRunId: string;
+  sceneFrameId: string;
+  outputIndex: number;
+  originalPath: string;
+  storedPath: string;
+  fileName: string;
+  mimeType: string;
+  width: number | null;
+  height: number | null;
+  createdAt: string;
+}
+
+interface ElectronSceneFrameRecord {
+  id: string;
+  sceneGroupId: string;
+  title: string;
+  prompt: string;
+  frameOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  references: ElectronSceneFrameReferenceRecord[];
+  assets: ElectronSceneFrameAssetRecord[];
+}
+
+interface ElectronSceneGroupRunRecord {
+  id: string;
+  sceneGroupId: string;
+  threadId: string;
+  status: 'pending' | 'running' | 'succeeded' | 'failed';
+  provider: 'codex';
+  modelId: string;
+  modelLabel: string;
+  requestedFrameCount: number;
+  errorMessage: string | null;
+  durationMs: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ElectronSceneGroupRecord {
+  id: string;
+  threadId: string;
+  title: string;
+  prompt: string;
+  tocOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  frames: ElectronSceneFrameRecord[];
+  runs: ElectronSceneGroupRunRecord[];
+}
+
 interface Window {
   electronAPI?: {
     platform: string;
@@ -149,11 +274,20 @@ interface Window {
     createEnvironmentReference: (
       payload: ElectronCreateEnvironmentReferencePayload
     ) => Promise<ElectronReferenceImageRecord[]>;
+    createReferenceCollection: (
+      payload: ElectronCreateReferenceCollectionPayload
+    ) => Promise<ElectronReferenceImageRecord[]>;
     updateReference: (payload: ElectronUpdateReferencePayload) => Promise<ElectronReferenceImageRecord>;
     updateEnvironmentReference: (
       payload: ElectronUpdateEnvironmentReferencePayload
     ) => Promise<ElectronReferenceImageRecord[]>;
+    updateReferenceCollection: (
+      payload: ElectronUpdateReferenceCollectionPayload
+    ) => Promise<ElectronReferenceImageRecord[]>;
     deleteReference: (payload: ElectronDeleteReferencePayload) => Promise<void>;
+    describeReferenceCollection: (
+      payload: ElectronDescribeReferenceCollectionPayload
+    ) => Promise<ElectronDescribeReferenceCollectionResult>;
     ensureProjectThreadWorkspace: () => Promise<{
       project: ElectronProjectRecord;
       thread: ElectronThreadRecord;
@@ -174,9 +308,71 @@ interface Window {
     generateImages: (
       payload: ElectronGenerateImagesPayload
     ) => Promise<{ jobId: string; assets: ElectronGeneratedImageRecord[] }>;
+    listSceneGroups: (threadId: string) => Promise<ElectronSceneGroupRecord[]>;
+    createSceneGroup: (
+      threadId: string,
+      input: { title: string; prompt: string; tocOrder: number }
+    ) => Promise<ElectronSceneGroupRecord>;
+    updateSceneGroup: (
+      sceneGroupId: string,
+      input: { title: string; prompt: string; tocOrder: number }
+    ) => Promise<ElectronSceneGroupRecord>;
+    createSceneFrame: (
+      sceneGroupId: string,
+      input: { title: string; prompt: string; frameOrder: number }
+    ) => Promise<ElectronSceneGroupRecord>;
+    updateSceneFrame: (
+      sceneFrameId: string,
+      input: { title: string; prompt: string; frameOrder: number }
+    ) => Promise<ElectronSceneGroupRecord>;
+    saveSceneFrameReferences: (
+      sceneFrameId: string,
+      references: Array<{
+        id: string;
+        referenceKind: 'saved_reference' | 'uploaded_attachment';
+        referenceId: string | null;
+        name: string;
+        mimeType: string;
+        bytesBase64: string;
+        createdAt: string;
+      }>
+    ) => Promise<ElectronSceneGroupRecord>;
+    generateSceneGroup: (input: {
+      sceneGroupId: string;
+      targetFrameId?: string;
+      promptOverride?: string;
+      frameOverrides?: Array<{
+        id: string;
+        title: string;
+        prompt: string;
+        references?: Array<{
+          id: string;
+          referenceKind: 'saved_reference' | 'uploaded_attachment';
+          referenceId: string | null;
+          name: string;
+          mimeType: string;
+          bytesBase64: string;
+          createdAt: string;
+        }>;
+      }>;
+      referenceImages?: Array<{
+        name: string;
+        title?: string;
+        description?: string;
+        mimeType: string;
+        bytesBase64: string;
+      }>;
+      fastMode?: boolean;
+    }) => Promise<ElectronSceneGroupRecord>;
+    structureScenePrompt: (input: {
+      sourceText: string;
+      modelId?: string;
+    }) => Promise<ElectronStructuredScenePrompt>;
+    cancelSceneGroupGeneration: (sceneGroupId: string) => Promise<boolean>;
     copyGeneratedImage: (imageId: string) => Promise<void>;
     downloadGeneratedImage: (imageId: string) => Promise<boolean>;
     deleteGeneratedImage: (imageId: string) => Promise<void>;
     subscribeToScenePlan: (listener: (event: ElectronScenePlanEvent) => void) => () => void;
+    subscribeToSceneFrameReady: (listener: (event: ElectronSceneFrameReadyEvent) => void) => () => void;
   };
 }

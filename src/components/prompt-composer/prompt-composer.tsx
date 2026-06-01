@@ -56,9 +56,15 @@ type ClipboardPromptSegment =
   | { type: 'text'; text: string }
   | { type: 'mention'; id: string; title: string };
 
+type MentionCandidate = {
+  id: string;
+  title: string;
+};
+
 export type PromptComposerHandle = {
   focus: () => void;
   clear: () => void;
+  setText: (text: string, mentionCandidates?: MentionCandidate[]) => void;
   insertMention: (id: string, title: string) => void;
 };
 
@@ -67,6 +73,7 @@ type PromptComposerProps = {
   placeholder?: string;
   isExpanded: boolean;
   hasReferenceImages: boolean;
+  mentionCandidates?: MentionCandidate[];
   onTextChange: (text: string) => void;
   onMentionMatch: (match: MentionMatch | null) => void;
   onMentionIdsChange: (ids: string[]) => void;
@@ -169,6 +176,103 @@ function createNodesFromClipboardSegments(segments: ClipboardPromptSegment[]) {
   });
 }
 
+function insertClipboardNodes(nodes: ReturnType<typeof createNodesFromClipboardSegments>) {
+  if (nodes.length === 0) return;
+
+  const root = $getRoot();
+  const rootIsEmpty = root.getTextContent() === '';
+  if (rootIsEmpty) {
+    root.clear();
+    const paragraph = $createParagraphNode();
+    paragraph.append(...nodes);
+    root.append(paragraph);
+    return;
+  }
+
+  const selection = $getSelection();
+  if ($isRangeSelection(selection)) {
+    selection.insertNodes(nodes);
+    return;
+  }
+
+  const paragraph = $createParagraphNode();
+  paragraph.append(...nodes);
+  root.append(paragraph);
+}
+
+function parsePromptMentionText(
+  text: string,
+  mentionCandidates: MentionCandidate[],
+): ClipboardPromptSegment[] | null {
+  if (!text || mentionCandidates.length === 0 || !text.includes('@')) {
+    return null;
+  }
+
+  const candidatesByTitle = new Map<string, MentionCandidate>();
+  for (const candidate of mentionCandidates) {
+    const key = candidate.title.trim().toLocaleLowerCase();
+    if (!key || candidatesByTitle.has(key)) continue;
+    candidatesByTitle.set(key, candidate);
+  }
+
+  const mentionPattern = /(^|[\s([{'"`])@([^\s@.,!?;:()[\]{}'"`]+)/g;
+  const segments: ClipboardPromptSegment[] = [];
+  let hasMention = false;
+  let lastIndex = 0;
+
+  for (const match of text.matchAll(mentionPattern)) {
+    const fullMatch = match[0];
+    const leadingText = match[1] ?? '';
+    const rawTitle = match[2] ?? '';
+    const matchIndex = match.index ?? -1;
+    if (matchIndex < 0) continue;
+
+    const mentionCandidate = candidatesByTitle.get(rawTitle.toLocaleLowerCase());
+    if (!mentionCandidate) continue;
+
+    const mentionStart = matchIndex + leadingText.length;
+    const prefix = text.slice(lastIndex, mentionStart);
+    if (prefix) {
+      segments.push({ type: 'text', text: prefix });
+    }
+
+    segments.push({
+      type: 'mention',
+      id: mentionCandidate.id,
+      title: mentionCandidate.title,
+    });
+    hasMention = true;
+    lastIndex = matchIndex + fullMatch.length;
+  }
+
+  if (!hasMention) {
+    return null;
+  }
+
+  const trailingText = text.slice(lastIndex);
+  if (trailingText) {
+    segments.push({ type: 'text', text: trailingText });
+  }
+
+  return segments;
+}
+
+function writeComposerText(
+  editor: ReturnType<typeof useLexicalComposerContext>[0],
+  text: string,
+  mentionCandidates: MentionCandidate[],
+) {
+  editor.update(() => {
+    const root = $getRoot();
+    root.clear();
+    const paragraph = $createParagraphNode();
+    const segments = parsePromptMentionText(text, mentionCandidates);
+    const nodes = segments ? createNodesFromClipboardSegments(segments) : [$createTextNode(text)];
+    paragraph.append(...nodes);
+    root.append(paragraph);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Inner wrapper (needs LexicalComposerContext)
 // ---------------------------------------------------------------------------
@@ -180,6 +284,7 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
       ariaLabel,
       isExpanded,
       hasReferenceImages,
+      mentionCandidates = [],
       onTextChange,
       onMentionMatch,
       onMentionIdsChange,
@@ -207,11 +312,14 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
             root.clear();
           });
         },
+        setText: (text: string, nextMentionCandidates = mentionCandidates) => {
+          writeComposerText(editor, text, nextMentionCandidates);
+        },
         insertMention: (id: string, title: string) => {
           insertMentionRef.current?.(id, title);
         },
       }),
-      [editor],
+      [editor, mentionCandidates],
     );
 
     // Track selection changes and notify parent of cursor index
@@ -245,7 +353,6 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
               const textNode = $createTextNode(val);
               paragraph.append(textNode);
               root.append(paragraph);
-              // Position the caret at the end of the text node
               textNode.select(val.length, val.length);
             });
           },
@@ -266,35 +373,46 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
 
     const handlePaste = useCallback(
       (event: ClipboardEvent<HTMLDivElement>) => {
+        const stopHandledPaste = () => {
+          event.preventDefault();
+          event.stopPropagation();
+          const nativeEvent = event.nativeEvent as ClipboardEvent['nativeEvent'] & {
+            stopImmediatePropagation?: () => void;
+          };
+          nativeEvent.preventDefault?.();
+          nativeEvent.stopImmediatePropagation?.();
+        };
+
         const files = event.clipboardData?.files;
         if (files && files.length > 0) {
-          event.preventDefault();
+          stopHandledPaste();
           onPasteFiles?.(files);
           return;
         }
 
         const html = event.clipboardData?.getData('text/html') ?? '';
-        const segments = parsePromptMentionHtml(html);
+        const htmlSegments = parsePromptMentionHtml(html);
+        if (htmlSegments) {
+          stopHandledPaste();
+          editor.update(() => {
+            const nodes = createNodesFromClipboardSegments(htmlSegments);
+            insertClipboardNodes(nodes);
+          });
+          return;
+        }
+
+        const plainText = event.clipboardData?.getData('text/plain') ?? '';
+        const textSegments = parsePromptMentionText(plainText, mentionCandidates);
+        const segments = textSegments;
         if (segments) {
-          event.preventDefault();
+          stopHandledPaste();
           editor.update(() => {
             const nodes = createNodesFromClipboardSegments(segments);
-            if (nodes.length === 0) return;
-
-            const selection = $getSelection();
-            if ($isRangeSelection(selection)) {
-              selection.insertNodes(nodes);
-              return;
-            }
-
-            const root = $getRoot();
-            const paragraph = $createParagraphNode();
-            paragraph.append(...nodes);
-            root.append(paragraph);
+            insertClipboardNodes(nodes);
           });
         }
       },
-      [editor, onPasteFiles],
+      [editor, mentionCandidates, onPasteFiles],
     );
 
     const handleCopy = useCallback(
@@ -361,7 +479,7 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
         if (event.key === 'Enter' && event.shiftKey) {
           event.preventDefault();
           event.stopPropagation();
-          onSubmitRequested?.();
+          insertLineBreak();
           return;
         }
 
@@ -382,7 +500,7 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
         event.preventDefault();
         event.stopPropagation();
 
-        insertLineBreak();
+        onSubmitRequested?.();
       },
       [insertLineBreak, onMentionNavigationKey, onSubmitRequested],
     );
@@ -393,7 +511,7 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
         (event) => {
           if (event?.shiftKey) {
             event.preventDefault();
-            onSubmitRequested?.();
+            insertLineBreak();
             return true;
           }
 
@@ -403,7 +521,7 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
           }
 
           event?.preventDefault();
-          insertLineBreak();
+          onSubmitRequested?.();
 
           return true;
         },

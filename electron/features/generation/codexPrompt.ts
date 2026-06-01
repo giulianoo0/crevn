@@ -28,6 +28,9 @@ export function buildCodexImageGenerationPrompt(input: {
 
   return [
     'You are running inside a Codex batch job for an Electron app.',
+    'Use only the Imagen app workflow instructions provided in this batch job prompt.',
+    'Do not load, invoke, or rely on any global, shared, system, or unrelated local skill.',
+    'Do not use cinematic-angles, transitions-dev, or any skill outside this prompt unless the app explicitly embeds that guidance here.',
     'Use Codex image generation capabilities to create image files for the following prompt.',
     `Generation mode: ${mode}`,
     '',

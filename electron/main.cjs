@@ -83,6 +83,11 @@ app.whenReady().then(async () => {
         mainWindow.webContents.send('generation:scenePlan', payload);
       }
     },
+    onSceneFrameReady: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('generation:sceneFrameReady', payload);
+      }
+    },
   });
 
   ipcMain.handle('generation:listGeneratedImages', async (_event, threadId) => {
@@ -105,6 +110,10 @@ app.whenReady().then(async () => {
     return generationStore.createEnvironmentReference(payload);
   });
 
+  ipcMain.handle('generation:createReferenceCollection', async (_event, payload) => {
+    return generationStore.createReferenceCollection(payload);
+  });
+
   ipcMain.handle('generation:updateReference', async (_event, payload) => {
     return generationStore.updateReference(payload);
   });
@@ -113,8 +122,16 @@ app.whenReady().then(async () => {
     return generationStore.updateEnvironmentReference(payload);
   });
 
+  ipcMain.handle('generation:updateReferenceCollection', async (_event, payload) => {
+    return generationStore.updateReferenceCollection(payload);
+  });
+
   ipcMain.handle('generation:deleteReference', async (_event, payload) => {
     return generationStore.deleteReference(payload);
+  });
+
+  ipcMain.handle('generation:describeReferenceCollection', async (_event, payload) => {
+    return generationStore.describeReferenceCollection(payload);
   });
 
   ipcMain.handle('generation:ensureProjectThreadWorkspace', async () => {
@@ -151,6 +168,42 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('generation:generateImages', async (_event, payload) => {
     return generationStore.generateImages(payload);
+  });
+
+  ipcMain.handle('generation:listSceneGroups', async (_event, threadId) => {
+    return generationStore.listSceneGroups(threadId);
+  });
+
+  ipcMain.handle('generation:createSceneGroup', async (_event, threadId, input) => {
+    return generationStore.createSceneGroup(threadId, input);
+  });
+
+  ipcMain.handle('generation:updateSceneGroup', async (_event, sceneGroupId, input) => {
+    return generationStore.updateSceneGroup(sceneGroupId, input);
+  });
+
+  ipcMain.handle('generation:createSceneFrame', async (_event, sceneGroupId, input) => {
+    return generationStore.createSceneFrame(sceneGroupId, input);
+  });
+
+  ipcMain.handle('generation:updateSceneFrame', async (_event, sceneFrameId, input) => {
+    return generationStore.updateSceneFrame(sceneFrameId, input);
+  });
+
+  ipcMain.handle('generation:saveSceneFrameReferences', async (_event, sceneFrameId, references) => {
+    return generationStore.saveSceneFrameReferences(sceneFrameId, references);
+  });
+
+  ipcMain.handle('generation:generateSceneGroup', async (_event, input) => {
+    return generationStore.generateSceneGroup(input);
+  });
+
+  ipcMain.handle('generation:structureScenePrompt', async (_event, input) => {
+    return generationStore.structureScenePrompt(input);
+  });
+
+  ipcMain.handle('generation:cancelSceneGroupGeneration', async (_event, sceneGroupId) => {
+    return generationStore.cancelSceneGroupGeneration(sceneGroupId);
   });
 
   ipcMain.handle('generation:copyGeneratedImage', async (_event, imageId) => {

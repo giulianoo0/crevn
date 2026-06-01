@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
@@ -8,6 +8,9 @@ import { toast } from 'sonner';
 
 let scenePlanListener:
   | ((event: { jobId: string; clientRunId?: string; threadId: string; count: number; applyToShimmers: boolean }) => void)
+  | null = null;
+let sceneFrameReadyListener:
+  | ((event: { threadId: string; sceneGroupId: string; frameId: string }) => void)
   | null = null;
 
 const projectFixture = {
@@ -37,6 +40,45 @@ const projectFixture = {
   ],
 };
 
+const makeSceneGroupsFixture = () => [
+  {
+    id: 'scene-group-1',
+    threadId: 'thread-1',
+    title: 'Scene 1',
+    prompt: '',
+    tocOrder: 1,
+    createdAt: '2026-06-01T10:00:00.000Z',
+    updatedAt: '2026-06-01T10:00:00.000Z',
+    frames: [
+      {
+        id: 'scene-frame-1',
+        sceneGroupId: 'scene-group-1',
+        title: 'Frame 1',
+        prompt: '',
+        frameOrder: 1,
+        createdAt: '2026-06-01T10:01:00.000Z',
+        updatedAt: '2026-06-01T10:01:00.000Z',
+        references: [],
+        assets: [],
+      },
+      {
+        id: 'scene-frame-2',
+        sceneGroupId: 'scene-group-1',
+        title: 'Frame 2',
+        prompt: '',
+        frameOrder: 2,
+        createdAt: '2026-06-01T10:02:00.000Z',
+        updatedAt: '2026-06-01T10:02:00.000Z',
+        references: [],
+        assets: [],
+      },
+    ],
+    runs: [],
+  },
+];
+
+let sceneGroupsFixture = makeSceneGroupsFixture();
+
 vi.mock('./lib/electron-api', () => ({
   ensureProjectThreadWorkspace: vi.fn(async () => ({
     project: projectFixture,
@@ -46,6 +88,7 @@ vi.mock('./lib/electron-api', () => ({
   listReferences: vi.fn(async () => []),
   createReference: vi.fn(async (payload) => ({
     id: 'reference-created',
+    collectionId: null,
     createdAt: '2026-05-26T12:00:00.000Z',
     description: payload.description ?? null,
     category: payload.category,
@@ -54,6 +97,7 @@ vi.mock('./lib/electron-api', () => ({
   createEnvironmentReference: vi.fn(async (payload) =>
     payload.attachments.map((attachment: { name: string; mimeType: string; bytesBase64: string }, index: number) => ({
       id: `environment-reference-${index + 1}`,
+      collectionId: 'environment-1',
       environmentId: 'environment-1',
       title: payload.title,
       description: payload.description ?? null,
@@ -64,8 +108,23 @@ vi.mock('./lib/electron-api', () => ({
       category: 'environment',
     }))
   ),
+  createReferenceCollection: vi.fn(async (payload) =>
+    payload.attachments.map((attachment: { name: string; mimeType: string; bytesBase64: string; description?: string }, index: number) => ({
+      id: `${payload.category}-reference-${index + 1}`,
+      collectionId: `${payload.category}-collection-1`,
+      environmentId: payload.category === 'environment' ? 'environment-1' : null,
+      title: payload.title,
+      description: attachment.description ?? payload.description ?? null,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      bytesBase64: attachment.bytesBase64,
+      createdAt: '2026-05-26T12:00:00.000Z',
+      category: payload.category,
+    }))
+  ),
   updateReference: vi.fn(async (payload) => ({
     id: payload.id,
+    collectionId: null,
     environmentId: payload.environmentId ?? null,
     name: 'updated.png',
     title: payload.title,
@@ -88,7 +147,119 @@ vi.mock('./lib/electron-api', () => ({
       category: 'environment',
     }))
   ),
+  updateReferenceCollection: vi.fn(async (payload) =>
+    payload.attachments.map((attachment: { id?: string; name: string; mimeType: string; bytesBase64: string; description?: string }, index: number) => ({
+      id: attachment.id ?? `${payload.category}-reference-${index + 1}`,
+      collectionId: payload.collectionId,
+      environmentId: payload.category === 'environment' ? payload.collectionId : null,
+      title: payload.title,
+      description: attachment.description ?? payload.description ?? null,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      bytesBase64: attachment.bytesBase64,
+      createdAt: '2026-05-26T12:00:00.000Z',
+      category: payload.category,
+    }))
+  ),
+  describeReferenceCollection: vi.fn(async (payload) => ({
+    title: payload.title ?? 'Generated reference title',
+    description: 'Shared generated description',
+    attachments: payload.attachments.map((attachment: { id: string }, index: number) => ({
+      id: attachment.id,
+      description: `Angle ${index + 1} description`,
+    })),
+  })),
   listGeneratedImages: vi.fn(async () => []),
+  listSceneGroups: vi.fn(async () => sceneGroupsFixture),
+  createSceneGroup: vi.fn(async (_threadId: string, input: { title: string; prompt: string; tocOrder: number }) => {
+    const created = {
+      id: `scene-group-${sceneGroupsFixture.length + 1}`,
+      threadId: 'thread-1',
+      title: input.title,
+      prompt: input.prompt,
+      tocOrder: input.tocOrder,
+      createdAt: '2026-06-01T10:10:00.000Z',
+      updatedAt: '2026-06-01T10:10:00.000Z',
+      frames: [],
+      runs: [],
+    };
+    sceneGroupsFixture = [created, ...sceneGroupsFixture];
+    return created;
+  }),
+  updateSceneGroup: vi.fn(async (sceneGroupId: string, input: { title: string; prompt: string; tocOrder: number }) => {
+    sceneGroupsFixture = sceneGroupsFixture.map((sceneGroup) =>
+      sceneGroup.id === sceneGroupId ? { ...sceneGroup, ...input } : sceneGroup
+    );
+    return sceneGroupsFixture.find((sceneGroup) => sceneGroup.id === sceneGroupId);
+  }),
+  createSceneFrame: vi.fn(async (sceneGroupId: string, input: { title: string; prompt: string; frameOrder: number }) => {
+    sceneGroupsFixture = sceneGroupsFixture.map((sceneGroup) =>
+      sceneGroup.id === sceneGroupId
+        ? {
+            ...sceneGroup,
+            frames: [
+              ...sceneGroup.frames,
+              {
+                id: `scene-frame-${sceneGroup.frames.length + 1}`,
+                sceneGroupId,
+                title: input.title,
+                prompt: input.prompt,
+                frameOrder: input.frameOrder,
+                createdAt: '2026-06-01T10:11:00.000Z',
+                updatedAt: '2026-06-01T10:11:00.000Z',
+                references: [],
+                assets: [],
+              },
+            ],
+          }
+        : sceneGroup
+    );
+    return sceneGroupsFixture.find((sceneGroup) => sceneGroup.id === sceneGroupId);
+  }),
+  updateSceneFrame: vi.fn(async (sceneFrameId: string, input: { title: string; prompt: string; frameOrder: number }) => {
+    let updatedGroup = null;
+    sceneGroupsFixture = sceneGroupsFixture.map((sceneGroup) => {
+      const hasFrame = sceneGroup.frames.some((frame) => frame.id === sceneFrameId);
+      if (!hasFrame) return sceneGroup;
+      updatedGroup = {
+        ...sceneGroup,
+        frames: sceneGroup.frames.map((frame) => (frame.id === sceneFrameId ? { ...frame, ...input } : frame)),
+      };
+      return updatedGroup;
+    });
+    return updatedGroup;
+  }),
+  saveSceneFrameReferences: vi.fn(async (sceneFrameId: string, references: unknown[]) => {
+    let updatedGroup = null;
+    sceneGroupsFixture = sceneGroupsFixture.map((sceneGroup) => {
+      const hasFrame = sceneGroup.frames.some((frame) => frame.id === sceneFrameId);
+      if (!hasFrame) return sceneGroup;
+      updatedGroup = {
+        ...sceneGroup,
+        frames: sceneGroup.frames.map((frame) =>
+          frame.id === sceneFrameId ? { ...frame, references: references as never[] } : frame
+        ),
+      };
+      return updatedGroup;
+    });
+    return updatedGroup;
+  }),
+  generateSceneGroup: vi.fn(async (input: string | { sceneGroupId: string }) => {
+    const sceneGroupId = typeof input === 'string' ? input : input.sceneGroupId;
+    const sceneGroup = sceneGroupsFixture.find((entry) => entry.id === sceneGroupId);
+    if (!sceneGroup) {
+      throw new Error('Scene group not found');
+    }
+    return sceneGroup;
+  }),
+  structureScenePrompt: vi.fn(async () => ({
+    sceneDescription: 'English scene description',
+    frames: [
+      { prompt: 'English frame 1 prompt' },
+      { prompt: 'English frame 2 prompt' },
+    ],
+  })),
+  cancelSceneGroupGeneration: vi.fn(async () => undefined),
   createProject: vi.fn(),
   createThread: vi.fn(),
   renameProject: vi.fn(),
@@ -105,6 +276,14 @@ vi.mock('./lib/electron-api', () => ({
     return () => {
       if (scenePlanListener === listener) {
         scenePlanListener = null;
+      }
+    };
+  }),
+  subscribeToSceneFrameReady: vi.fn((listener) => {
+    sceneFrameReadyListener = listener;
+    return () => {
+      if (sceneFrameReadyListener === listener) {
+        sceneFrameReadyListener = null;
       }
     };
   }),
@@ -272,8 +451,18 @@ describe('App header thread title', () => {
     vi.clearAllMocks();
     vi.restoreAllMocks();
     scenePlanListener = null;
+    sceneFrameReadyListener = null;
+    sceneGroupsFixture = makeSceneGroupsFixture();
+    Object.assign(window, {
+      ResizeObserver: class {
+        observe() {}
+        disconnect() {}
+        unobserve() {}
+      },
+    });
     vi.mocked(electronApi.listReferences).mockResolvedValue([]);
     vi.mocked(electronApi.listGeneratedImages).mockResolvedValue([]);
+    vi.mocked(electronApi.listSceneGroups).mockImplementation(async () => sceneGroupsFixture);
     vi.mocked(electronApi.createReference).mockImplementation(async (payload) => ({
       id: 'reference-created',
       createdAt: '2026-05-26T12:00:00.000Z',
@@ -630,6 +819,68 @@ describe('App header thread title', () => {
 
     expect(vi.mocked(toast.message)).toHaveBeenCalledWith('Generating 6 images');
     expect(screen.getAllByLabelText(/loading$/i)).toHaveLength(1);
+
+    await act(async () => {
+      resolveGeneration?.({ jobId: 'job-1', assets: [] });
+      await vi.runAllTimersAsync();
+    });
+  });
+
+  it('does not carry a previous thread loading state into the next thread while images are loading', async () => {
+    let resolveGeneration: ((value: { jobId: string; assets: [] }) => void) | null = null;
+    let resolveThreadTwoImages: ((value: never[]) => void) | null = null;
+
+    vi.mocked(electronApi.generateImages).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        })
+    );
+    vi.mocked(electronApi.listGeneratedImages).mockImplementation((threadId: string) => {
+      if (threadId === 'thread-2') {
+        return new Promise((resolve) => {
+          resolveThreadTwoImages = resolve as (value: never[]) => void;
+        });
+      }
+
+      return Promise.resolve([]);
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.focus(screen.getByRole('textbox'));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByRole('textbox'), {
+        target: { value: 'A consistent subway platform scene' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getAllByLabelText(/loading$/i)).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Thread Two' }));
+
+    expect(screen.queryByLabelText('image-0 loading')).not.toBeInTheDocument();
+    expect(screen.queryAllByLabelText(/loading$/i)).toHaveLength(0);
+
+    await act(async () => {
+      resolveThreadTwoImages?.([]);
+      await vi.runAllTimersAsync();
+    });
 
     await act(async () => {
       resolveGeneration?.({ jobId: 'job-1', assets: [] });
@@ -1408,6 +1659,71 @@ describe('App header thread title', () => {
     expect(screen.getByRole('button', { name: 'Delete selected images' })).toBeInTheDocument();
   });
 
+  it('can add selected classic images as one grouped item reference from the floating bar', async () => {
+    vi.mocked(electronApi.listGeneratedImages).mockResolvedValue([
+      {
+        id: 'generated-1',
+        fileName: 'frame-1.png',
+        fileUrl: 'crenv-asset://generated?path=frame-1.png',
+        createdAt: '2026-05-26T10:30:00.000Z',
+      },
+      {
+        id: 'generated-2',
+        fileName: 'frame-2.png',
+        fileUrl: 'crenv-asset://generated?path=frame-2.png',
+        createdAt: '2026-05-26T10:31:00.000Z',
+      },
+    ]);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      blob: async () => new Blob([Uint8Array.from([1, 2, 3, 4])], { type: 'image/png' }),
+      arrayBuffer: async () => Uint8Array.from([1, 2, 3, 4]).buffer,
+      headers: { get: () => 'image/png' },
+    } as Response);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select frame-1.png' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select frame-2.png' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add selected images as reference' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Item' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Environment' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Character' })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Title'), {
+      target: { value: 'Hover bikes' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save reference' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.createReferenceCollection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: 'objects',
+        title: 'Hover bikes',
+        attachments: [
+          expect.objectContaining({ name: 'frame-1.png' }),
+          expect.objectContaining({ name: 'frame-2.png' }),
+        ],
+      })
+    );
+  });
+
   it('shows the backend generation error message when generation fails', async () => {
     vi.mocked(electronApi.generateImages).mockRejectedValue(new Error('Codex CLI failed to initialize.'));
 
@@ -1565,6 +1881,597 @@ describe('App header thread title', () => {
     expect(screen.getByRole('button', { name: 'Frame 3' })).toBeInTheDocument();
   });
 
+  it('converts pasted scene mentions using saved references case-insensitively', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValueOnce([
+      {
+        id: 'reference-tito',
+        name: 'tito.png',
+        title: 'Tito',
+        description: 'Main character',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'characters',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const sceneInput = screen.getByRole('textbox', { name: 'Scene Description' });
+
+    await act(async () => {
+      fireEvent.paste(sceneInput, {
+        clipboardData: {
+          files: [],
+          getData: (type: string) => {
+            if (type === 'text/plain') return 'Use @tito, close-up';
+            return '';
+          },
+        },
+      });
+    });
+
+    expect(within(sceneInput).getByTestId('selected-reference-mention')).toHaveTextContent('Tito');
+    expect(sceneInput).toHaveTextContent('Use Tito, close-up');
+  });
+
+  it('runs scene generation for the active scene group', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Generate frames' }));
+    });
+
+    expect(electronApi.generateSceneGroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sceneGroupId: 'scene-group-1',
+        fastMode: true,
+      })
+    );
+  });
+
+  it('runs scene generation for a single frame from the frame accordion', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Generate Frame 1' }));
+    });
+
+    expect(electronApi.generateSceneGroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sceneGroupId: 'scene-group-1',
+        targetFrameId: 'scene-frame-1',
+      })
+    );
+  });
+
+  it('shows scene generation feedback while frames are being generated', async () => {
+    let resolveGeneration: ((value: Awaited<ReturnType<typeof electronApi.generateSceneGroup>>) => void) | null = null;
+    vi.mocked(electronApi.generateSceneGroup).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        })
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Generate frames' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.queryByText('No scenes generated yet')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stop generation' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Frame 1 · 1 loading')).toBeInTheDocument();
+    expect(screen.getByLabelText('Frame 2 · 1 loading')).toBeInTheDocument();
+    expect(screen.getAllByLabelText(/loading$/i)).toHaveLength(2);
+
+    sceneGroupsFixture = [
+      {
+        ...sceneGroupsFixture[0],
+        runs: [
+          {
+            id: 'scene-run-1',
+            sceneGroupId: 'scene-group-1',
+            threadId: 'thread-1',
+            status: 'running',
+            provider: 'codex',
+            modelId: 'codex-gpt-5-4-mini',
+            modelLabel: 'Codex / GPT-5.4 Mini',
+            requestedFrameCount: 2,
+            errorMessage: null,
+            durationMs: null,
+            createdAt: '2026-06-01T12:00:00.000Z',
+            updatedAt: '2026-06-01T12:00:00.000Z',
+          },
+        ],
+        frames: [
+          {
+            ...sceneGroupsFixture[0].frames[0],
+            assets: [
+              {
+                id: 'scene-asset-1',
+                sceneGroupRunId: 'scene-run-1',
+                sceneFrameId: 'scene-frame-1',
+                outputIndex: 0,
+                originalPath: '/tmp/frame-1.png',
+                storedPath: '/tmp/frame-1.png',
+                fileName: 'frame-1.png',
+                mimeType: 'image/png',
+                width: 1280,
+                height: 720,
+                createdAt: '2026-06-01T12:00:01.000Z',
+              },
+            ],
+          },
+          sceneGroupsFixture[0].frames[1],
+        ],
+      },
+    ];
+
+    await act(async () => {
+      sceneFrameReadyListener?.({
+        threadId: 'thread-1',
+        sceneGroupId: 'scene-group-1',
+        frameId: 'scene-frame-1',
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.queryByLabelText('Frame 1 · 1 loading')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Frame 2 · 1 loading')).toBeInTheDocument();
+
+    const generatedSceneGroup = {
+      ...sceneGroupsFixture[0],
+      runs: [
+        {
+          id: 'scene-run-1',
+          sceneGroupId: 'scene-group-1',
+          threadId: 'thread-1',
+          status: 'succeeded',
+          provider: 'codex',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+          requestedFrameCount: 2,
+          errorMessage: null,
+          durationMs: 1200,
+          createdAt: '2026-06-01T12:00:00.000Z',
+          updatedAt: '2026-06-01T12:00:01.200Z',
+        },
+      ],
+      frames: [
+        {
+          ...sceneGroupsFixture[0].frames[0],
+          assets: [
+            {
+              id: 'scene-asset-1',
+              sceneGroupRunId: 'scene-run-1',
+              sceneFrameId: 'scene-frame-1',
+              outputIndex: 0,
+              originalPath: '/tmp/frame-1.png',
+              storedPath: '/tmp/frame-1.png',
+              fileName: 'frame-1.png',
+              mimeType: 'image/png',
+              width: 1280,
+              height: 720,
+              createdAt: '2026-06-01T12:00:01.000Z',
+            },
+          ],
+        },
+        {
+          ...sceneGroupsFixture[0].frames[1],
+          assets: [
+            {
+              id: 'scene-asset-2',
+              sceneGroupRunId: 'scene-run-1',
+              sceneFrameId: 'scene-frame-2',
+              outputIndex: 0,
+              originalPath: '/tmp/frame-2.png',
+              storedPath: '/tmp/frame-2.png',
+              fileName: 'frame-2.png',
+              mimeType: 'image/png',
+              width: 1280,
+              height: 720,
+              createdAt: '2026-06-01T12:00:01.050Z',
+            },
+          ],
+        },
+      ],
+    };
+
+    await act(async () => {
+      resolveGeneration?.(generatedSceneGroup as never);
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Generate frames' })).not.toBeDisabled();
+    expect(screen.queryByLabelText('Frame 1 · 1 loading')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Frame 2 · 1 loading')).not.toBeInTheDocument();
+    expect(screen.getByText(/outputs/i)).toBeInTheDocument();
+    expect(screen.getByText('Codex / GPT-5.4 Mini')).toBeInTheDocument();
+    expect(screen.getByText('Frame 1 · 1')).toBeInTheDocument();
+    expect(screen.getByText('Frame 2 · 1')).toBeInTheDocument();
+  });
+
+  it('stops scene generation without clearing prompts', async () => {
+    let resolveGeneration: ((value: Awaited<ReturnType<typeof electronApi.generateSceneGroup>>) => void) | null = null;
+    vi.mocked(electronApi.generateSceneGroup).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        })
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByRole('textbox', { name: 'Scene Description' }), {
+        target: { value: 'Keep Tito in the same control room' },
+      });
+      fireEvent.change(screen.getByRole('textbox', { name: 'Describe the opening frame' }), {
+        target: { value: 'Wide control-room establishing frame' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Generate frames' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Stop generation' })).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Stop generation' }));
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.cancelSceneGroupGeneration).toHaveBeenCalledWith('scene-group-1');
+    expect(screen.getByRole('button', { name: 'Generate frames' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Scene Description' })).toHaveValue(
+      'Keep Tito in the same control room'
+    );
+    expect(screen.getByRole('textbox', { name: 'Describe the opening frame' })).toHaveValue(
+      'Wide control-room establishing frame'
+    );
+
+    await act(async () => {
+      resolveGeneration?.(sceneGroupsFixture[0] as never);
+      await vi.runAllTimersAsync();
+    });
+  });
+
+  it('reads the clipboard and fills the scene description and frame prompts in English', async () => {
+    const clipboardReadText = vi.fn(async () => 'Cena colada do clipboard');
+    Object.assign(navigator, {
+      clipboard: {
+        readText: clipboardReadText,
+      },
+    });
+
+    vi.mocked(electronApi.structureScenePrompt).mockResolvedValueOnce({
+      sceneDescription: 'The team arrives in the futuristic garage and prepares for departure.',
+      frames: [
+        { prompt: 'Wide establishing frame of the garage entrance and the team arriving.' },
+        { prompt: 'Medium-wide frame revealing safety gear and all vehicles.' },
+        { prompt: 'Close-up of Tito securing his helmet beside the orange motorcycle.' },
+      ],
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Structure scene from clipboard' }));
+      await vi.runAllTimersAsync();
+    });
+
+    expect(clipboardReadText).toHaveBeenCalledTimes(1);
+    expect(electronApi.structureScenePrompt).toHaveBeenCalledWith({
+      sourceText: 'Cena colada do clipboard',
+      modelId: 'codex-gpt-5-4-mini',
+    });
+    expect(screen.getByRole('textbox', { name: 'Scene Description' })).toHaveTextContent(
+      'The team arrives in the futuristic garage and prepares for departure.'
+    );
+    const frameTextboxes = screen.getAllByRole('textbox', { name: /Describe/ });
+    expect(frameTextboxes[0]).toHaveTextContent('Wide establishing frame of the garage entrance and the team arriving.');
+    expect(frameTextboxes[1]).toHaveTextContent('Medium-wide frame revealing safety gear and all vehicles.');
+    expect(electronApi.createSceneFrame).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Frame 3' })).toBeInTheDocument();
+  });
+
+  it('shows a loading state on the scene-structure wand while clipboard structuring is running', async () => {
+    const clipboardReadText = vi.fn(async () => 'Scene from clipboard');
+    Object.assign(navigator, {
+      clipboard: {
+        readText: clipboardReadText,
+      },
+    });
+
+    let resolveStructure: ((value: Awaited<ReturnType<typeof electronApi.structureScenePrompt>>) => void) | null = null;
+    vi.mocked(electronApi.structureScenePrompt).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveStructure = resolve;
+        })
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Structure scene from clipboard' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Structure scene from clipboard' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Structure scene from clipboard' })).toHaveAttribute('aria-busy', 'true');
+
+    await act(async () => {
+      resolveStructure?.({
+        sceneDescription: 'Structured scene description',
+        frames: [{ prompt: 'Frame one' }, { prompt: 'Frame two' }],
+      } as never);
+      await vi.runAllTimersAsync();
+    });
+
+    expect(clipboardReadText).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Structure scene from clipboard' })).not.toBeDisabled();
+  });
+
+  it('shows loading only for the targeted frame when generating from the frame accordion', async () => {
+    let resolveGeneration: ((value: Awaited<ReturnType<typeof electronApi.generateSceneGroup>>) => void) | null = null;
+    vi.mocked(electronApi.generateSceneGroup).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        })
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Generate Frame 1' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Generating Frame 1' })).toBeDisabled();
+    expect(screen.getByLabelText('Frame 1 · 1 loading')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Frame 2 · 1 loading')).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveGeneration?.(sceneGroupsFixture[0] as never);
+      await vi.runAllTimersAsync();
+    });
+  });
+
+  it('passes the live scene description, frame prompts, and scene references into scene generation', async () => {
+    const sceneReference = new File(['scene-ref'], 'scene-ref.png', { type: 'image/png' });
+    const frameReference = new File(['frame-ref'], 'frame-ref.png', { type: 'image/png' });
+    Object.defineProperty(sceneReference, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([1, 2, 3, 4]).buffer),
+    });
+    Object.defineProperty(frameReference, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([9, 8, 7, 6]).buffer),
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByRole('textbox', { name: 'Scene Description' }), {
+        target: { value: 'Control room continuity with Tito and warm monitors' },
+      });
+      fireEvent.change(screen.getByRole('textbox', { name: 'Describe the opening frame' }), {
+        target: { value: 'Wide establishing shot of the control room' },
+      });
+      fireEvent.change(screen.getByRole('textbox', { name: 'Describe this frame' }), {
+        target: { value: 'Closer reaction shot on Tito at the console' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('scene-description-reference-input'), {
+        target: { files: [sceneReference] },
+      });
+      fireEvent.change(screen.getByTestId('scene-frame-1-reference-input'), {
+        target: { files: [frameReference] },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.saveSceneFrameReferences).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Generate frames' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.generateSceneGroup).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sceneGroupId: 'scene-group-1',
+        promptOverride: 'Control room continuity with Tito and warm monitors',
+        frameOverrides: [
+          expect.objectContaining({
+            id: 'scene-frame-1',
+            title: 'Frame 1',
+            prompt: 'Wide establishing shot of the control room',
+            references: [
+              expect.objectContaining({
+                name: 'frame-ref.png',
+                mimeType: 'image/png',
+              }),
+            ],
+          }),
+          expect.objectContaining({
+            id: 'scene-frame-2',
+            title: 'Frame 2',
+            prompt: 'Closer reaction shot on Tito at the console',
+            references: [],
+          }),
+        ],
+        referenceImages: [
+          expect.objectContaining({
+            name: 'scene-ref.png',
+            mimeType: 'image/png',
+          }),
+        ],
+      })
+    );
+  });
+
+  it('creates a frame even if the active scene group is still missing locally', async () => {
+    vi.mocked(electronApi.listSceneGroups).mockResolvedValue([]);
+    vi.mocked(electronApi.createSceneGroup).mockImplementationOnce(async () => ({
+      id: 'scene-group-created',
+      threadId: 'thread-1',
+      title: 'Scene 1',
+      prompt: '',
+      tocOrder: 1,
+      createdAt: '2026-06-01T10:10:00.000Z',
+      updatedAt: '2026-06-01T10:10:00.000Z',
+      frames: [],
+      runs: [],
+    }));
+    vi.mocked(electronApi.createSceneFrame).mockImplementation(async (sceneGroupId, input) => ({
+      id: sceneGroupId,
+      threadId: 'thread-1',
+      title: 'Scene 1',
+      prompt: '',
+      tocOrder: 1,
+      createdAt: '2026-06-01T10:10:00.000Z',
+      updatedAt: '2026-06-01T10:10:00.000Z',
+      frames: [
+        {
+          id: 'scene-frame-created',
+          sceneGroupId,
+          title: input.title,
+          prompt: input.prompt,
+          frameOrder: input.frameOrder,
+          createdAt: '2026-06-01T10:11:00.000Z',
+          updatedAt: '2026-06-01T10:11:00.000Z',
+          references: [],
+          assets: [],
+        },
+      ],
+      runs: [],
+    }));
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'New frame' }));
+    });
+
+    expect(electronApi.createSceneGroup).toHaveBeenCalled();
+    expect(electronApi.createSceneFrame).toHaveBeenCalled();
+  });
+
   it('resizes the scenes sidebar when dragging the resize handle', async () => {
     window.innerWidth = 1400;
 
@@ -1597,6 +2504,41 @@ describe('App header thread title', () => {
     expect(sidebarShell).toHaveStyle({ width: '640px' });
   });
 
+  it('keeps the scene composer above the attachment strip', async () => {
+    const frameReference = new File(['scene-ref'], 'scene-ref.png', { type: 'image/png' });
+    Object.defineProperty(frameReference, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([9, 8, 7, 6]).buffer),
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('scene-frame-1-reference-input'), {
+        target: { files: [frameReference] },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    const composerShell = screen.getByTestId('scene-frame-1-composer-shell');
+    const attachmentsRow = screen.getByTestId('scene-frame-1-attachments-row');
+
+    expect(composerShell.className).toContain('min-h-0');
+    expect(composerShell.className).toContain('flex-1');
+    expect(attachmentsRow.className).not.toContain('absolute');
+    expect(within(attachmentsRow).getByRole('button', { name: 'Add Reference' })).toBeInTheDocument();
+    expect(screen.getByAltText('scene-ref.png')).toBeInTheDocument();
+  });
+
   it('opens the references page and adds a reference with metadata', async () => {
     const referenceImage = new File(['saved-reference'], 'face.png', { type: 'image/png' });
     Object.defineProperty(referenceImage, 'arrayBuffer', {
@@ -1615,8 +2557,8 @@ describe('App header thread title', () => {
     expect(screen.getByRole('heading', { name: 'Characters' })).toBeInTheDocument();
     expect(screen.getByText('Save character visuals and identity notes for consistent people across generations.')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add character' }));
-    fireEvent.change(screen.getByLabelText('Image'), {
+    fireEvent.click(screen.getByRole('button', { name: 'Add character images' }));
+    fireEvent.change(screen.getByLabelText('Images'), {
       target: { files: [referenceImage] },
     });
     fireEvent.change(screen.getByLabelText('Title'), {
@@ -1656,7 +2598,7 @@ describe('App header thread title', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Add character' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add character images' }));
     fireEvent.drop(screen.getByText('Drop an image here'), {
       dataTransfer: { files: [droppedImage] },
     });
@@ -1697,7 +2639,7 @@ describe('App header thread title', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
     fireEvent.click(screen.getByRole('button', { name: 'Add environment images' }));
-    fireEvent.change(screen.getByLabelText('Image'), {
+    fireEvent.change(screen.getByLabelText('Images'), {
       target: { files: [imageOne, imageTwo] },
     });
     fireEvent.change(screen.getByLabelText('Title'), {
@@ -1706,16 +2648,17 @@ describe('App header thread title', () => {
     fireEvent.change(screen.getByLabelText('Description'), {
       target: { value: 'Concrete floor, industrial lighting, steel shelves.' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save references' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save reference' }));
 
     await act(async () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(electronApi.createEnvironmentReference).toHaveBeenCalledTimes(1);
-    expect(electronApi.createEnvironmentReference).toHaveBeenNthCalledWith(
+    expect(electronApi.createReferenceCollection).toHaveBeenCalledTimes(1);
+    expect(electronApi.createReferenceCollection).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
+        category: 'environment',
         title: 'Warehouse',
         description: 'Concrete floor, industrial lighting, steel shelves.',
         attachments: [
@@ -2029,8 +2972,8 @@ describe('App header thread title', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     fireEvent.click(screen.getByRole('button', { name: /characters/i }));
-    fireEvent.click(screen.getByRole('button', { name: 'Add character' }));
-    fireEvent.change(screen.getByLabelText('Image'), {
+    fireEvent.click(screen.getByRole('button', { name: 'Add character images' }));
+    fireEvent.change(screen.getByLabelText('Images'), {
       target: { files: [referenceImage] },
     });
     fireEvent.change(screen.getAllByLabelText('Title')[0], {
@@ -2099,7 +3042,7 @@ describe('App header thread title', () => {
     expect(composerInput).toHaveAttribute('rows', '3');
   });
 
-  it('lets Enter create a new line without submitting', async () => {
+  it('submits with Enter and clears the composer state', async () => {
     const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
       jobId: 'job-1',
       assets: [],
@@ -2127,11 +3070,12 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(generateImagesMock).not.toHaveBeenCalled();
-    expect(composerInput).toHaveValue('First line\n');
+    expect(generateImagesMock).toHaveBeenCalledTimes(1);
+    expect(composerInput).toHaveValue('');
+    expect(composerInput).toHaveAttribute('rows', '1');
   });
 
-  it('submits with Shift+Enter and clears the composer state', async () => {
+  it('lets Shift+Enter create a new line without submitting', async () => {
     const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
       jobId: 'job-1',
       assets: [],
@@ -2175,10 +3119,10 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(generateImagesMock).toHaveBeenCalledTimes(1);
-    expect(composerInput).toHaveValue('');
-    expect(composerInput).toHaveAttribute('rows', '1');
-    expect(screen.queryByRole('button', { name: 'Open pasted.png' })).not.toBeInTheDocument();
+    expect(generateImagesMock).not.toHaveBeenCalled();
+    expect(composerInput).toHaveTextContent('Use pasted image');
+    expect(composerInput.querySelector('br')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open pasted.png' })).toBeInTheDocument();
   });
 
   it('keeps Fast enabled across submits while clearing the rest of the composer', async () => {

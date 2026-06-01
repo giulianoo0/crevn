@@ -18,6 +18,9 @@ describe('buildCodexImageGenerationPrompt', () => {
     expect(prompt).toContain('exactly 3');
     expect(prompt).toContain('"images"');
     expect(prompt).toContain('Use Codex image generation capabilities');
+    expect(prompt).toContain('Use only the Imagen app workflow instructions provided in this batch job prompt.');
+    expect(prompt).toContain('Do not load, invoke, or rely on any global, shared, system, or unrelated local skill.');
+    expect(prompt).toContain('Do not use cinematic-angles, transitions-dev');
     expect(prompt).toContain('copy them into the output directory');
   });
 

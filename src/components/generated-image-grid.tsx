@@ -136,6 +136,8 @@ function GenerationMetadataBadge({ image }: { image: GeneratedImageGridImage }) 
 
 interface GeneratedImageGridRowProps {
   rows: GeneratedImageGridImage[][];
+  columnCount: number;
+  cardHeight: number;
   selectedImageIds: string[];
   onImageSelect?: (image: GeneratedImageGridImage) => void;
   onImageOpen?: (image: GeneratedImageGridImage) => void;
@@ -150,6 +152,8 @@ function GeneratedImageGridRow({
   index,
   style,
   rows,
+  columnCount,
+  cardHeight,
   selectedImageIds,
   onImageClick,
   onImageDoubleClick,
@@ -162,8 +166,11 @@ function GeneratedImageGridRow({
   return (
     <div
       data-testid={`generated-image-grid-row-${index}`}
-      className="grid grid-cols-3 gap-3 px-4 py-1.5 sm:px-6"
-      style={style as CSSProperties}
+      className="grid gap-3 px-4 py-1.5 sm:px-6"
+      style={{
+        ...(style as CSSProperties),
+        gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))`,
+      }}
     >
       {row.map((image) => (
         <ContextMenu key={image.id}>
@@ -183,13 +190,14 @@ function GeneratedImageGridRow({
                 }
               }}
               className={[
-                'group pointer-events-auto relative h-[220px] overflow-hidden rounded-[20px] bg-[var(--surface)]/50 text-left transition-[border-color,box-shadow,transform,opacity] duration-200',
+                'group pointer-events-auto relative overflow-hidden rounded-[20px] bg-[var(--surface)]/50 text-left transition-[border-color,box-shadow,transform,opacity] duration-200',
                 'border',
                 selectedImageIds.includes(image.id)
                   ? 'border-[var(--accent)] shadow-[0_0_0_1px_rgba(65,130,230,0.5)]'
                   : 'border-transparent hover:border-white/10',
                 image.isLoading ? 'cursor-default' : 'cursor-pointer',
               ].join(' ')}
+              style={{ height: cardHeight }}
             >
               {image.isLoading ? (
                 <div
@@ -227,9 +235,9 @@ function GeneratedImageGridRow({
           ) : null}
         </ContextMenu>
       ))}
-      {row.length < COLUMN_COUNT
-        ? Array.from({ length: COLUMN_COUNT - row.length }, (_, columnIndex) => (
-            <div key={`empty-${index}-${columnIndex}`} className="h-[220px]" aria-hidden="true" />
+      {row.length < columnCount
+        ? Array.from({ length: columnCount - row.length }, (_, columnIndex) => (
+            <div key={`empty-${index}-${columnIndex}`} style={{ height: cardHeight }} aria-hidden="true" />
           ))
         : null}
     </div>
@@ -239,6 +247,10 @@ function GeneratedImageGridRow({
 export function GeneratedImageGrid({
   images,
   className = '',
+  columnCount = COLUMN_COUNT,
+  cardHeight = ROW_HEIGHT,
+  rowGap = ROW_GAP,
+  fitHeight = false,
   selectedImageIds = [],
   onImageSelect,
   onImageOpen,
@@ -248,6 +260,10 @@ export function GeneratedImageGrid({
 }: {
   images: GeneratedImageGridImage[];
   className?: string;
+  columnCount?: number;
+  cardHeight?: number;
+  rowGap?: number;
+  fitHeight?: boolean;
   selectedImageIds?: string[];
   onImageSelect?: (image: GeneratedImageGridImage) => void;
   onImageOpen?: (image: GeneratedImageGridImage) => void;
@@ -295,19 +311,21 @@ export function GeneratedImageGrid({
 
   const rows = useMemo(() => {
     const value: GeneratedImageGridImage[][] = [];
-    for (let index = 0; index < images.length; index += COLUMN_COUNT) {
-      value.push(images.slice(index, index + COLUMN_COUNT));
+    for (let index = 0; index < images.length; index += columnCount) {
+      value.push(images.slice(index, index + columnCount));
     }
     return value;
-  }, [images]);
+  }, [columnCount, images]);
 
   return (
     <List
       rowComponent={GeneratedImageGridRow}
       rowCount={rows.length}
-      rowHeight={ROW_HEIGHT + ROW_GAP}
+      rowHeight={cardHeight + rowGap}
       rowProps={{
         rows,
+        columnCount,
+        cardHeight,
         selectedImageIds,
         onImageClick: handleImageClick,
         onImageDoubleClick: handleImageDoubleClick,
@@ -317,7 +335,7 @@ export function GeneratedImageGrid({
       }}
       overscanCount={OVERSCAN_ROWS}
       className={className}
-      style={{ height: '100%', width: '100%' }}
+      style={{ height: fitHeight ? rows.length * (cardHeight + rowGap) : '100%', width: '100%' }}
     />
   );
 }

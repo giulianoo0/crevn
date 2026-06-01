@@ -68,6 +68,66 @@ describe('generation codex runner environment', () => {
     expect(defaultArgs).not.toContain('service_tier="fast"');
     expect(fastArgs).toContain('-c');
     expect(fastArgs).toContain('service_tier="fast"');
+    expect(fastArgs).toContain('features.fast_mode=true');
+  });
+
+  it('classifies codex trace lines for reasoning and tool calls', () => {
+    expect(generationModule.__test__.classifyCodexTraceLine('Thinking about the scene layout')).toBe('reasoning');
+    expect(generationModule.__test__.classifyCodexTraceLine('Calling tool: image generation')).toBe('tool_call');
+    expect(generationModule.__test__.classifyCodexTraceLine('Plain output line')).toBe('plain');
+  });
+
+  it('instructs codex to emit the scene plan directly without shell or tool calls', () => {
+    const prompt = generationModule.__test__.buildCodexImageGenerationPrompt({
+      mode: 'scene',
+      userPrompt: 'Generate a coordinated eight-frame garage sequence',
+      outputDirectory: '/tmp/output',
+      manifestPath: '/tmp/manifest.json',
+      imageCount: 8,
+      referenceImages: [],
+    });
+
+    expect(prompt).toContain('Print that JSON line directly to stdout yourself.');
+    expect(prompt).toContain('Do not use shell commands, exec, tool calls, or helper scripts to emit the scene plan.');
+  });
+
+  it('builds a strict JSON prompt for scene structuring', () => {
+    const prompt = generationModule.__test__.buildCodexSceneStructuringPrompt(
+      'Cena em português com prompts mistos'
+    );
+
+    expect(prompt).toContain('Return exactly one JSON object and nothing else.');
+    expect(prompt).toContain('"sceneDescription"');
+    expect(prompt).toContain('"frames"');
+    expect(prompt).toContain('All output text must be in English.');
+  });
+
+  it('builds one scene-generation task per frame with only scene-level context and the target frame prompt', () => {
+    const tasks = generationModule.__test__.buildSceneFrameGenerationTasks({
+      sceneGroupTitle: 'Scene 1',
+      scenePrompt: 'Keep the control room and warm monitor light consistent.',
+      frames: [
+        { id: 'frame-1', title: 'Frame 1', prompt: 'Wide establishing shot.' },
+        { id: 'frame-2', title: 'Frame 2', prompt: 'Closer shot on Tito.' },
+        { id: 'frame-3', title: 'Frame 3', prompt: 'Reverse shot to the doorway.' },
+      ],
+      frameOverrideMap: new Map([
+        ['frame-1', { id: 'frame-1', title: 'Frame 1', prompt: 'Wide establishing shot.' }],
+        ['frame-2', { id: 'frame-2', title: 'Frame 2', prompt: 'Closer shot on Tito.' }],
+        ['frame-3', { id: 'frame-3', title: 'Frame 3', prompt: 'Reverse shot to the doorway.' }],
+      ]),
+      referencesByFrameId: new Map(),
+      sceneReferenceImages: [],
+    });
+
+    expect(tasks).toHaveLength(3);
+    expect(tasks[1]?.frameId).toBe('frame-2');
+    expect(tasks[1]?.prompt).toContain('Generate only this target frame: Frame 2.');
+    expect(tasks[1]?.prompt).toContain('Use only the scene continuity brief, attached references, and this target frame prompt.');
+    expect(tasks[1]?.prompt).toContain('Target frame prompt: Closer shot on Tito.');
+    expect(tasks[1]?.prompt).not.toContain('Previous frame context:');
+    expect(tasks[1]?.prompt).not.toContain('Next frame context:');
+    expect(tasks[1]?.prompt).not.toContain('Full sequence context:');
   });
 
   it('uses the selected codex model when building exec arguments', () => {

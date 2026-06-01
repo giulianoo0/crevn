@@ -6,6 +6,11 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/libsql';
 
 import {
+  CREATE_SCENE_FRAMES_TABLE_SQL,
+  CREATE_SCENE_FRAME_ASSETS_TABLE_SQL,
+  CREATE_SCENE_FRAME_REFERENCES_TABLE_SQL,
+  CREATE_SCENE_GROUP_RUNS_TABLE_SQL,
+  CREATE_SCENE_GROUPS_TABLE_SQL,
   CREATE_GENERATED_ASSETS_TABLE_SQL,
   CREATE_GENERATION_JOBS_TABLE_SQL,
   CREATE_PROJECTS_TABLE_SQL,
@@ -15,6 +20,11 @@ import {
   generationJobsTable,
   projectsTable,
   referenceImagesTable,
+  sceneFramesTable,
+  sceneFrameAssetsTable,
+  sceneFrameReferencesTable,
+  sceneGroupsTable,
+  sceneGroupRunsTable,
   threadsTable,
 } from './schema';
 
@@ -90,6 +100,76 @@ export interface ReferenceImageRecord {
   createdAt: string;
 }
 
+export interface SceneGroupRecord {
+  id: string;
+  threadId: string;
+  title: string;
+  prompt: string;
+  tocOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SceneFrameRecord {
+  id: string;
+  sceneGroupId: string;
+  title: string;
+  prompt: string;
+  frameOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SceneFrameReferenceRecord {
+  id: string;
+  sceneFrameId: string;
+  referenceKind: 'saved_reference' | 'uploaded_attachment';
+  referenceId: string | null;
+  name: string;
+  mimeType: string;
+  bytesBase64: string;
+  createdAt: string;
+}
+
+export interface SceneGroupRunRecord {
+  id: string;
+  sceneGroupId: string;
+  threadId: string;
+  status: 'pending' | 'running' | 'succeeded' | 'failed';
+  provider: 'codex';
+  modelId: string;
+  modelLabel: string;
+  requestedFrameCount: number;
+  errorMessage: string | null;
+  durationMs: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SceneFrameAssetRecord {
+  id: string;
+  sceneGroupRunId: string;
+  sceneFrameId: string;
+  outputIndex: number;
+  originalPath: string;
+  storedPath: string;
+  fileName: string;
+  mimeType: string;
+  width: number | null;
+  height: number | null;
+  createdAt: string;
+}
+
+export interface SceneGroupDetails extends SceneGroupRecord {
+  frames: Array<
+    SceneFrameRecord & {
+      references: SceneFrameReferenceRecord[];
+      assets: SceneFrameAssetRecord[];
+    }
+  >;
+  runs: SceneGroupRunRecord[];
+}
+
 export interface GenerationDatabase {
   createProject(project: ProjectRecord): Promise<ProjectRecord>;
   createThread(thread: ThreadRecord): Promise<ThreadRecord>;
@@ -102,6 +182,27 @@ export interface GenerationDatabase {
   insertAsset(asset: GenerationAssetRecord): Promise<void>;
   createReference(reference: ReferenceImageRecord): Promise<ReferenceImageRecord>;
   listReferences(): Promise<ReferenceImageRecord[]>;
+  listSceneGroupsByThread(threadId: string): Promise<SceneGroupDetails[]>;
+  createSceneGroup(sceneGroup: SceneGroupRecord): Promise<SceneGroupRecord>;
+  updateSceneGroup(
+    sceneGroupId: string,
+    input: Pick<SceneGroupRecord, 'title' | 'prompt' | 'tocOrder' | 'updatedAt'>
+  ): Promise<void>;
+  createSceneFrame(sceneFrame: SceneFrameRecord): Promise<SceneFrameRecord>;
+  updateSceneFrame(
+    sceneFrameId: string,
+    input: Pick<SceneFrameRecord, 'title' | 'prompt' | 'frameOrder' | 'updatedAt'>
+  ): Promise<void>;
+  replaceSceneFrameReferences(
+    sceneFrameId: string,
+    references: SceneFrameReferenceRecord[]
+  ): Promise<SceneFrameReferenceRecord[]>;
+  createSceneGroupRun(run: SceneGroupRunRecord): Promise<SceneGroupRunRecord>;
+  updateSceneGroupRun(
+    runId: string,
+    input: Pick<SceneGroupRunRecord, 'status' | 'errorMessage' | 'durationMs' | 'updatedAt'>
+  ): Promise<void>;
+  insertSceneFrameAsset(asset: SceneFrameAssetRecord): Promise<void>;
   listProjectsWithThreads(): Promise<ProjectWithThreads[]>;
   listJobs(): Promise<GenerationJobRecord[]>;
   listAssets(): Promise<GenerationAssetRecord[]>;
@@ -218,6 +319,126 @@ export function createGenerationDatabase(databasePath: string): GenerationDataba
         .from(referenceImagesTable)
         .orderBy(desc(referenceImagesTable.createdAt), desc(referenceImagesTable.id))) as ReferenceImageRecord[];
     },
+    async listSceneGroupsByThread(threadId) {
+      await ready;
+      const sceneGroups = await database
+        .select()
+        .from(sceneGroupsTable)
+        .where(eq(sceneGroupsTable.threadId, threadId))
+        .orderBy(sceneGroupsTable.tocOrder, desc(sceneGroupsTable.createdAt), desc(sceneGroupsTable.id));
+      const sceneGroupIds = sceneGroups.map((sceneGroup) => sceneGroup.id);
+      const sceneFrames =
+        sceneGroupIds.length === 0
+          ? []
+          : await database
+              .select()
+              .from(sceneFramesTable)
+              .where(inArray(sceneFramesTable.sceneGroupId, sceneGroupIds))
+              .orderBy(sceneFramesTable.frameOrder, desc(sceneFramesTable.createdAt), desc(sceneFramesTable.id));
+      const sceneFrameIds = sceneFrames.map((sceneFrame) => sceneFrame.id);
+      const sceneFrameReferences =
+        sceneFrameIds.length === 0
+          ? []
+          : await database
+              .select()
+              .from(sceneFrameReferencesTable)
+              .where(inArray(sceneFrameReferencesTable.sceneFrameId, sceneFrameIds))
+              .orderBy(desc(sceneFrameReferencesTable.createdAt), desc(sceneFrameReferencesTable.id));
+      const runs =
+        sceneGroupIds.length === 0
+          ? []
+          : await database
+              .select()
+              .from(sceneGroupRunsTable)
+              .where(inArray(sceneGroupRunsTable.sceneGroupId, sceneGroupIds))
+              .orderBy(desc(sceneGroupRunsTable.createdAt), desc(sceneGroupRunsTable.id));
+      const runIds = runs.map((run) => run.id);
+      const assets =
+        runIds.length === 0
+          ? []
+          : await database
+              .select()
+              .from(sceneFrameAssetsTable)
+              .where(inArray(sceneFrameAssetsTable.sceneGroupRunId, runIds))
+              .orderBy(sceneFrameAssetsTable.outputIndex, desc(sceneFrameAssetsTable.createdAt), desc(sceneFrameAssetsTable.id));
+
+      const referencesByFrameId = new Map<string, SceneFrameReferenceRecord[]>();
+      for (const reference of sceneFrameReferences as SceneFrameReferenceRecord[]) {
+        const current = referencesByFrameId.get(reference.sceneFrameId) ?? [];
+        current.push(reference);
+        referencesByFrameId.set(reference.sceneFrameId, current);
+      }
+
+      const assetsByFrameId = new Map<string, SceneFrameAssetRecord[]>();
+      for (const asset of assets as SceneFrameAssetRecord[]) {
+        const current = assetsByFrameId.get(asset.sceneFrameId) ?? [];
+        current.push(asset);
+        assetsByFrameId.set(asset.sceneFrameId, current);
+      }
+
+      const framesBySceneGroupId = new Map<string, SceneGroupDetails['frames']>();
+      for (const frame of sceneFrames as SceneFrameRecord[]) {
+        const current = framesBySceneGroupId.get(frame.sceneGroupId) ?? [];
+        current.push({
+          ...frame,
+          references: referencesByFrameId.get(frame.id) ?? [],
+          assets: assetsByFrameId.get(frame.id) ?? [],
+        });
+        framesBySceneGroupId.set(frame.sceneGroupId, current);
+      }
+
+      const runsBySceneGroupId = new Map<string, SceneGroupRunRecord[]>();
+      for (const run of runs as SceneGroupRunRecord[]) {
+        const current = runsBySceneGroupId.get(run.sceneGroupId) ?? [];
+        current.push(run);
+        runsBySceneGroupId.set(run.sceneGroupId, current);
+      }
+
+      return (sceneGroups as SceneGroupRecord[]).map((sceneGroup) => ({
+        ...sceneGroup,
+        frames: framesBySceneGroupId.get(sceneGroup.id) ?? [],
+        runs: runsBySceneGroupId.get(sceneGroup.id) ?? [],
+      }));
+    },
+    async createSceneGroup(sceneGroup) {
+      await ready;
+      await database.insert(sceneGroupsTable).values(sceneGroup);
+      return sceneGroup;
+    },
+    async updateSceneGroup(sceneGroupId, input) {
+      await ready;
+      await database.update(sceneGroupsTable).set(input).where(eq(sceneGroupsTable.id, sceneGroupId));
+    },
+    async createSceneFrame(sceneFrame) {
+      await ready;
+      await database.insert(sceneFramesTable).values(sceneFrame);
+      return sceneFrame;
+    },
+    async updateSceneFrame(sceneFrameId, input) {
+      await ready;
+      await database.update(sceneFramesTable).set(input).where(eq(sceneFramesTable.id, sceneFrameId));
+    },
+    async replaceSceneFrameReferences(sceneFrameId, references) {
+      await ready;
+      await database.delete(sceneFrameReferencesTable).where(eq(sceneFrameReferencesTable.sceneFrameId, sceneFrameId));
+      if (references.length > 0) {
+        await database.insert(sceneFrameReferencesTable).values(references);
+      }
+      return references;
+    },
+    async createSceneGroupRun(run) {
+      await ready;
+      await database.insert(sceneGroupRunsTable).values(run);
+      return run;
+    },
+    async updateSceneGroupRun(runId, input) {
+      await ready;
+      await database.update(sceneGroupRunsTable).set(input).where(eq(sceneGroupRunsTable.id, runId));
+    },
+    async insertSceneFrameAsset(asset) {
+      await ready;
+      await database.insert(sceneFrameAssetsTable).values(asset);
+    },
     async listProjectsWithThreads() {
       await ready;
       const projects = await database
@@ -318,6 +539,11 @@ async function initializeDatabase(database: ReturnType<typeof drizzle<Client>>) 
   await database.run(sql.raw(CREATE_GENERATION_JOBS_TABLE_SQL));
   await database.run(sql.raw(CREATE_GENERATED_ASSETS_TABLE_SQL));
   await database.run(sql.raw(CREATE_REFERENCE_IMAGES_TABLE_SQL));
+  await database.run(sql.raw(CREATE_SCENE_GROUPS_TABLE_SQL));
+  await database.run(sql.raw(CREATE_SCENE_FRAMES_TABLE_SQL));
+  await database.run(sql.raw(CREATE_SCENE_FRAME_REFERENCES_TABLE_SQL));
+  await database.run(sql.raw(CREATE_SCENE_GROUP_RUNS_TABLE_SQL));
+  await database.run(sql.raw(CREATE_SCENE_FRAME_ASSETS_TABLE_SQL));
   await ensureProjectSettingsColumns(database);
   await ensureGenerationJobsThreadColumn(database);
   await ensureGenerationJobMetadataColumns(database);
@@ -399,6 +625,41 @@ async function deleteThreads(
   if (jobIdValues.length > 0) {
     await database.delete(generatedAssetsTable).where(inArray(generatedAssetsTable.jobId, jobIdValues));
     await database.delete(generationJobsTable).where(inArray(generationJobsTable.id, jobIdValues));
+  }
+
+  const sceneGroups = await database
+    .select({ id: sceneGroupsTable.id })
+    .from(sceneGroupsTable)
+    .where(inArray(sceneGroupsTable.threadId, threadIds));
+  const sceneGroupIds = sceneGroups.map((sceneGroup) => sceneGroup.id);
+
+  if (sceneGroupIds.length > 0) {
+    const sceneFrames = await database
+      .select({ id: sceneFramesTable.id })
+      .from(sceneFramesTable)
+      .where(inArray(sceneFramesTable.sceneGroupId, sceneGroupIds));
+    const sceneFrameIds = sceneFrames.map((sceneFrame) => sceneFrame.id);
+    const sceneRuns = await database
+      .select({ id: sceneGroupRunsTable.id })
+      .from(sceneGroupRunsTable)
+      .where(inArray(sceneGroupRunsTable.sceneGroupId, sceneGroupIds));
+    const sceneRunIds = sceneRuns.map((sceneRun) => sceneRun.id);
+
+    if (sceneRunIds.length > 0) {
+      await database
+        .delete(sceneFrameAssetsTable)
+        .where(inArray(sceneFrameAssetsTable.sceneGroupRunId, sceneRunIds));
+      await database.delete(sceneGroupRunsTable).where(inArray(sceneGroupRunsTable.id, sceneRunIds));
+    }
+
+    if (sceneFrameIds.length > 0) {
+      await database
+        .delete(sceneFrameReferencesTable)
+        .where(inArray(sceneFrameReferencesTable.sceneFrameId, sceneFrameIds));
+      await database.delete(sceneFramesTable).where(inArray(sceneFramesTable.id, sceneFrameIds));
+    }
+
+    await database.delete(sceneGroupsTable).where(inArray(sceneGroupsTable.id, sceneGroupIds));
   }
 
   await deleteThreadsRow();
