@@ -193,6 +193,79 @@ interface ElectronSceneFrameReadyEvent {
   frameId: string;
 }
 
+interface ElectronDirectorChatRecord {
+  id: string;
+  threadId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ElectronDirectorMessageRecord {
+  id: string;
+  chatId: string;
+  role: 'user' | 'assistant' | 'system';
+  contentMarkdown: string;
+  status: 'streaming' | 'completed' | 'failed';
+  modelId?: string | null;
+  modelLabel?: string | null;
+  fastMode: boolean;
+  references?: Array<{
+    name: string;
+    title?: string | null;
+    description?: string | null;
+    mimeType: string;
+  }>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ElectronSendDirectorMessagePayload {
+  chatId: string;
+  threadId: string;
+  prompt: string;
+  modelId?: string;
+  fastMode?: boolean;
+  referenceImages: Array<{
+    name: string;
+    title?: string;
+    description?: string;
+    mimeType: string;
+    bytesBase64: string;
+  }>;
+}
+
+interface ElectronDirectorMessageStartEvent {
+  threadId: string;
+  chatId: string;
+  userMessage: ElectronDirectorMessageRecord;
+  assistantMessage: ElectronDirectorMessageRecord;
+}
+
+interface ElectronDirectorMessageDeltaEvent {
+  threadId: string;
+  chatId: string;
+  messageId: string;
+  delta: string;
+  content: string;
+}
+
+interface ElectronDirectorMessageCompleteEvent {
+  threadId: string;
+  chatId: string;
+  messageId: string;
+  content: string;
+}
+
+interface ElectronDirectorMessageErrorEvent {
+  threadId: string;
+  chatId: string;
+  messageId: string;
+  errorMessage: string;
+  content: string;
+  canceled?: boolean;
+}
+
 interface ElectronStructuredScenePrompt {
   sceneDescription: string;
   frames: Array<{
@@ -270,6 +343,17 @@ interface Window {
     listGeneratedImages: (threadId: string) => Promise<ElectronGeneratedImageRecord[]>;
     listProjectsWithThreads: () => Promise<ElectronProjectRecord[]>;
     listReferences: () => Promise<ElectronReferenceImageRecord[]>;
+    listDirectorChats: (threadId: string) => Promise<ElectronDirectorChatRecord[]>;
+    createDirectorChat: (threadId: string) => Promise<ElectronDirectorChatRecord>;
+    renameDirectorChat: (chatId: string, title: string) => Promise<ElectronDirectorChatRecord | null>;
+    deleteDirectorChat: (chatId: string) => Promise<void>;
+    listDirectorMessages: (chatId: string) => Promise<ElectronDirectorMessageRecord[]>;
+    sendDirectorMessage: (payload: ElectronSendDirectorMessagePayload) => Promise<{
+      chat: ElectronDirectorChatRecord | null;
+      userMessage: ElectronDirectorMessageRecord;
+      assistantMessage: ElectronDirectorMessageRecord;
+    }>;
+    cancelDirectorChat: (chatId: string) => Promise<boolean>;
     createReference: (payload: ElectronCreateReferencePayload) => Promise<ElectronReferenceImageRecord>;
     createEnvironmentReference: (
       payload: ElectronCreateEnvironmentReferencePayload
@@ -374,5 +458,11 @@ interface Window {
     deleteGeneratedImage: (imageId: string) => Promise<void>;
     subscribeToScenePlan: (listener: (event: ElectronScenePlanEvent) => void) => () => void;
     subscribeToSceneFrameReady: (listener: (event: ElectronSceneFrameReadyEvent) => void) => () => void;
+    subscribeToDirectorMessageStart: (listener: (event: ElectronDirectorMessageStartEvent) => void) => () => void;
+    subscribeToDirectorMessageDelta: (listener: (event: ElectronDirectorMessageDeltaEvent) => void) => () => void;
+    subscribeToDirectorMessageComplete: (
+      listener: (event: ElectronDirectorMessageCompleteEvent) => void
+    ) => () => void;
+    subscribeToDirectorMessageError: (listener: (event: ElectronDirectorMessageErrorEvent) => void) => () => void;
   };
 }

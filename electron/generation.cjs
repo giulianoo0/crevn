@@ -140,6 +140,60 @@ function buildSceneFrameGenerationTasks({
   }));
 }
 
+function truncateDirectorChatTitle(prompt) {
+  const normalized = typeof prompt === 'string' ? prompt.trim().replace(/\s+/g, ' ') : '';
+  if (!normalized) {
+    return 'New chat';
+  }
+  return normalized.length > 56 ? `${normalized.slice(0, 56).trimEnd()}…` : normalized;
+}
+
+function buildDirectorChatPrompt({
+  projectName,
+  threadName,
+  systemInstructions,
+  artStyle,
+  history,
+  referenceImages,
+  userPrompt,
+}) {
+  const historyLines = history
+    .filter((message) => message.role === 'user' || message.role === 'assistant')
+    .map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.contentMarkdown}`);
+
+  return [
+    'You are the Director workspace inside the Imagen app.',
+    'Help the user develop shots, scene coverage, continuity notes, and production-ready creative direction.',
+    'Answer in clean Markdown.',
+    'Be concise by default, but expand when the user asks for detail.',
+    'Do not generate images, manifests, or file paths in this mode.',
+    projectName ? `Project: ${projectName}` : null,
+    threadName ? `Thread: ${threadName}` : null,
+    systemInstructions ? `Project instructions: ${systemInstructions}` : null,
+    artStyle ? `Project art style: ${artStyle}` : null,
+    '',
+    referenceImages.length > 0 ? 'Attached reference images:' : null,
+    ...referenceImages.map((referenceImage) => {
+      const metadata = [
+        referenceImage.title ? `title: ${referenceImage.title}` : null,
+        referenceImage.description ? `description: ${referenceImage.description}` : null,
+      ].filter(Boolean);
+      return metadata.length > 0
+        ? `- ${referenceImage.path} (${metadata.join('; ')})`
+        : `- ${referenceImage.path}`;
+    }),
+    referenceImages.length > 0 ? 'Use attached references when discussing environments, characters, props, or shot continuity.' : null,
+    '',
+    historyLines.length > 0 ? 'Conversation so far:' : null,
+    ...historyLines,
+    '',
+    `User: ${userPrompt.trim()}`,
+    'Assistant:',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 function buildReferenceCollectionDescriptionPrompt({ category, title, attachmentPaths }) {
   const categoryLabel =
     category === 'environment' ? 'environment' : category === 'objects' ? 'item' : 'character';
@@ -392,6 +446,32 @@ const sceneFrameAssetsTable = sqliteTable('scene_frame_assets', {
   createdAt: text('created_at').notNull(),
 });
 
+const directorChatsTable = sqliteTable('director_chats', {
+  id: text('id').primaryKey(),
+  threadId: text('thread_id')
+    .notNull()
+    .references(() => threadsTable.id),
+  title: text('title').notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+const directorMessagesTable = sqliteTable('director_messages', {
+  id: text('id').primaryKey(),
+  chatId: text('chat_id')
+    .notNull()
+    .references(() => directorChatsTable.id),
+  role: text('role').notNull(),
+  contentMarkdown: text('content_markdown').notNull(),
+  status: text('status').notNull(),
+  modelId: text('model_id'),
+  modelLabel: text('model_label'),
+  fastMode: integer('fast_mode').notNull().default(0),
+  referenceImagesJson: text('reference_images_json'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 const CREATE_PROJECTS_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
@@ -617,6 +697,34 @@ const CREATE_SCENE_FRAME_ASSETS_TABLE_SQL = `
   )
 `;
 
+const CREATE_DIRECTOR_CHATS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS director_chats (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (thread_id) REFERENCES threads(id)
+  )
+`;
+
+const CREATE_DIRECTOR_MESSAGES_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS director_messages (
+    id TEXT PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content_markdown TEXT NOT NULL,
+    status TEXT NOT NULL,
+    model_id TEXT,
+    model_label TEXT,
+    fast_mode INTEGER NOT NULL DEFAULT 0,
+    reference_images_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (chat_id) REFERENCES director_chats(id)
+  )
+`;
+
 function getAppDataPaths(userDataDir) {
   return {
     userDataDir,
@@ -684,6 +792,7 @@ function resolveJobWorkingDirectory({ provider, jobId, codexJobsTempDir }) {
 async function createGenerationStore(userDataDir, options = {}) {
   const paths = getAppDataPaths(userDataDir);
   const activeSceneGroupCancellations = new Map();
+  const activeDirectorChatCancellations = new Map();
   fs.mkdirSync(path.dirname(paths.databasePath), { recursive: true });
   await resetCodexJobsDirectory(paths.codexJobsTempDir);
 
@@ -715,6 +824,8 @@ async function createGenerationStore(userDataDir, options = {}) {
   await db.run(sql.raw(CREATE_SCENE_FRAME_REFERENCES_TABLE_SQL));
   await db.run(sql.raw(CREATE_SCENE_GROUP_RUNS_TABLE_SQL));
   await db.run(sql.raw(CREATE_SCENE_FRAME_ASSETS_TABLE_SQL));
+  await db.run(sql.raw(CREATE_DIRECTOR_CHATS_TABLE_SQL));
+  await db.run(sql.raw(CREATE_DIRECTOR_MESSAGES_TABLE_SQL));
   await migrateLegacyReferencesTable(db);
   await ensureEnvironmentAttachmentDescriptionColumn(db);
   await ensureProjectSettingsColumns(db);
@@ -1311,6 +1422,72 @@ async function createGenerationStore(userDataDir, options = {}) {
     });
 
     return allReferences;
+  }
+
+  async function listDirectorChats(threadId) {
+    if (typeof threadId !== 'string' || !threadId.trim()) {
+      return [];
+    }
+
+    return db
+      .select()
+      .from(directorChatsTable)
+      .where(eq(directorChatsTable.threadId, threadId.trim()))
+      .orderBy(desc(directorChatsTable.updatedAt), desc(directorChatsTable.id));
+  }
+
+  async function createDirectorChat(threadId) {
+    const timestamp = new Date().toISOString();
+    const chat = {
+      id: nanoid(),
+      threadId: threadId.trim(),
+      title: 'New chat',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+
+    await db.insert(directorChatsTable).values(chat);
+    return chat;
+  }
+
+  async function renameDirectorChat(chatId, title) {
+    const nextTitle = typeof title === 'string' && title.trim() ? title.trim() : 'New chat';
+    const updatedAt = new Date().toISOString();
+    await db
+      .update(directorChatsTable)
+      .set({ title: nextTitle, updatedAt })
+      .where(eq(directorChatsTable.id, chatId));
+
+    const [chat] = await db.select().from(directorChatsTable).where(eq(directorChatsTable.id, chatId)).limit(1);
+    return chat ?? null;
+  }
+
+  async function deleteDirectorChat(chatId) {
+    const activeRun = activeDirectorChatCancellations.get(chatId);
+    if (activeRun) {
+      activeRun.cancel('chat_deleted');
+      activeDirectorChatCancellations.delete(chatId);
+    }
+    await db.delete(directorMessagesTable).where(eq(directorMessagesTable.chatId, chatId));
+    await db.delete(directorChatsTable).where(eq(directorChatsTable.id, chatId));
+  }
+
+  async function listDirectorMessages(chatId) {
+    if (typeof chatId !== 'string' || !chatId.trim()) {
+      return [];
+    }
+
+    const messages = await db
+      .select()
+      .from(directorMessagesTable)
+      .where(eq(directorMessagesTable.chatId, chatId.trim()))
+      .orderBy(directorMessagesTable.createdAt, directorMessagesTable.id);
+
+    return messages.map((message) => ({
+      ...message,
+      fastMode: Boolean(message.fastMode),
+      references: parseGenerationReferenceMetadata(message.referenceImagesJson),
+    }));
   }
 
   async function generateImages({
@@ -2082,6 +2259,233 @@ async function createGenerationStore(userDataDir, options = {}) {
     };
   }
 
+  async function sendDirectorMessage(input) {
+    const chatId = typeof input?.chatId === 'string' ? input.chatId.trim() : '';
+    const threadId = typeof input?.threadId === 'string' ? input.threadId.trim() : '';
+    const prompt = typeof input?.prompt === 'string' ? input.prompt.trim() : '';
+
+    if (!chatId || !threadId || !prompt) {
+      throw new Error('Director chat requires chatId, threadId, and prompt.');
+    }
+
+    const [chat] = await db.select().from(directorChatsTable).where(eq(directorChatsTable.id, chatId)).limit(1);
+    if (!chat || chat.threadId !== threadId) {
+      throw new Error('Director chat not found.');
+    }
+
+    if (activeDirectorChatCancellations.has(chatId)) {
+      throw new Error('This Director chat is already generating.');
+    }
+
+    const [thread] = await db.select().from(threadsTable).where(eq(threadsTable.id, threadId)).limit(1);
+    const [project] = thread
+      ? await db.select().from(projectsTable).where(eq(projectsTable.id, thread.projectId)).limit(1)
+      : [];
+    const historyRows = await db
+      .select()
+      .from(directorMessagesTable)
+      .where(eq(directorMessagesTable.chatId, chatId))
+      .orderBy(directorMessagesTable.createdAt, directorMessagesTable.id);
+
+    const selection = resolveGenerationSelection('codex', input?.modelId ?? DEFAULT_CODEX_MODEL_ID);
+    const resolvedModelId = selection.provider === 'codex' ? selection.modelId : DEFAULT_CODEX_MODEL_ID;
+    const resolvedModelLabel =
+      selection.provider === 'codex' ? selection.modelLabel : MODEL_LABEL_BY_ID[DEFAULT_CODEX_MODEL_ID];
+    const resolvedCodexModel =
+      selection.provider === 'codex' ? selection.codexModel : CODEX_MODEL_BY_ID[DEFAULT_CODEX_MODEL_ID];
+    const fastMode = input?.fastMode === true;
+    const referenceImages = Array.isArray(input?.referenceImages) ? input.referenceImages : [];
+    const referenceImagesJson = JSON.stringify(toGenerationReferenceMetadata(referenceImages));
+    const timestamp = new Date().toISOString();
+    const userMessage = {
+      id: nanoid(),
+      chatId,
+      role: 'user',
+      contentMarkdown: prompt,
+      status: 'completed',
+      modelId: resolvedModelId,
+      modelLabel: resolvedModelLabel,
+      fastMode: fastMode ? 1 : 0,
+      referenceImagesJson,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const assistantMessage = {
+      id: nanoid(),
+      chatId,
+      role: 'assistant',
+      contentMarkdown: '',
+      status: 'streaming',
+      modelId: resolvedModelId,
+      modelLabel: resolvedModelLabel,
+      fastMode: fastMode ? 1 : 0,
+      referenceImagesJson,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+
+    await db.insert(directorMessagesTable).values([userMessage, assistantMessage]);
+    await db
+      .update(directorChatsTable)
+      .set({
+        title: chat.title === 'New chat' ? truncateDirectorChatTitle(prompt) : chat.title,
+        updatedAt: timestamp,
+      })
+      .where(eq(directorChatsTable.id, chatId));
+
+    options.onDirectorMessageStart?.({
+      threadId,
+      chatId,
+      userMessage: {
+        ...userMessage,
+        fastMode,
+        references: parseGenerationReferenceMetadata(referenceImagesJson),
+      },
+      assistantMessage: {
+        ...assistantMessage,
+        fastMode,
+        references: parseGenerationReferenceMetadata(referenceImagesJson),
+      },
+    });
+
+    const jobId = nanoid();
+    const workingDirectory = resolveJobWorkingDirectory({
+      provider: 'codex',
+      jobId,
+      codexJobsTempDir: paths.codexJobsTempDir,
+    });
+
+    await fsp.mkdir(workingDirectory, { recursive: true });
+    const stagedReferenceImages = await stageReferenceImages({
+      workingDirectory,
+      referenceImages,
+    });
+    const promptText = buildDirectorChatPrompt({
+      projectName: project?.name ?? '',
+      threadName: thread?.name ?? '',
+      systemInstructions: project?.systemInstructions ?? '',
+      artStyle: project?.artStyle ?? '',
+      history: historyRows.map((message) => ({
+        role: message.role,
+        contentMarkdown: message.contentMarkdown,
+      })),
+      referenceImages: stagedReferenceImages,
+      userPrompt: prompt,
+    });
+
+    void runDirectorChatCompletion({
+      activeDirectorChatCancellations,
+      assistantMessageId: assistantMessage.id,
+      chatId,
+      threadId,
+      fastMode,
+      jobId,
+      model: resolvedCodexModel,
+      prompt: promptText,
+      workingDirectory,
+    });
+
+    const chats = await listDirectorChats(threadId);
+    return {
+      chat: chats.find((item) => item.id === chatId) ?? null,
+      userMessage: {
+        ...userMessage,
+        fastMode,
+        references: parseGenerationReferenceMetadata(referenceImagesJson),
+      },
+      assistantMessage: {
+        ...assistantMessage,
+        fastMode,
+        references: parseGenerationReferenceMetadata(referenceImagesJson),
+      },
+    };
+  }
+
+  async function runDirectorChatCompletion({
+    activeDirectorChatCancellations,
+    assistantMessageId,
+    chatId,
+    threadId,
+    fastMode,
+    jobId,
+    model,
+    prompt,
+    workingDirectory,
+  }) {
+    try {
+      const result = await runCodexTextStreamJob({
+        jobId,
+        workingDirectory,
+        prompt,
+        fastMode,
+        model,
+        onCancelableRun(cancelableRun) {
+          activeDirectorChatCancellations.set(chatId, cancelableRun);
+        },
+        onDelta(delta, aggregate) {
+          const updatedAt = new Date().toISOString();
+          void db
+            .update(directorMessagesTable)
+            .set({
+              contentMarkdown: aggregate,
+              updatedAt,
+            })
+            .where(eq(directorMessagesTable.id, assistantMessageId));
+          void db
+            .update(directorChatsTable)
+            .set({ updatedAt })
+            .where(eq(directorChatsTable.id, chatId));
+          options.onDirectorMessageDelta?.({
+            threadId,
+            chatId,
+            messageId: assistantMessageId,
+            delta,
+            content: aggregate,
+          });
+        },
+      });
+
+      const updatedAt = new Date().toISOString();
+      await db
+        .update(directorMessagesTable)
+        .set({
+          contentMarkdown: result.output,
+          status: result.canceled ? 'failed' : result.success ? 'completed' : 'failed',
+          updatedAt,
+        })
+        .where(eq(directorMessagesTable.id, assistantMessageId));
+      await db.update(directorChatsTable).set({ updatedAt }).where(eq(directorChatsTable.id, chatId));
+
+      if (result.success) {
+        options.onDirectorMessageComplete?.({
+          threadId,
+          chatId,
+          messageId: assistantMessageId,
+          content: result.output,
+        });
+      } else {
+        options.onDirectorMessageError?.({
+          threadId,
+          chatId,
+          messageId: assistantMessageId,
+          errorMessage: result.errorMessage,
+          content: result.output,
+          canceled: result.canceled === true,
+        });
+      }
+    } finally {
+      activeDirectorChatCancellations.delete(chatId);
+    }
+  }
+
+  async function cancelDirectorChat(chatId) {
+    const activeRun = activeDirectorChatCancellations.get(chatId);
+    if (!activeRun) {
+      return false;
+    }
+    return activeRun.cancel('user_requested_director_stop') === true;
+  }
+
   async function getGeneratedImage(imageId) {
     const assets = await db
       .select({
@@ -2137,6 +2541,13 @@ async function createGenerationStore(userDataDir, options = {}) {
     deleteGeneratedImage,
     listGeneratedImages,
     listSceneGroups,
+    listDirectorChats,
+    createDirectorChat,
+    renameDirectorChat,
+    deleteDirectorChat,
+    listDirectorMessages,
+    sendDirectorMessage,
+    cancelDirectorChat,
     listProjectsWithThreads,
     listReferences,
     createReference,
@@ -2286,6 +2697,17 @@ async function createGenerationStore(userDataDir, options = {}) {
       }
 
       await db.delete(sceneGroupsTable).where(inArray(sceneGroupsTable.id, sceneGroupIds));
+    }
+
+    const directorChats = await db
+      .select({ id: directorChatsTable.id })
+      .from(directorChatsTable)
+      .where(inArray(directorChatsTable.threadId, threadIds));
+    const directorChatIds = directorChats.map((chat) => chat.id);
+
+    if (directorChatIds.length > 0) {
+      await db.delete(directorMessagesTable).where(inArray(directorMessagesTable.chatId, directorChatIds));
+      await db.delete(directorChatsTable).where(inArray(directorChatsTable.id, directorChatIds));
     }
 
     await deleteThreadsRow();
@@ -3071,6 +3493,105 @@ function runCodexJob({
   });
 }
 
+function runCodexTextStreamJob({
+  jobId,
+  workingDirectory,
+  prompt,
+  fastMode = false,
+  model,
+  onCancelableRun,
+  onDelta,
+}) {
+  return new Promise((resolve) => {
+    const logPrefix = `[crenv:codex:${jobId}:director]`;
+    const startedAtMs = Date.now();
+    const env = buildCodexSpawnEnv(workingDirectory);
+    const codexArgs = buildCodexExecArgs({ model, fastMode });
+
+    for (const directoryPath of [env.XDG_CACHE_HOME, env.XDG_CONFIG_HOME, env.XDG_STATE_HOME, env.TMPDIR]) {
+      fs.mkdirSync(directoryPath, { recursive: true });
+    }
+
+    const child = spawn('codex', codexArgs, {
+      cwd: workingDirectory,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let output = '';
+    let stderr = '';
+    let cancellationRequested = false;
+
+    console.info(`${logPrefix} spawn: codex ${codexArgs.join(' ')}`);
+    onCancelableRun?.({
+      jobId,
+      cancel(reason = 'user_requested') {
+        if (child.exitCode !== null || child.killed) {
+          return false;
+        }
+
+        cancellationRequested = true;
+        console.warn(`${logPrefix} cancel requested (${reason}) ${formatTraceElapsedMs(startedAtMs)}`);
+        child.kill('SIGTERM');
+        setTimeout(() => {
+          if (child.exitCode === null && !child.killed) {
+            child.kill('SIGKILL');
+          }
+        }, CANCEL_EXIT_GRACE_MS).unref();
+        return true;
+      },
+    });
+
+    child.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      if (!text) return;
+      output += text;
+      onDelta?.(text, output);
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', (error) => {
+      resolve({
+        success: false,
+        output,
+        errorMessage: error.code === 'ENOENT' ? 'Codex CLI is not installed.' : error.message,
+      });
+    });
+
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve({
+          success: true,
+          output,
+        });
+        return;
+      }
+
+      if (cancellationRequested) {
+        resolve({
+          success: false,
+          canceled: true,
+          output,
+          errorMessage: 'Director chat canceled.',
+        });
+        return;
+      }
+
+      resolve({
+        success: false,
+        output,
+        errorMessage: stderr.trim() || output.trim() || `Codex exited with code ${code}.`,
+      });
+    });
+
+    child.stdin.write(prompt);
+    child.stdin.end();
+  });
+}
+
 function runCodexStructuredOutputJob({ jobId, workingDirectory, prompt, model }) {
   return new Promise((resolve) => {
     const logPrefix = `[crenv:codex:${jobId}]`;
@@ -3480,6 +4001,7 @@ module.exports = {
     buildCodexSpawnEnv,
     buildSceneFrameGenerationTasks,
     buildSceneFramePrompt,
+    buildDirectorChatPrompt,
     prepareAntigravityHomeDirectory,
     parseImageManifestLine,
     parseScenePlanLine,
@@ -3487,6 +4009,7 @@ module.exports = {
     resolveAntigravityCloseResult,
     resolveJobWorkingDirectory,
     resolveGenerationSelection,
+    truncateDirectorChatTitle,
     toGenerationReferenceMetadata,
     toRendererAsset,
   },

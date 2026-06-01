@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import type { CSSProperties, ComponentType } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
@@ -11,6 +12,23 @@ let scenePlanListener:
   | null = null;
 let sceneFrameReadyListener:
   | ((event: { threadId: string; sceneGroupId: string; frameId: string }) => void)
+  | null = null;
+let directorMessageStartListener:
+  | ((event: {
+      threadId: string;
+      chatId: string;
+      userMessage: Record<string, unknown>;
+      assistantMessage: Record<string, unknown>;
+    }) => void)
+  | null = null;
+let directorMessageDeltaListener:
+  | ((event: { threadId: string; chatId: string; messageId: string; delta: string; content: string }) => void)
+  | null = null;
+let directorMessageCompleteListener:
+  | ((event: { threadId: string; chatId: string; messageId: string; content: string }) => void)
+  | null = null;
+let directorMessageErrorListener:
+  | ((event: { threadId: string; chatId: string; messageId: string; errorMessage: string; content: string; canceled?: boolean }) => void)
   | null = null;
 
 const projectFixture = {
@@ -78,6 +96,50 @@ const makeSceneGroupsFixture = () => [
 ];
 
 let sceneGroupsFixture = makeSceneGroupsFixture();
+let directorChatsFixtureByThread: Record<string, Array<{ id: string; threadId: string; title: string; createdAt: string; updatedAt: string }>> = {
+  'thread-1': [
+    {
+      id: 'director-chat-1',
+      threadId: 'thread-1',
+      title: 'Coverage pass',
+      createdAt: '2026-06-01T09:00:00.000Z',
+      updatedAt: '2026-06-01T09:05:00.000Z',
+    },
+  ],
+  'thread-2': [],
+};
+let directorMessagesFixtureByChat: Record<
+  string,
+  Array<{
+    id: string;
+    chatId: string;
+    role: 'user' | 'assistant' | 'system';
+    contentMarkdown: string;
+    status: 'streaming' | 'completed' | 'failed';
+    modelId?: string | null;
+    modelLabel?: string | null;
+    fastMode: boolean;
+    references?: never[];
+    createdAt: string;
+    updatedAt: string;
+  }>
+> = {
+  'director-chat-1': [
+    {
+      id: 'director-msg-1',
+      chatId: 'director-chat-1',
+      role: 'assistant',
+      contentMarkdown: 'Existing coverage notes.',
+      status: 'completed',
+      modelId: 'codex-gpt-5-4-mini',
+      modelLabel: 'Codex / GPT-5.4 Mini',
+      fastMode: true,
+      references: [],
+      createdAt: '2026-06-01T09:05:00.000Z',
+      updatedAt: '2026-06-01T09:05:00.000Z',
+    },
+  ],
+};
 
 vi.mock('./lib/electron-api', () => ({
   ensureProjectThreadWorkspace: vi.fn(async () => ({
@@ -260,6 +322,115 @@ vi.mock('./lib/electron-api', () => ({
     ],
   })),
   cancelSceneGroupGeneration: vi.fn(async () => undefined),
+  listDirectorChats: vi.fn(async (threadId: string) => directorChatsFixtureByThread[threadId] ?? []),
+  createDirectorChat: vi.fn(async (threadId: string) => {
+    const created = {
+      id: `director-chat-${(directorChatsFixtureByThread[threadId]?.length ?? 0) + 1}`,
+      threadId,
+      title: 'New chat',
+      createdAt: '2026-06-01T12:00:00.000Z',
+      updatedAt: '2026-06-01T12:00:00.000Z',
+    };
+    directorChatsFixtureByThread[threadId] = [created, ...(directorChatsFixtureByThread[threadId] ?? [])];
+    directorMessagesFixtureByChat[created.id] = [];
+    return created;
+  }),
+  renameDirectorChat: vi.fn(async (chatId: string, title: string) => {
+    let updated: { id: string; threadId: string; title: string; createdAt: string; updatedAt: string } | null = null;
+    directorChatsFixtureByThread = Object.fromEntries(
+      Object.entries(directorChatsFixtureByThread).map(([threadId, chats]) => [
+        threadId,
+        chats.map((chat) => {
+          if (chat.id !== chatId) return chat;
+          updated = { ...chat, title, updatedAt: '2026-06-01T12:10:00.000Z' };
+          return updated;
+        }),
+      ])
+    );
+    return updated;
+  }),
+  deleteDirectorChat: vi.fn(async (chatId: string) => {
+    directorChatsFixtureByThread = Object.fromEntries(
+      Object.entries(directorChatsFixtureByThread).map(([threadId, chats]) => [
+        threadId,
+        chats.filter((chat) => chat.id !== chatId),
+      ])
+    );
+    delete directorMessagesFixtureByChat[chatId];
+  }),
+  listDirectorMessages: vi.fn(async (chatId: string) => directorMessagesFixtureByChat[chatId] ?? []),
+  sendDirectorMessage: vi.fn(async (payload: { chatId: string; threadId: string; prompt: string }) => {
+    const timestamp = '2026-06-01T12:15:00.000Z';
+    const userMessage = {
+      id: 'director-user-message',
+      chatId: payload.chatId,
+      role: 'user' as const,
+      contentMarkdown: payload.prompt,
+      status: 'completed' as const,
+      modelId: 'codex-gpt-5-4-mini',
+      modelLabel: 'Codex / GPT-5.4 Mini',
+      fastMode: true,
+      references: [],
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const assistantMessage = {
+      id: 'director-assistant-message',
+      chatId: payload.chatId,
+      role: 'assistant' as const,
+      contentMarkdown: '',
+      status: 'streaming' as const,
+      modelId: 'codex-gpt-5-4-mini',
+      modelLabel: 'Codex / GPT-5.4 Mini',
+      fastMode: true,
+      references: [],
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    directorMessagesFixtureByChat[payload.chatId] = [
+      ...(directorMessagesFixtureByChat[payload.chatId] ?? []),
+      userMessage,
+      assistantMessage,
+    ];
+    return {
+      chat: directorChatsFixtureByThread[payload.threadId]?.find((chat) => chat.id === payload.chatId) ?? null,
+      userMessage,
+      assistantMessage,
+    };
+  }),
+  cancelDirectorChat: vi.fn(async () => true),
+  subscribeToDirectorMessageStart: vi.fn((listener) => {
+    directorMessageStartListener = listener;
+    return () => {
+      if (directorMessageStartListener === listener) {
+        directorMessageStartListener = null;
+      }
+    };
+  }),
+  subscribeToDirectorMessageDelta: vi.fn((listener) => {
+    directorMessageDeltaListener = listener;
+    return () => {
+      if (directorMessageDeltaListener === listener) {
+        directorMessageDeltaListener = null;
+      }
+    };
+  }),
+  subscribeToDirectorMessageComplete: vi.fn((listener) => {
+    directorMessageCompleteListener = listener;
+    return () => {
+      if (directorMessageCompleteListener === listener) {
+        directorMessageCompleteListener = null;
+      }
+    };
+  }),
+  subscribeToDirectorMessageError: vi.fn((listener) => {
+    directorMessageErrorListener = listener;
+    return () => {
+      if (directorMessageErrorListener === listener) {
+        directorMessageErrorListener = null;
+      }
+    };
+  }),
   createProject: vi.fn(),
   createThread: vi.fn(),
   renameProject: vi.fn(),
@@ -289,6 +460,30 @@ vi.mock('./lib/electron-api', () => ({
   }),
 }));
 
+vi.mock('streamdown', () => ({
+  Streamdown: ({ children }: { children: string }) => <div>{children}</div>,
+}));
+
+vi.mock('react-window', () => ({
+  List: ({
+    rowCount,
+    rowComponent: RowComponent,
+    rowProps,
+  }: {
+    rowCount: number;
+    rowComponent: ComponentType<{ index: number; style: CSSProperties; messages: unknown[] }>;
+    rowProps: { messages: unknown[] };
+  }) => (
+    <div data-testid="virtualized-list">
+      {Array.from({ length: rowCount }, (_, index) => (
+        <RowComponent key={index} index={index} style={{}} {...rowProps} />
+      ))}
+    </div>
+  ),
+  useDynamicRowHeight: () => 112,
+  useListRef: () => ({ current: { scrollToRow: vi.fn() } }),
+}));
+
 vi.mock('sonner', () => ({
   Toaster: () => null,
   toast: {
@@ -296,6 +491,50 @@ vi.mock('sonner', () => ({
     error: vi.fn(),
     message: vi.fn(),
   },
+}));
+
+vi.mock('framer-motion', async () => {
+  const React = await import('react');
+  const componentCache = new Map<PropertyKey, React.ComponentType<Record<string, unknown>>>();
+  const motion = new Proxy(
+    {},
+    {
+      get: (_target, key) => {
+        if (!componentCache.has(key)) {
+          componentCache.set(
+            key,
+            React.forwardRef(function MotionPrimitive(
+              {
+                children,
+                initial: _initial,
+                animate: _animate,
+                exit: _exit,
+                transition: _transition,
+                layoutId: _layoutId,
+                whileHover: _whileHover,
+                whileTap: _whileTap,
+                ...props
+              }: { children?: React.ReactNode } & Record<string, unknown>,
+              ref: React.ForwardedRef<HTMLElement>
+            ) {
+              return React.createElement(String(key), { ...props, ref }, children);
+            })
+          );
+        }
+
+        return componentCache.get(key);
+      },
+    }
+  );
+
+  return {
+    AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+    motion,
+  };
+});
+
+vi.mock('./components/ai-elements/shimmer', () => ({
+  Shimmer: ({ children }: { children: string }) => <span>{children}</span>,
 }));
 
 vi.mock('@number-flow/react', () => ({
@@ -452,7 +691,40 @@ describe('App header thread title', () => {
     vi.restoreAllMocks();
     scenePlanListener = null;
     sceneFrameReadyListener = null;
+    directorMessageStartListener = null;
+    directorMessageDeltaListener = null;
+    directorMessageCompleteListener = null;
+    directorMessageErrorListener = null;
     sceneGroupsFixture = makeSceneGroupsFixture();
+    directorChatsFixtureByThread = {
+      'thread-1': [
+        {
+          id: 'director-chat-1',
+          threadId: 'thread-1',
+          title: 'Coverage pass',
+          createdAt: '2026-06-01T09:00:00.000Z',
+          updatedAt: '2026-06-01T09:05:00.000Z',
+        },
+      ],
+      'thread-2': [],
+    };
+    directorMessagesFixtureByChat = {
+      'director-chat-1': [
+        {
+          id: 'director-msg-1',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: 'Existing coverage notes.',
+          status: 'completed',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+          fastMode: true,
+          references: [],
+          createdAt: '2026-06-01T09:05:00.000Z',
+          updatedAt: '2026-06-01T09:05:00.000Z',
+        },
+      ],
+    };
     Object.assign(window, {
       ResizeObserver: class {
         observe() {}
@@ -3354,5 +3626,314 @@ describe('App header thread title', () => {
         prompt: expect.stringContaining('Angle: Low Angle'),
       })
     );
+  });
+
+  it('shows the Director workspace with the reduced composer controls', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    fireEvent.focus(screen.getAllByRole('textbox').at(-1)!);
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('director-workspace')).toBeInTheDocument();
+    expect(screen.getByTestId('director-composer')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Decrease image count')).not.toBeInTheDocument();
+    expect(screen.queryByText('16:9')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Fast' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Model GPT-5\.4 Mini/i })).toBeInTheDocument();
+  });
+
+  it('creates Director chats from the thread rail and keeps them in the current thread', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'New' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(vi.mocked(electronApi.createDirectorChat)).toHaveBeenCalledWith('thread-1');
+    expect(screen.getByText('New chat')).toBeInTheDocument();
+  });
+
+  it('auto-creates the first Director chat when sending on an empty thread', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Thread Two' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getAllByRole('textbox').at(-1)!;
+    fireEvent.focus(composerInput);
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Block out a clean six-shot sequence.' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(vi.mocked(electronApi.createDirectorChat)).toHaveBeenCalledWith('thread-2');
+    expect(vi.mocked(electronApi.sendDirectorMessage)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: 'thread-2',
+        prompt: 'Block out a clean six-shot sequence.',
+      })
+    );
+  });
+
+  it('shows per-chat loading states when multiple Director chats stream at once', async () => {
+    directorChatsFixtureByThread['thread-1'] = [
+      {
+        id: 'director-chat-1',
+        threadId: 'thread-1',
+        title: 'Coverage pass',
+        createdAt: '2026-06-01T09:00:00.000Z',
+        updatedAt: '2026-06-01T09:05:00.000Z',
+      },
+      {
+        id: 'director-chat-2',
+        threadId: 'thread-1',
+        title: 'Continuity check',
+        createdAt: '2026-06-01T09:06:00.000Z',
+        updatedAt: '2026-06-01T09:06:00.000Z',
+      },
+    ];
+    directorMessagesFixtureByChat['director-chat-2'] = [];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        userMessage: {
+          id: 'u1',
+          chatId: 'director-chat-1',
+          role: 'user',
+          contentMarkdown: 'Write the first pass.',
+          status: 'completed',
+          fastMode: true,
+          createdAt: '2026-06-01T10:00:00.000Z',
+          updatedAt: '2026-06-01T10:00:00.000Z',
+        },
+        assistantMessage: {
+          id: 'a1',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: '',
+          status: 'streaming',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+          fastMode: true,
+          createdAt: '2026-06-01T10:00:00.000Z',
+          updatedAt: '2026-06-01T10:00:00.000Z',
+        },
+      });
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-2',
+        userMessage: {
+          id: 'u2',
+          chatId: 'director-chat-2',
+          role: 'user',
+          contentMarkdown: 'Check continuity.',
+          status: 'completed',
+          fastMode: true,
+          createdAt: '2026-06-01T10:01:00.000Z',
+          updatedAt: '2026-06-01T10:01:00.000Z',
+        },
+        assistantMessage: {
+          id: 'a2',
+          chatId: 'director-chat-2',
+          role: 'assistant',
+          contentMarkdown: '',
+          status: 'streaming',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+          fastMode: true,
+          createdAt: '2026-06-01T10:01:00.000Z',
+          updatedAt: '2026-06-01T10:01:00.000Z',
+        },
+      });
+    });
+
+    expect(screen.getAllByText('Thinking...')).toHaveLength(3);
+    expect(within(screen.getByTestId('director-workspace')).getByText('Thinking...')).toBeInTheDocument();
+  });
+
+  it('does not duplicate Director messages when the start event arrives after optimistic append', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getAllByRole('textbox').at(-1)!;
+    fireEvent.focus(composerInput);
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Draft a compact beat board.' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        userMessage: {
+          id: 'director-user-message',
+          chatId: 'director-chat-1',
+          role: 'user',
+          contentMarkdown: 'Draft a compact beat board.',
+          status: 'completed',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+        assistantMessage: {
+          id: 'director-assistant-message',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: '',
+          status: 'streaming',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getAllByText('Draft a compact beat board.')).toHaveLength(1);
+
+    const directorWorkspace = screen.getByTestId('director-workspace');
+    const userMessage = within(directorWorkspace).getByText('Draft a compact beat board.');
+    const thinkingMessage = within(directorWorkspace).getByText('Thinking...');
+    expect(userMessage.compareDocumentPosition(thinkingMessage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(directorWorkspace).queryByText('You')).not.toBeInTheDocument();
+    expect(within(directorWorkspace).queryByText('Director')).not.toBeInTheDocument();
+  });
+
+  it('streams Director responses into the active chat and swaps Send into Stop', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        userMessage: {
+          id: 'director-user-message',
+          chatId: 'director-chat-1',
+          role: 'user',
+          contentMarkdown: 'Write a tight shot list for this scene.',
+          status: 'completed',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+        assistantMessage: {
+          id: 'director-assistant-message',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: '',
+          status: 'streaming',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
+
+    await act(async () => {
+      directorMessageDeltaListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        messageId: 'director-assistant-message',
+        delta: 'Shot 1',
+        content: 'Shot 1\n- Wide establishing frame',
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByText((content) => content.includes('Shot 1'))).toBeInTheDocument();
+
+    await act(async () => {
+      directorMessageCompleteListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        messageId: 'director-assistant-message',
+        content: 'Shot 1\n- Wide establishing frame',
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByText((content) => content.includes('Shot 1'))).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Enviar' })).toBeInTheDocument();
   });
 });

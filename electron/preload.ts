@@ -5,6 +5,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listGeneratedImages: (threadId: string) => ipcRenderer.invoke('generation:listGeneratedImages', threadId),
   listProjectsWithThreads: () => ipcRenderer.invoke('generation:listProjectsWithThreads'),
   listReferences: () => ipcRenderer.invoke('generation:listReferences'),
+  listDirectorChats: (threadId: unknown) => ipcRenderer.invoke('generation:listDirectorChats', threadId),
+  createDirectorChat: (threadId: unknown) => ipcRenderer.invoke('generation:createDirectorChat', threadId),
+  renameDirectorChat: (chatId: unknown, title: unknown) =>
+    ipcRenderer.invoke('generation:renameDirectorChat', chatId, title),
+  deleteDirectorChat: (chatId: unknown) => ipcRenderer.invoke('generation:deleteDirectorChat', chatId),
+  listDirectorMessages: (chatId: unknown) => ipcRenderer.invoke('generation:listDirectorMessages', chatId),
+  sendDirectorMessage: (payload: unknown) => ipcRenderer.invoke('generation:sendDirectorMessage', payload),
+  cancelDirectorChat: (chatId: unknown) => ipcRenderer.invoke('generation:cancelDirectorChat', chatId),
   createReference: (payload: unknown) => ipcRenderer.invoke('generation:createReference', payload),
   createEnvironmentReference: (payload: unknown) => ipcRenderer.invoke('generation:createEnvironmentReference', payload),
   createReferenceCollection: (payload: unknown) => ipcRenderer.invoke('generation:createReferenceCollection', payload),
@@ -53,6 +61,34 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('generation:sceneFrameReady', wrappedListener);
     return () => {
       ipcRenderer.removeListener('generation:sceneFrameReady', wrappedListener);
+    };
+  },
+  subscribeToDirectorMessageStart: (listener: (payload: unknown) => void) => {
+    const wrappedListener = (_event: unknown, payload: unknown) => listener(payload);
+    ipcRenderer.on('generation:directorMessageStart', wrappedListener);
+    return () => {
+      ipcRenderer.removeListener('generation:directorMessageStart', wrappedListener);
+    };
+  },
+  subscribeToDirectorMessageDelta: (listener: (payload: unknown) => void) => {
+    const wrappedListener = (_event: unknown, payload: unknown) => listener(payload);
+    ipcRenderer.on('generation:directorMessageDelta', wrappedListener);
+    return () => {
+      ipcRenderer.removeListener('generation:directorMessageDelta', wrappedListener);
+    };
+  },
+  subscribeToDirectorMessageComplete: (listener: (payload: unknown) => void) => {
+    const wrappedListener = (_event: unknown, payload: unknown) => listener(payload);
+    ipcRenderer.on('generation:directorMessageComplete', wrappedListener);
+    return () => {
+      ipcRenderer.removeListener('generation:directorMessageComplete', wrappedListener);
+    };
+  },
+  subscribeToDirectorMessageError: (listener: (payload: unknown) => void) => {
+    const wrappedListener = (_event: unknown, payload: unknown) => listener(payload);
+    ipcRenderer.on('generation:directorMessageError', wrappedListener);
+    return () => {
+      ipcRenderer.removeListener('generation:directorMessageError', wrappedListener);
     };
   },
 });

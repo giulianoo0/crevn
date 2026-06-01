@@ -198,6 +198,79 @@ export interface SceneFrameReadyEvent {
   frameId: string;
 }
 
+export interface DirectorChatRecord {
+  id: string;
+  threadId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DirectorMessageRecord {
+  id: string;
+  chatId: string;
+  role: 'user' | 'assistant' | 'system';
+  contentMarkdown: string;
+  status: 'streaming' | 'completed' | 'failed';
+  modelId?: string | null;
+  modelLabel?: string | null;
+  fastMode: boolean;
+  references?: Array<{
+    name: string;
+    title?: string | null;
+    description?: string | null;
+    mimeType: string;
+  }>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SendDirectorMessagePayload {
+  chatId: string;
+  threadId: string;
+  prompt: string;
+  modelId?: string;
+  fastMode?: boolean;
+  referenceImages: Array<{
+    name: string;
+    title?: string;
+    description?: string;
+    mimeType: string;
+    bytesBase64: string;
+  }>;
+}
+
+export interface DirectorMessageStartEvent {
+  threadId: string;
+  chatId: string;
+  userMessage: DirectorMessageRecord;
+  assistantMessage: DirectorMessageRecord;
+}
+
+export interface DirectorMessageDeltaEvent {
+  threadId: string;
+  chatId: string;
+  messageId: string;
+  delta: string;
+  content: string;
+}
+
+export interface DirectorMessageCompleteEvent {
+  threadId: string;
+  chatId: string;
+  messageId: string;
+  content: string;
+}
+
+export interface DirectorMessageErrorEvent {
+  threadId: string;
+  chatId: string;
+  messageId: string;
+  errorMessage: string;
+  content: string;
+  canceled?: boolean;
+}
+
 export interface StructuredScenePrompt {
   sceneDescription: string;
   frames: Array<{
@@ -275,6 +348,23 @@ function getElectronApi() {
       listGeneratedImages: async () => [],
       listProjectsWithThreads: async () => [],
       listReferences: async () => [],
+      listDirectorChats: async () => [],
+      createDirectorChat: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      renameDirectorChat: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      deleteDirectorChat: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      listDirectorMessages: async () => [],
+      sendDirectorMessage: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      cancelDirectorChat: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
       createReference: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
@@ -354,6 +444,10 @@ function getElectronApi() {
       },
       subscribeToScenePlan: () => () => {},
       subscribeToSceneFrameReady: () => () => {},
+      subscribeToDirectorMessageStart: () => () => {},
+      subscribeToDirectorMessageDelta: () => () => {},
+      subscribeToDirectorMessageComplete: () => () => {},
+      subscribeToDirectorMessageError: () => () => {},
     };
   }
 
@@ -370,6 +464,38 @@ export function listProjectsWithThreads() {
 
 export function listReferences() {
   return getElectronApi().listReferences() as Promise<ReferenceImageRecord[]>;
+}
+
+export function listDirectorChats(threadId: string) {
+  return getElectronApi().listDirectorChats(threadId) as Promise<DirectorChatRecord[]>;
+}
+
+export function createDirectorChat(threadId: string) {
+  return getElectronApi().createDirectorChat(threadId) as Promise<DirectorChatRecord>;
+}
+
+export function renameDirectorChat(chatId: string, title: string) {
+  return getElectronApi().renameDirectorChat(chatId, title) as Promise<DirectorChatRecord | null>;
+}
+
+export function deleteDirectorChat(chatId: string) {
+  return getElectronApi().deleteDirectorChat(chatId) as Promise<void>;
+}
+
+export function listDirectorMessages(chatId: string) {
+  return getElectronApi().listDirectorMessages(chatId) as Promise<DirectorMessageRecord[]>;
+}
+
+export function sendDirectorMessage(payload: SendDirectorMessagePayload) {
+  return getElectronApi().sendDirectorMessage(payload) as Promise<{
+    chat: DirectorChatRecord | null;
+    userMessage: DirectorMessageRecord;
+    assistantMessage: DirectorMessageRecord;
+  }>;
+}
+
+export function cancelDirectorChat(chatId: string) {
+  return getElectronApi().cancelDirectorChat(chatId) as Promise<boolean>;
 }
 
 export function createReference(payload: CreateReferencePayload) {
@@ -531,6 +657,22 @@ export function subscribeToScenePlan(listener: (event: ScenePlanEvent) => void) 
 
 export function subscribeToSceneFrameReady(listener: (event: SceneFrameReadyEvent) => void) {
   return getElectronApi().subscribeToSceneFrameReady(listener) as () => void;
+}
+
+export function subscribeToDirectorMessageStart(listener: (event: DirectorMessageStartEvent) => void) {
+  return getElectronApi().subscribeToDirectorMessageStart(listener) as () => void;
+}
+
+export function subscribeToDirectorMessageDelta(listener: (event: DirectorMessageDeltaEvent) => void) {
+  return getElectronApi().subscribeToDirectorMessageDelta(listener) as () => void;
+}
+
+export function subscribeToDirectorMessageComplete(listener: (event: DirectorMessageCompleteEvent) => void) {
+  return getElectronApi().subscribeToDirectorMessageComplete(listener) as () => void;
+}
+
+export function subscribeToDirectorMessageError(listener: (event: DirectorMessageErrorEvent) => void) {
+  return getElectronApi().subscribeToDirectorMessageError(listener) as () => void;
 }
 
 export function copyGeneratedImage(imageId: string) {

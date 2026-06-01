@@ -88,6 +88,26 @@ app.whenReady().then(async () => {
         mainWindow.webContents.send('generation:sceneFrameReady', payload);
       }
     },
+    onDirectorMessageStart: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('generation:directorMessageStart', payload);
+      }
+    },
+    onDirectorMessageDelta: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('generation:directorMessageDelta', payload);
+      }
+    },
+    onDirectorMessageComplete: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('generation:directorMessageComplete', payload);
+      }
+    },
+    onDirectorMessageError: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('generation:directorMessageError', payload);
+      }
+    },
   });
 
   ipcMain.handle('generation:listGeneratedImages', async (_event, threadId) => {
@@ -100,6 +120,34 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('generation:listReferences', async () => {
     return generationStore.listReferences();
+  });
+
+  ipcMain.handle('generation:listDirectorChats', async (_event, threadId) => {
+    return generationStore.listDirectorChats(threadId);
+  });
+
+  ipcMain.handle('generation:createDirectorChat', async (_event, threadId) => {
+    return generationStore.createDirectorChat(threadId);
+  });
+
+  ipcMain.handle('generation:renameDirectorChat', async (_event, chatId, title) => {
+    return generationStore.renameDirectorChat(chatId, title);
+  });
+
+  ipcMain.handle('generation:deleteDirectorChat', async (_event, chatId) => {
+    return generationStore.deleteDirectorChat(chatId);
+  });
+
+  ipcMain.handle('generation:listDirectorMessages', async (_event, chatId) => {
+    return generationStore.listDirectorMessages(chatId);
+  });
+
+  ipcMain.handle('generation:sendDirectorMessage', async (_event, payload) => {
+    return generationStore.sendDirectorMessage(payload);
+  });
+
+  ipcMain.handle('generation:cancelDirectorChat', async (_event, chatId) => {
+    return generationStore.cancelDirectorChat(chatId);
   });
 
   ipcMain.handle('generation:createReference', async (_event, payload) => {

@@ -130,6 +130,45 @@ describe('generation codex runner environment', () => {
     expect(tasks[1]?.prompt).not.toContain('Full sequence context:');
   });
 
+  it('builds a Director prompt grounded in project, thread, history, and staged references', () => {
+    const prompt = generationModule.__test__.buildDirectorChatPrompt({
+      projectName: 'Orbit Kids',
+      threadName: 'Episode 2 / Hangar',
+      systemInstructions: 'Keep continuity precise and production-ready.',
+      artStyle: 'Stylized animated series.',
+      history: [
+        { role: 'user', contentMarkdown: 'Draft a coverage approach.' },
+        { role: 'assistant', contentMarkdown: 'Start from a wide and move into reverses.' },
+      ],
+      referenceImages: [
+        {
+          title: 'Hangar reference',
+          description: 'Main environment plate',
+          filePath: '/tmp/ref-1.png',
+          mimeType: 'image/png',
+        },
+      ],
+      userPrompt: 'Now turn that into a six-shot plan.',
+    });
+
+    expect(prompt).toContain('Project: Orbit Kids');
+    expect(prompt).toContain('Thread: Episode 2 / Hangar');
+    expect(prompt).toContain('Project instructions: Keep continuity precise and production-ready.');
+    expect(prompt).toContain('Project art style: Stylized animated series.');
+    expect(prompt).toContain('title: Hangar reference; description: Main environment plate');
+    expect(prompt).toContain('User: Draft a coverage approach.');
+    expect(prompt).toContain('Assistant: Start from a wide and move into reverses.');
+    expect(prompt).toContain('User: Now turn that into a six-shot plan.');
+  });
+
+  it('truncates Director chat titles from the opening prompt line', () => {
+    const title = generationModule.__test__.truncateDirectorChatTitle(
+      'Build a shot list for the hangar chase with emphasis on reverses and inserts.\nSecond line.'
+    );
+
+    expect(title).toBe('Build a shot list for the hangar chase with emphasis on…');
+  });
+
   it('uses the selected codex model when building exec arguments', () => {
     const args = generationModule.__test__.buildCodexExecArgs({
       model: 'gpt-5.5',
