@@ -30,6 +30,11 @@ export const generationJobsTable = sqliteTable('generation_jobs', {
   workingDirectory: text('working_directory').notNull(),
   manifestPath: text('manifest_path').notNull(),
   errorMessage: text('error_message'),
+  provider: text('provider'),
+  modelId: text('model_id'),
+  modelLabel: text('model_label'),
+  referenceImagesJson: text('reference_images_json'),
+  durationMs: integer('duration_ms'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -90,6 +95,11 @@ export const CREATE_GENERATION_JOBS_TABLE_SQL = `
     working_directory TEXT NOT NULL,
     manifest_path TEXT NOT NULL,
     error_message TEXT,
+    provider TEXT,
+    model_id TEXT,
+    model_label TEXT,
+    reference_images_json TEXT,
+    duration_ms INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (thread_id) REFERENCES threads(id)

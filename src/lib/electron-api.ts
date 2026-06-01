@@ -37,6 +37,8 @@ export interface ReferenceImageRecord {
   mimeType: string;
   bytesBase64: string;
   createdAt: string;
+  category: 'characters' | 'environment' | 'objects';
+  environmentId?: string | null;
 }
 
 export interface CreateReferencePayload {
@@ -45,11 +47,52 @@ export interface CreateReferencePayload {
   description?: string;
   mimeType: string;
   bytesBase64: string;
+  category: 'characters' | 'objects';
+}
+
+export interface CreateEnvironmentReferencePayload {
+  title: string;
+  description?: string;
+  attachments: Array<{
+    name: string;
+    mimeType: string;
+    bytesBase64: string;
+    description?: string;
+  }>;
+}
+
+export interface UpdateReferencePayload {
+  id: string;
+  category: 'characters' | 'environment' | 'objects';
+  title: string;
+  description?: string;
+  environmentId?: string;
+}
+
+export interface UpdateEnvironmentReferencePayload {
+  environmentId: string;
+  title: string;
+  description?: string;
+  attachments: Array<{
+    id?: string;
+    name: string;
+    mimeType: string;
+    bytesBase64: string;
+    description?: string;
+  }>;
+}
+
+export interface DeleteReferencePayload {
+  id: string;
+  category: 'characters' | 'environment' | 'objects';
+  environmentId?: string;
 }
 
 export interface GenerateImagesPayload {
   clientRunId?: string;
   fastMode?: boolean;
+  provider?: 'codex' | 'antigravity';
+  modelId?: string;
   mode?: 'manual' | 'scene' | 'pinpoint' | 'camera';
   prompt: string;
   count: number;
@@ -79,6 +122,18 @@ export interface GenerateImagesPayload {
 
 export interface GeneratedImageRecord extends GeneratedImageGridImage {
   createdAt: string;
+  provider?: 'codex' | 'antigravity' | null;
+  modelId?: string | null;
+  modelLabel?: string | null;
+  prompt?: string | null;
+  references?: Array<{
+    name: string;
+    title?: string | null;
+    description?: string | null;
+    mimeType: string;
+  }>;
+  durationMs?: number | null;
+  generationStartedAt?: string;
 }
 
 export interface ScenePlanEvent {
@@ -96,6 +151,14 @@ function getElectronApi() {
       listProjectsWithThreads: async () => [],
       listReferences: async () => [],
       createReference: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      createEnvironmentReference: async () => [],
+      updateReference: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      updateEnvironmentReference: async () => [],
+      deleteReference: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
       ensureProjectThreadWorkspace: async () => {
@@ -155,6 +218,22 @@ export function listReferences() {
 
 export function createReference(payload: CreateReferencePayload) {
   return getElectronApi().createReference(payload) as Promise<ReferenceImageRecord>;
+}
+
+export function createEnvironmentReference(payload: CreateEnvironmentReferencePayload) {
+  return getElectronApi().createEnvironmentReference(payload) as Promise<ReferenceImageRecord[]>;
+}
+
+export function updateReference(payload: UpdateReferencePayload) {
+  return getElectronApi().updateReference(payload) as Promise<ReferenceImageRecord>;
+}
+
+export function updateEnvironmentReference(payload: UpdateEnvironmentReferencePayload) {
+  return getElectronApi().updateEnvironmentReference(payload) as Promise<ReferenceImageRecord[]>;
+}
+
+export function deleteReference(payload: DeleteReferencePayload) {
+  return getElectronApi().deleteReference(payload) as Promise<void>;
 }
 
 export function ensureProjectThreadWorkspace() {

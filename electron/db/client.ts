@@ -59,6 +59,11 @@ export interface GenerationJobRecord {
   workingDirectory: string;
   manifestPath: string;
   errorMessage: string | null;
+  provider?: 'codex' | 'antigravity' | null;
+  modelId?: string | null;
+  modelLabel?: string | null;
+  referenceImagesJson?: string | null;
+  durationMs?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -187,6 +192,11 @@ export function createGenerationDatabase(databasePath: string): GenerationDataba
             workingDirectory: job.workingDirectory,
             manifestPath: job.manifestPath,
             errorMessage: job.errorMessage,
+            provider: job.provider,
+            modelId: job.modelId,
+            modelLabel: job.modelLabel,
+            referenceImagesJson: job.referenceImagesJson,
+            durationMs: job.durationMs,
             createdAt: job.createdAt,
             updatedAt: job.updatedAt,
           },
@@ -276,6 +286,12 @@ export function createGenerationDatabase(databasePath: string): GenerationDataba
           width: generatedAssetsTable.width,
           height: generatedAssetsTable.height,
           createdAt: generatedAssetsTable.createdAt,
+          prompt: generationJobsTable.prompt,
+          provider: generationJobsTable.provider,
+          modelId: generationJobsTable.modelId,
+          modelLabel: generationJobsTable.modelLabel,
+          referenceImagesJson: generationJobsTable.referenceImagesJson,
+          durationMs: generationJobsTable.durationMs,
         })
         .from(generatedAssetsTable)
         .innerJoin(generationJobsTable, eq(generatedAssetsTable.jobId, generationJobsTable.id))
@@ -304,6 +320,7 @@ async function initializeDatabase(database: ReturnType<typeof drizzle<Client>>) 
   await database.run(sql.raw(CREATE_REFERENCE_IMAGES_TABLE_SQL));
   await ensureProjectSettingsColumns(database);
   await ensureGenerationJobsThreadColumn(database);
+  await ensureGenerationJobMetadataColumns(database);
 }
 
 async function ensureProjectSettingsColumns(database: ReturnType<typeof drizzle<Client>>) {
@@ -327,6 +344,31 @@ async function ensureGenerationJobsThreadColumn(database: ReturnType<typeof driz
 
   if (!hasThreadId) {
     await database.run(sql.raw("ALTER TABLE generation_jobs ADD COLUMN thread_id TEXT REFERENCES threads(id)"));
+  }
+}
+
+async function ensureGenerationJobMetadataColumns(database: ReturnType<typeof drizzle<Client>>) {
+  const tableInfo = await database.all<{ name: string }>(sql.raw("PRAGMA table_info('generation_jobs')"));
+  const columnNames = new Set(tableInfo.map((column) => column.name));
+
+  if (!columnNames.has('provider')) {
+    await database.run(sql.raw('ALTER TABLE generation_jobs ADD COLUMN provider TEXT'));
+  }
+
+  if (!columnNames.has('model_id')) {
+    await database.run(sql.raw('ALTER TABLE generation_jobs ADD COLUMN model_id TEXT'));
+  }
+
+  if (!columnNames.has('model_label')) {
+    await database.run(sql.raw('ALTER TABLE generation_jobs ADD COLUMN model_label TEXT'));
+  }
+
+  if (!columnNames.has('reference_images_json')) {
+    await database.run(sql.raw('ALTER TABLE generation_jobs ADD COLUMN reference_images_json TEXT'));
+  }
+
+  if (!columnNames.has('duration_ms')) {
+    await database.run(sql.raw('ALTER TABLE generation_jobs ADD COLUMN duration_ms INTEGER'));
   }
 }
 

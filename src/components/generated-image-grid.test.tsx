@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GeneratedImageGrid } from './generated-image-grid';
 
+vi.mock('@number-flow/react', () => ({
+  default: ({ value }: { value: number }) => <span>{value}</span>,
+}));
+
 const images = [
   { id: '1', fileUrl: 'file:///1.png', fileName: '1.png' },
   { id: '2', fileUrl: 'file:///2.png', fileName: '2.png' },
@@ -31,7 +35,16 @@ describe('GeneratedImageGrid', () => {
   it('renders shimmer placeholders for loading entries', () => {
     render(
       <GeneratedImageGrid
-        images={[{ id: 'loading-1', fileName: 'Generating 1', isLoading: true }]}
+        images={[
+          {
+            id: 'loading-1',
+            fileName: 'Generating 1',
+            isLoading: true,
+            provider: 'codex',
+            modelLabel: 'GPT-5.4 Mini',
+            generationStartedAt: '2026-05-26T10:30:00.000Z',
+          },
+        ]}
         className="h-[300px]"
       />
     );
@@ -40,6 +53,29 @@ describe('GeneratedImageGrid', () => {
     expect(placeholder).toBeInTheDocument();
     expect(placeholder).toHaveClass('animate-skeleton-shimmer');
     expect(placeholder).not.toHaveClass('animate-pulse');
+    expect(screen.getByText('GPT-5.4 Mini')).toBeInTheDocument();
+  });
+
+  it('shows provider model and time metadata on image tiles', () => {
+    render(
+      <GeneratedImageGrid
+        images={[
+          {
+            id: 'agy-1',
+            fileUrl: 'file:///agy-1.png',
+            fileName: 'agy-1.png',
+            provider: 'antigravity',
+            modelLabel: 'Gemini 3.5 Flash (Low)',
+            durationMs: 92_500,
+          },
+        ]}
+        className="h-[300px]"
+      />
+    );
+
+    expect(screen.getByText('Gemini 3.5 Flash (Low)')).toBeInTheDocument();
+    expect(screen.getByText('01:32')).toBeInTheDocument();
+    expect(screen.getByAltText('Antigravity')).toBeInTheDocument();
   });
 
   it('renders nothing when there are no images', () => {

@@ -128,12 +128,15 @@ describe('buildCodexImageGenerationPrompt', () => {
     expect(prompt).toContain('Create exactly 1 final image file.');
     expect(prompt).toContain('Treat the first/source camera reference as the primary scene anchor.');
     expect(prompt).toContain('Move the camera around the subject or scene; do not rotate the subject like a flat sticker.');
+    expect(prompt).toContain('Interpret rotation, tilt, and zoom as a physical 3D camera move around the scene, producing new perspective, parallax, occlusion, and visible side geometry.');
     expect(prompt).toContain('Horizontal camera orbit/azimuth: 38 degrees.');
     expect(prompt).toContain('Vertical camera tilt/elevation: -12 degrees.');
     expect(prompt).toContain('Camera zoom/dolly value: 0.35.');
+    expect(prompt).toContain('Treat zoom as camera dolly or field-of-view change, not as a flat crop or resize of the original pixels.');
     expect(prompt).toContain('Preserve subject identity, proportions, wardrobe, materials, lighting direction, palette, and environment continuity.');
     expect(prompt).toContain('Keep the original source image aspect ratio, visual quality, resolution feel, and style.');
-    expect(prompt).toContain('Change as little as possible except for the requested camera angle.');
+    expect(prompt).toContain('Keep composition and framing as close as possible while changing only the requested camera perspective.');
+    expect(prompt).toContain('Do not satisfy the request by cropping, panning a flat image, warping the canvas, or simply tilting the existing picture plane.');
     expect(prompt).toContain('Do not add angle labels, numbering, captions, watermarks, UI overlays, or any text into the generated pixels.');
     expect(prompt).toContain('Do not execute shell scripts, package scripts, build scripts, test scripts, or project automation during this run.');
   });

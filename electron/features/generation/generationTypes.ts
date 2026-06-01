@@ -9,6 +9,8 @@ export interface ReferenceImageInput {
 export interface GenerateImagesInput {
   clientRunId?: string;
   fastMode?: boolean;
+  provider?: 'codex' | 'antigravity';
+  modelId?: string;
   mode?: 'manual' | 'scene' | 'pinpoint' | 'camera';
   prompt: string;
   count: number;

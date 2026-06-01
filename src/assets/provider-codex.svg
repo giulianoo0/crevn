@@ -1,0 +1,29 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="codex-gradient" x1="128" y1="24" x2="128" y2="232" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A69BFF" />
+      <stop offset="1" stop-color="#3E46FF" />
+    </linearGradient>
+  </defs>
+  <g fill="url(#codex-gradient)">
+    <circle cx="104" cy="128" r="64" />
+    <circle cx="128" cy="88" r="52" />
+    <circle cx="164" cy="100" r="48" />
+    <circle cx="178" cy="144" r="56" />
+    <circle cx="140" cy="176" r="56" />
+    <circle cx="96" cy="172" r="48" />
+  </g>
+  <path
+    d="M97 100L123 128L97 156"
+    stroke="white"
+    stroke-width="18"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M145 152H183"
+    stroke="white"
+    stroke-width="18"
+    stroke-linecap="round"
+  />
+</svg>

@@ -48,8 +48,46 @@ vi.mock('./lib/electron-api', () => ({
     id: 'reference-created',
     createdAt: '2026-05-26T12:00:00.000Z',
     description: payload.description ?? null,
+    category: payload.category,
     ...payload,
   })),
+  createEnvironmentReference: vi.fn(async (payload) =>
+    payload.attachments.map((attachment: { name: string; mimeType: string; bytesBase64: string }, index: number) => ({
+      id: `environment-reference-${index + 1}`,
+      environmentId: 'environment-1',
+      title: payload.title,
+      description: payload.description ?? null,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      bytesBase64: attachment.bytesBase64,
+      createdAt: '2026-05-26T12:00:00.000Z',
+      category: 'environment',
+    }))
+  ),
+  updateReference: vi.fn(async (payload) => ({
+    id: payload.id,
+    environmentId: payload.environmentId ?? null,
+    name: 'updated.png',
+    title: payload.title,
+    description: payload.description ?? null,
+    mimeType: 'image/png',
+    bytesBase64: 'AQID',
+    createdAt: '2026-05-26T12:00:00.000Z',
+    category: payload.category,
+  })),
+  updateEnvironmentReference: vi.fn(async (payload) =>
+    payload.attachments.map((attachment: { id?: string; name: string; mimeType: string; bytesBase64: string; description?: string }, index: number) => ({
+      id: attachment.id ?? `environment-reference-${index + 1}`,
+      environmentId: payload.environmentId,
+      title: payload.title,
+      description: attachment.description ?? payload.description ?? null,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      bytesBase64: attachment.bytesBase64,
+      createdAt: '2026-05-26T12:00:00.000Z',
+      category: 'environment',
+    }))
+  ),
   listGeneratedImages: vi.fn(async () => []),
   createProject: vi.fn(),
   createThread: vi.fn(),
@@ -240,6 +278,7 @@ describe('App header thread title', () => {
       id: 'reference-created',
       createdAt: '2026-05-26T12:00:00.000Z',
       description: payload.description ?? null,
+      category: payload.category,
       ...payload,
     }));
   });
@@ -850,6 +889,45 @@ describe('App header thread title', () => {
     expect(gridButton).toHaveAttribute('data-selected', 'false');
   });
 
+  it('shows stored generation prompt, references, model, and time in generated image details', async () => {
+    vi.mocked(electronApi.listGeneratedImages).mockResolvedValue([
+      {
+        id: 'generated-1',
+        fileName: 'frame-1.png',
+        fileUrl: 'crenv-asset://generated?path=frame-1.png',
+        createdAt: '2026-05-26T10:30:00.000Z',
+        provider: 'antigravity',
+        modelId: 'antigravity-gemini-3-5-flash-low',
+        modelLabel: 'Gemini 3.5 Flash (Low)',
+        prompt: 'Generate Tito on black background',
+        references: [
+          {
+            name: 'tito.png',
+            title: 'Tito',
+            description: 'Subject anchor',
+            mimeType: 'image/png',
+          },
+        ],
+        durationMs: 92_500,
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.doubleClick(screen.getByRole('button', { name: 'Select frame-1.png' }));
+
+    expect(screen.getByRole('dialog', { name: 'frame-1.png' })).toBeInTheDocument();
+    expect(screen.getByText('Gemini 3.5 Flash (Low)')).toBeInTheDocument();
+    expect(screen.getByText('01:32')).toBeInTheDocument();
+    expect(screen.getByText('Generate Tito on black background')).toBeInTheDocument();
+    expect(screen.getByText('Tito')).toBeInTheDocument();
+    expect(screen.getByText('Subject anchor')).toBeInTheDocument();
+  });
+
   it('opens the player for an attached reference image from the composer row', async () => {
     const referenceImage = new File(['stub-image'], 'reference.png', { type: 'image/png' });
 
@@ -1051,7 +1129,7 @@ describe('App header thread title', () => {
         referenceImages: [
           expect.objectContaining({
             title: 'RefImage1',
-            description: expect.stringContaining('Preserve original aspect ratio, quality, and style'),
+            description: expect.stringContaining('physical 3D camera perspective change'),
             bytesBase64: 'AQIDBA==',
           }),
         ],
@@ -1064,6 +1142,8 @@ describe('App header thread title', () => {
     );
     const cameraRequest = vi.mocked(electronApi.generateImages).mock.calls[0]?.[0];
     expect(cameraRequest?.prompt).not.toContain('Aspect ratio: 16:9');
+    expect(cameraRequest?.prompt).toContain('Perspective goal: move the camera in 3D around RefImage1');
+    expect(cameraRequest?.prompt).toContain('Do not fake the move by cropping, resizing, canvas warping, or rotating the flat image plane.');
     expect(screen.queryByRole('dialog', { name: 'frame-1.png' })).not.toBeInTheDocument();
     expect(screen.getAllByLabelText(/loading$/i)).toHaveLength(1);
 
@@ -1175,6 +1255,7 @@ describe('App header thread title', () => {
         mimeType: 'image/png',
         bytesBase64: 'AQID',
         createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'characters',
       },
       {
         id: 'reference-palette',
@@ -1184,6 +1265,7 @@ describe('App header thread title', () => {
         mimeType: 'image/png',
         bytesBase64: 'BAUG',
         createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'characters',
       },
     ]);
     vi.mocked(electronApi.listGeneratedImages).mockResolvedValue([
@@ -1428,9 +1510,91 @@ describe('App header thread title', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
 
-    expect(screen.getByRole('button', { name: 'References' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'References' })).toBeInTheDocument();
+    expect(screen.getByText('References')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Characters' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Environment' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Objects' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Characters' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Back to projects' })).toBeInTheDocument();
+  });
+
+  it('switches between classic and scenes from the header tabs', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Classic' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Scenes' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('classic-composer')).toBeInTheDocument();
+    expect(screen.queryByTestId('scenes-workspace')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('scenes-sidebar')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Scenes' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Classic' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('scenes-workspace')).toBeInTheDocument();
+    expect(screen.getByTestId('scenes-sidebar')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Frame 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Frame 2' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Generate frames' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'New frame' })).toBeInTheDocument();
+    expect(screen.getByText('Scene Description')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Scene Description' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Add Reference' }).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Frame 1' }));
+
+    expect(screen.getByRole('button', { name: 'Frame 1' })).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename Frame 2' }));
+    fireEvent.change(screen.getByDisplayValue('Frame 2'), {
+      target: { value: 'Intro shot' },
+    });
+
+    expect(screen.getByDisplayValue('Intro shot')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New frame' }));
+
+    expect(screen.getByRole('button', { name: 'Frame 3' })).toBeInTheDocument();
+  });
+
+  it('resizes the scenes sidebar when dragging the resize handle', async () => {
+    window.innerWidth = 1400;
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const sidebarShell = screen.getByTestId('scenes-sidebar-shell');
+    const resizeHandle = screen.getByRole('button', { name: 'Resize scenes sidebar' });
+
+    expect(sidebarShell).toHaveStyle({ width: '500px' });
+
+    await act(async () => {
+      fireEvent.pointerDown(resizeHandle, { pointerId: 1, clientX: 900, button: 0 });
+    });
+
+    await act(async () => {
+      fireEvent.pointerMove(document, { pointerId: 1, clientX: 760 });
+      fireEvent.pointerUp(document, { pointerId: 1, clientX: 760 });
+    });
+
+    expect(sidebarShell).toHaveStyle({ width: '640px' });
   });
 
   it('opens the references page and adds a reference with metadata', async () => {
@@ -1446,12 +1610,12 @@ describe('App header thread title', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    fireEvent.click(screen.getByRole('button', { name: 'References' }));
+    fireEvent.click(screen.getByRole('button', { name: /characters/i }));
 
-    expect(screen.getByRole('heading', { name: 'References' })).toBeInTheDocument();
-    expect(screen.getByText('Choose the visual memory Codex can reuse during generation.')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Characters' })).toBeInTheDocument();
+    expect(screen.getByText('Save character visuals and identity notes for consistent people across generations.')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add reference' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add character' }));
     fireEvent.change(screen.getByLabelText('Image'), {
       target: { files: [referenceImage] },
     });
@@ -1492,7 +1656,7 @@ describe('App header thread title', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Add reference' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add character' }));
     fireEvent.drop(screen.getByText('Drop an image here'), {
       dataTransfer: { files: [droppedImage] },
     });
@@ -1514,6 +1678,54 @@ describe('App header thread title', () => {
     );
   });
 
+  it('allows multiple environment images with one shared description', async () => {
+    const imageOne = new File(['env-1'], 'env-1.png', { type: 'image/png' });
+    const imageTwo = new File(['env-2'], 'env-2.png', { type: 'image/png' });
+    Object.defineProperty(imageOne, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([1, 2, 3, 4]).buffer),
+    });
+    Object.defineProperty(imageTwo, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([5, 6, 7, 8]).buffer),
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add environment images' }));
+    fireEvent.change(screen.getByLabelText('Image'), {
+      target: { files: [imageOne, imageTwo] },
+    });
+    fireEvent.change(screen.getByLabelText('Title'), {
+      target: { value: 'Warehouse' },
+    });
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Concrete floor, industrial lighting, steel shelves.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save references' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.createEnvironmentReference).toHaveBeenCalledTimes(1);
+    expect(electronApi.createEnvironmentReference).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        title: 'Warehouse',
+        description: 'Concrete floor, industrial lighting, steel shelves.',
+        attachments: [
+          expect.objectContaining({ name: 'env-1.png' }),
+          expect.objectContaining({ name: 'env-2.png' }),
+        ],
+      })
+    );
+  });
+
   it('filters reference mentions after @ and inserts the selected name', async () => {
     vi.mocked(electronApi.listReferences).mockResolvedValue([
       {
@@ -1524,6 +1736,7 @@ describe('App header thread title', () => {
         mimeType: 'image/png',
         bytesBase64: 'AQID',
         createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'characters',
       },
       {
         id: 'reference-palette',
@@ -1533,6 +1746,7 @@ describe('App header thread title', () => {
         mimeType: 'image/png',
         bytesBase64: 'BAUG',
         createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'characters',
       },
     ]);
 
@@ -1563,6 +1777,239 @@ describe('App header thread title', () => {
     expect(screen.getByTestId('selected-reference-mention')).toHaveStyle({ color: 'var(--accent)' });
   });
 
+  it('can tag a selected generated image and sends it as generation context', async () => {
+    const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
+      jobId: 'job-1',
+      assets: [],
+    });
+    generateImagesMock.mockClear();
+    vi.mocked(electronApi.listGeneratedImages).mockResolvedValue([
+      {
+        id: 'generated-1',
+        fileName: 'frame-1.png',
+        fileUrl: 'crenv-asset://generated?path=frame-1.png',
+        createdAt: '2026-05-26T10:30:00.000Z',
+      },
+    ]);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      arrayBuffer: async () => Uint8Array.from([1, 2, 3, 4]).buffer,
+      blob: async () => new Blob([Uint8Array.from([1, 2, 3, 4])], { type: 'image/png' }),
+      headers: { get: () => 'image/png' },
+    } as Response);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const gridButton = screen.getByRole('button', { name: 'Select frame-1.png' });
+    fireEvent.click(gridButton);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Use @frame' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'frame-1' }));
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(generateImagesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining('Use RefImage1 (frame-1)'),
+        referenceImages: [
+          expect.objectContaining({
+            name: 'frame-1.png',
+            title: 'RefImage1',
+            bytesBase64: 'AQIDBA==',
+          }),
+        ],
+      })
+    );
+  });
+
+  it('preserves pasted reference mentions so copied prompts keep image context', async () => {
+    const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
+      jobId: 'job-1',
+      assets: [],
+    });
+    generateImagesMock.mockClear();
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'reference-hero',
+        name: 'hero.png',
+        title: 'Hero face',
+        description: 'Primary character',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'characters',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.paste(composerInput, {
+        clipboardData: {
+          files: [],
+          getData: (type: string) =>
+            type === 'text/html'
+              ? '<span data-testid="selected-reference-mention" data-mention-id="reference-hero" data-mention-title="Hero face">Hero face</span> on black'
+              : 'Hero face on black',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Hero face');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(generateImagesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining('RefImage1 (Hero face) on black'),
+        referenceImages: [
+          expect.objectContaining({
+            name: 'hero.png',
+            title: 'RefImage1',
+            description: 'Primary character',
+            bytesBase64: 'AQID',
+          }),
+        ],
+      })
+    );
+  });
+
+  it('rehydrates pasted generated-image mentions from the current image list', async () => {
+    const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
+      jobId: 'job-1',
+      assets: [],
+    });
+    generateImagesMock.mockClear();
+    vi.mocked(electronApi.listGeneratedImages).mockResolvedValue([
+      {
+        id: 'generated-1',
+        fileName: 'frame-1.png',
+        fileUrl: 'crenv-asset://generated?path=frame-1.png',
+        createdAt: '2026-05-26T10:30:00.000Z',
+      },
+    ]);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      arrayBuffer: async () => Uint8Array.from([1, 2, 3, 4]).buffer,
+      blob: async () => new Blob([Uint8Array.from([1, 2, 3, 4])], { type: 'image/png' }),
+      headers: { get: () => 'image/png' },
+    } as Response);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.paste(composerInput, {
+        clipboardData: {
+          files: [],
+          getData: (type: string) =>
+            type === 'text/html'
+              ? '<span data-testid="selected-reference-mention" data-mention-id="generated-reference-generated-1" data-mention-title="frame-1">frame-1</span> on black'
+              : 'frame-1 on black',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(generateImagesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining('RefImage1 (frame-1) on black'),
+        referenceImages: [
+          expect.objectContaining({
+            name: 'frame-1.png',
+            title: 'RefImage1',
+            bytesBase64: 'AQIDBA==',
+          }),
+        ],
+      })
+    );
+  });
+
+  it('does not attach saved library references unless they are mentioned', async () => {
+    const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
+      jobId: 'job-1',
+      assets: [],
+    });
+    generateImagesMock.mockClear();
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'reference-hero',
+        name: 'hero.png',
+        title: 'Hero face',
+        description: 'Primary character',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'characters',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByRole('textbox'), {
+        target: { value: 'Generate a clean portrait' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(generateImagesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        referenceImages: [],
+      })
+    );
+  });
+
   it('sends saved references and metadata with generation requests', async () => {
     const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
       jobId: 'job-1',
@@ -1581,15 +2028,15 @@ describe('App header thread title', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    fireEvent.click(screen.getByRole('button', { name: 'References' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Add reference' }));
+    fireEvent.click(screen.getByRole('button', { name: /characters/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add character' }));
     fireEvent.change(screen.getByLabelText('Image'), {
       target: { files: [referenceImage] },
     });
-    fireEvent.change(screen.getByLabelText('Title'), {
+    fireEvent.change(screen.getAllByLabelText('Title')[0], {
       target: { value: 'Palette guide' },
     });
-    fireEvent.change(screen.getByLabelText('Description'), {
+    fireEvent.change(screen.getAllByLabelText('Description')[0], {
       target: { value: 'Muted contrast and soft highlights.' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save reference' }));
@@ -1601,8 +2048,12 @@ describe('App header thread title', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Back to projects' }));
     await act(async () => {
       fireEvent.change(screen.getByRole('textbox'), {
-        target: { value: 'Generate with library reference' },
+        target: { value: 'Generate with @palette' },
       });
+      await vi.runAllTimersAsync();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Palette guide' }));
       await vi.runAllTimersAsync();
     });
     fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
@@ -1791,6 +2242,99 @@ describe('App header thread title', () => {
       expect.objectContaining({
         count: 1,
         fastMode: true,
+      })
+    );
+  });
+
+  it('updates the model trigger label when a different Codex model is selected', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.focus(screen.getByRole('textbox'));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Model GPT-5.4 Mini' }));
+    fireEvent.click(screen.getByRole('button', { name: 'GPT-5.5' }));
+
+    expect(screen.getByRole('button', { name: 'Model GPT-5.5' })).toBeInTheDocument();
+  });
+
+  it('keeps the composer expanded while the model picker is open', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    fireEvent.focus(composerInput);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(composerInput).toHaveAttribute('rows', '3');
+
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'Model GPT-5.4 Mini' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Model GPT-5.4 Mini' }));
+
+    expect(screen.getByRole('button', { name: 'GPT-5.5' })).toBeInTheDocument();
+    expect(composerInput).toHaveAttribute('rows', '3');
+    expect(screen.getByRole('button', { name: 'Fast' })).toBeInTheDocument();
+  });
+
+  it('disables Fast for Antigravity and sends the selected provider model in generation payloads', async () => {
+    const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
+      jobId: 'job-1',
+      assets: [],
+    });
+    generateImagesMock.mockClear();
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    fireEvent.focus(composerInput);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Model GPT-5.4 Mini' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Antigravity' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Gemini 3.5 Flash (Low)' }));
+
+    const fastButton = screen.getByRole('button', { name: 'Fast' });
+    expect(fastButton).toBeDisabled();
+    expect(fastButton).toHaveAttribute('aria-pressed', 'false');
+
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Generate a neon control room' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(generateImagesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        provider: 'antigravity',
+        modelId: 'antigravity-gemini-3-5-flash-low',
+        fastMode: false,
       })
     );
   });

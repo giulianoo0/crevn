@@ -1,11 +1,11 @@
 ---
 name: cinematic-angles
-description: Cinematographic vocabulary for the imagen Codex generation engine. Use when working on camera angles, shot framing, the angle picker, or any prompt text sent to image/video generation. Explains how the app turns an angle selection into an AI directive, defines all 33 angles/shots/coverage patterns in standard film language, and gives the prompt formula the model was trained on. Triggers on "camera angle", "add an angle", "shot type", "framing", "angle prompt", "make the AI understand the shot", "cinematic prompt", "buildAngleDirective", "angleOptions".
+description: Cinematographic vocabulary for the crevn Codex generation engine. Use when working on camera angles, shot framing, the angle picker, or any prompt text sent to image/video generation. Explains how the app turns an angle selection into an AI directive, defines all 33 angles/shots/coverage patterns in standard film language, and gives the prompt formula the model was trained on. Triggers on "camera angle", "add an angle", "shot type", "framing", "angle prompt", "make the AI understand the shot", "cinematic prompt", "buildAngleDirective", "angleOptions".
 ---
 
 # Cinematic Angles
 
-This app ("imagen") generates images through a **Codex** batch job. The model renders
+This app ("crevn") generates images through a **Codex** batch job. The model renders
 what the prompt text describes, so the words matter. This skill is the single source
 of truth for the cinematographic language the app speaks to that model.
 

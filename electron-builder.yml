@@ -1,5 +1,11 @@
-appId: com.crenv.imagen
-productName: Imagen
+appId: com.crenv.crevn
+productName: crevn
+# Publish straight to a visible GitHub Release (not a hidden draft).
+# The release tag/name comes from this package's version, so keep
+# package.json "version" in sync with the git tag you push (e.g. v0.1.0).
+publish:
+  provider: github
+  releaseType: release
 # Vite already owns `dist/`, so electron-builder writes installers elsewhere.
 directories:
   output: release

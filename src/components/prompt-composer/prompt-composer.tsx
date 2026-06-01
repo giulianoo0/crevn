@@ -38,7 +38,7 @@ import {
   COMMAND_PRIORITY_CRITICAL,
   KEY_ENTER_COMMAND,
 } from 'lexical';
-import { MentionNode } from './mention-node';
+import { MentionNode, $createMentionNode } from './mention-node';
 import { MentionPlugin } from './mention-plugin';
 
 // ---------------------------------------------------------------------------
@@ -51,6 +51,10 @@ type MentionMatch = {
 };
 
 type MentionNavigationKey = 'ArrowDown' | 'ArrowUp' | 'Enter' | 'Escape';
+
+type ClipboardPromptSegment =
+  | { type: 'text'; text: string }
+  | { type: 'mention'; id: string; title: string };
 
 export type PromptComposerHandle = {
   focus: () => void;
@@ -94,6 +98,75 @@ function getCaretOffset(container: HTMLElement): number {
   } catch (e) {
     return 0;
   }
+}
+
+function parsePromptMentionHtml(html: string): ClipboardPromptSegment[] | null {
+  if (!html || !html.includes('data-mention-id')) {
+    return null;
+  }
+
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  const segments: ClipboardPromptSegment[] = [];
+  let hasMention = false;
+
+  function appendText(text: string) {
+    if (!text) return;
+    const previous = segments[segments.length - 1];
+    if (previous?.type === 'text') {
+      previous.text += text;
+      return;
+    }
+    segments.push({ type: 'text', text });
+  }
+
+  function visit(node: Node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      appendText(node.textContent ?? '');
+      return;
+    }
+
+    if (!(node instanceof HTMLElement)) {
+      return;
+    }
+
+    const mentionId = node.getAttribute('data-mention-id');
+    if (mentionId) {
+      const mentionTitle = node.getAttribute('data-mention-title') || node.textContent || mentionId;
+      segments.push({ type: 'mention', id: mentionId, title: mentionTitle });
+      hasMention = true;
+      return;
+    }
+
+    if (node.tagName === 'BR') {
+      appendText('\n');
+      return;
+    }
+
+    for (const child of Array.from(node.childNodes)) {
+      visit(child);
+    }
+  }
+
+  for (const child of Array.from(template.content.childNodes)) {
+    visit(child);
+  }
+
+  return hasMention ? segments : null;
+}
+
+function createNodesFromClipboardSegments(segments: ClipboardPromptSegment[]) {
+  return segments.flatMap((segment) => {
+    if (segment.type === 'mention') {
+      return [$createMentionNode(segment.id, segment.title)];
+    }
+
+    const textParts = segment.text.split('\n');
+    return textParts.flatMap((part, index) => [
+      ...(index > 0 ? [$createLineBreakNode()] : []),
+      ...(part.length > 0 ? [$createTextNode(part)] : []),
+    ]);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -197,9 +270,58 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
         if (files && files.length > 0) {
           event.preventDefault();
           onPasteFiles?.(files);
+          return;
+        }
+
+        const html = event.clipboardData?.getData('text/html') ?? '';
+        const segments = parsePromptMentionHtml(html);
+        if (segments) {
+          event.preventDefault();
+          editor.update(() => {
+            const nodes = createNodesFromClipboardSegments(segments);
+            if (nodes.length === 0) return;
+
+            const selection = $getSelection();
+            if ($isRangeSelection(selection)) {
+              selection.insertNodes(nodes);
+              return;
+            }
+
+            const root = $getRoot();
+            const paragraph = $createParagraphNode();
+            paragraph.append(...nodes);
+            root.append(paragraph);
+          });
         }
       },
-      [onPasteFiles],
+      [editor, onPasteFiles],
+    );
+
+    const handleCopy = useCallback(
+      (event: ClipboardEvent<HTMLDivElement>) => {
+        const rootElement = editor.getRootElement();
+        const selection = window.getSelection();
+        if (!rootElement || !selection || selection.rangeCount === 0 || selection.isCollapsed) {
+          return;
+        }
+
+        const anchorNode = selection.anchorNode;
+        const focusNode = selection.focusNode;
+        if (!anchorNode || !focusNode || !rootElement.contains(anchorNode) || !rootElement.contains(focusNode)) {
+          return;
+        }
+
+        const container = document.createElement('div');
+        container.appendChild(selection.getRangeAt(0).cloneContents());
+        if (!container.querySelector('[data-mention-id]')) {
+          return;
+        }
+
+        event.clipboardData?.setData('text/html', container.innerHTML);
+        event.clipboardData?.setData('text/plain', selection.toString());
+        event.preventDefault();
+      },
+      [editor],
     );
 
     const handleCompatTextEvent = useCallback(
@@ -298,6 +420,7 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
         <PlainTextPlugin
           contentEditable={
             <ContentEditable
+              data-prompt-composer-editor="true"
               className={[
                 'w-full resize-none border-0 bg-transparent p-0 outline-none whitespace-pre-wrap break-words',
                 'text-[var(--foreground)] caret-[var(--foreground)]',
@@ -313,6 +436,7 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
                 fontVariantLigatures: 'none',
               }}
               onPasteCapture={handlePaste}
+              onCopyCapture={handleCopy}
               onInput={handleCompatTextEvent}
               onChange={handleCompatTextEvent}
               aria-label={ariaLabel}
@@ -323,6 +447,7 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
           }
           placeholder={
             <div
+              data-prompt-composer-placeholder="true"
               className={[
                 'pointer-events-none absolute inset-0 text-[var(--muted-foreground)] select-none',
                 'transition-[font-size,line-height,padding] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',

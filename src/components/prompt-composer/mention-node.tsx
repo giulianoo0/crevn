@@ -60,6 +60,7 @@ export class MentionNode extends TextNode {
     const element = super.createDOM(config);
     element.setAttribute('data-testid', 'selected-reference-mention');
     element.setAttribute('data-mention-id', this.__mentionId);
+    element.setAttribute('data-mention-title', this.__mentionTitle);
     element.style.color = 'var(--accent)';
     element.style.pointerEvents = 'none';
     return element;
@@ -74,6 +75,9 @@ export class MentionNode extends TextNode {
     if (prevNode.__mentionId !== this.__mentionId) {
       element.setAttribute('data-mention-id', this.__mentionId);
     }
+    if (prevNode.__mentionTitle !== this.__mentionTitle) {
+      element.setAttribute('data-mention-title', this.__mentionTitle);
+    }
     return needsUpdate;
   }
 
@@ -81,6 +85,7 @@ export class MentionNode extends TextNode {
     const element = document.createElement('span');
     element.setAttribute('data-testid', 'selected-reference-mention');
     element.setAttribute('data-mention-id', this.__mentionId);
+    element.setAttribute('data-mention-title', this.__mentionTitle);
     element.style.color = 'var(--accent)';
     element.textContent = this.__text;
     return { element };

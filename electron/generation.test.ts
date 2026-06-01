@@ -1,4 +1,7 @@
+import fsp from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import os from 'node:os';
+import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
@@ -65,5 +68,189 @@ describe('generation codex runner environment', () => {
     expect(defaultArgs).not.toContain('service_tier="fast"');
     expect(fastArgs).toContain('-c');
     expect(fastArgs).toContain('service_tier="fast"');
+  });
+
+  it('uses the selected codex model when building exec arguments', () => {
+    const args = generationModule.__test__.buildCodexExecArgs({
+      model: 'gpt-5.5',
+      fastMode: false,
+    });
+
+    expect(args.slice(0, 2)).toEqual(['--model', 'gpt-5.5']);
+  });
+
+  it('builds Antigravity print arguments without fast-tier overrides', () => {
+    const args = generationModule.__test__.buildAntigravityExecArgs({
+      logFilePath: '/tmp/job-123/antigravity-cli.log',
+    });
+
+    expect(args).toContain('--print');
+    expect(args).toContain('--dangerously-skip-permissions');
+    expect(args).toContain('--print-timeout');
+    expect(args).toContain('--log-file');
+    expect(args).toContain('/tmp/job-123/antigravity-cli.log');
+    expect(args).not.toContain('service_tier="fast"');
+  });
+
+  it('builds a fully isolated Antigravity environment inside the job workspace', () => {
+    const env = generationModule.__test__.buildAntigravitySpawnEnv(
+      '/tmp/job-123',
+      '/tmp/job-123/.antigravity-home'
+    );
+
+    expect(env.HOME).toBe('/tmp/job-123/.antigravity-home');
+    expect(env.XDG_CACHE_HOME).toBe('/tmp/job-123/.antigravity-cache');
+    expect(env.XDG_CONFIG_HOME).toBe('/tmp/job-123/.antigravity-config');
+    expect(env.XDG_STATE_HOME).toBe('/tmp/job-123/.antigravity-state');
+    expect(env.XDG_DATA_HOME).toBe('/tmp/job-123/.antigravity-data');
+    expect(env.TMPDIR).toBe('/tmp/job-123/.tmp');
+  });
+
+  it('creates a job-local Antigravity project marker and sanitized settings', async () => {
+    const originalHome = process.env.HOME;
+    const sourceHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'crenv-agy-source-home-'));
+    const workingDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), 'crenv-agy-job-'));
+    const sourceCliDirectory = path.join(sourceHome, '.gemini', 'antigravity-cli');
+
+    await fsp.mkdir(sourceCliDirectory, { recursive: true });
+    await fsp.writeFile(
+      path.join(sourceCliDirectory, 'settings.json'),
+      JSON.stringify({
+        colorScheme: 'dark',
+        enableTelemetry: true,
+        trustedWorkspaces: ['/home/minelli'],
+      })
+    );
+
+    process.env.HOME = sourceHome;
+    const profile = await generationModule.__test__.prepareAntigravityHomeDirectory({
+      workingDirectory,
+      model: 'Gemini 3.5 Flash (Low)',
+    });
+    process.env.HOME = originalHome;
+
+    const settings = JSON.parse(
+      await fsp.readFile(
+        path.join(profile.homeDirectory, '.gemini', 'antigravity-cli', 'settings.json'),
+        'utf8'
+      )
+    );
+    const projectMarkerPath = path.join(
+      workingDirectory,
+      '.antigravitycli',
+      `${profile.projectId}.json`
+    );
+    const projectPath = path.join(
+      profile.homeDirectory,
+      '.gemini',
+      'config',
+      'projects',
+      `${profile.projectId}.json`
+    );
+    const project = JSON.parse(await fsp.readFile(projectPath, 'utf8'));
+
+    expect(settings).toEqual({
+      colorScheme: 'dark',
+      enableTelemetry: true,
+      model: 'Gemini 3.5 Flash (Low)',
+      trustedWorkspaces: [],
+    });
+    expect(await fsp.readlink(projectMarkerPath)).toBe(projectPath);
+    expect(project.name).toBe(workingDirectory);
+    expect(project.projectResources.resources[0].gitFolder.folderUri).toBe(
+      `file://${workingDirectory}`
+    );
+  });
+
+  it('includes the selected Antigravity reasoning model in the prompt contract', () => {
+    const prompt = generationModule.__test__.buildAntigravityImageGenerationPrompt({
+      mode: 'manual',
+      userPrompt: 'Generate a portrait on black background',
+      outputDirectory: '/tmp/output',
+      manifestPath: '/tmp/manifest.json',
+      imageCount: 1,
+      referenceImages: [],
+      antigravityModel: 'Gemini 3.5 Flash (Low)',
+    });
+
+    expect(prompt).toContain('Selected Antigravity reasoning model: Gemini 3.5 Flash (Low)');
+    expect(prompt).toContain('Use Antigravity\'s built-in image generation workflow');
+    expect(prompt).toContain('Use Nano Banana Pro for image generation');
+    expect(prompt).toContain('print exactly one single-line JSON object to stdout');
+    expect(prompt).not.toContain('The manifest path is:');
+    expect(prompt).not.toContain('Analyze all attached reference images before generating anything.');
+  });
+
+  it('parses an Antigravity stdout manifest line', () => {
+    const manifest = generationModule.__test__.parseImageManifestLine(
+      '{"images":[{"path":"/tmp/output/example.png"}]}'
+    );
+
+    expect(manifest).toEqual({
+      images: [{ path: '/tmp/output/example.png' }],
+    });
+  });
+
+  it('rejects an Antigravity zero-exit timeout when no stdout manifest was printed', () => {
+    const result = generationModule.__test__.resolveAntigravityCloseResult({
+      code: 0,
+      manifest: null,
+      stdout: 'Error: timed out waiting for response\n',
+      stderr: '',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.errorMessage).toContain('timed out waiting for response');
+  });
+
+  it('accepts an Antigravity zero-exit result only when stdout produced a manifest', () => {
+    const manifest = { images: [{ path: '/tmp/output/example.png' }] };
+    const result = generationModule.__test__.resolveAntigravityCloseResult({
+      code: 0,
+      manifest,
+      stdout: '{"images":[{"path":"/tmp/output/example.png"}]}\n',
+      stderr: '',
+    });
+
+    expect(result).toEqual({ success: true, manifest });
+  });
+
+  it('forces Antigravity routing when the model id belongs to Antigravity', () => {
+    const selection = generationModule.__test__.resolveGenerationSelection(
+      'codex',
+      'antigravity-gemini-3-5-flash-low'
+    );
+
+    expect(selection.provider).toBe('antigravity');
+    expect(selection.modelId).toBe('antigravity-gemini-3-5-flash-low');
+    expect(selection.codexModel).toBeNull();
+    expect(selection.antigravityModel).toBe('Gemini 3.5 Flash (Low)');
+  });
+
+  it('falls back to the Antigravity default model when provider is Antigravity but the model id is missing', () => {
+    const selection = generationModule.__test__.resolveGenerationSelection('antigravity', null);
+
+    expect(selection.provider).toBe('antigravity');
+    expect(selection.modelId).toBe('antigravity-gemini-3-5-flash-low');
+  });
+
+  it('keeps Codex jobs under the app data temp root', () => {
+    const workingDirectory = generationModule.__test__.resolveJobWorkingDirectory({
+      provider: 'codex',
+      jobId: 'job-123',
+      codexJobsTempDir: '/home/minelli/.config/crenv/tmp/codex-jobs',
+    });
+
+    expect(workingDirectory).toBe('/home/minelli/.config/crenv/tmp/codex-jobs/job-123');
+  });
+
+  it('moves Antigravity jobs to /tmp so they cannot inherit the home project context', () => {
+    const workingDirectory = generationModule.__test__.resolveJobWorkingDirectory({
+      provider: 'antigravity',
+      jobId: 'job-123',
+      codexJobsTempDir: '/home/minelli/.config/crenv/tmp/codex-jobs',
+    });
+
+    expect(workingDirectory).toBe('/tmp/crenv-antigravity-jobs/job-123');
   });
 });

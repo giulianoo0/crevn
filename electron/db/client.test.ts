@@ -51,6 +51,11 @@ describe('createGenerationDatabase', () => {
       workingDirectory: '/tmp/crenv/job_1',
       manifestPath: '/tmp/crenv/job_1/manifest.json',
       errorMessage: null,
+      provider: null,
+      modelId: null,
+      modelLabel: null,
+      referenceImagesJson: null,
+      durationMs: null,
       createdAt: '2026-05-26T11:00:00.000Z',
       updatedAt: '2026-05-26T11:00:05.000Z',
     };

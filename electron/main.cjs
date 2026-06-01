@@ -101,6 +101,22 @@ app.whenReady().then(async () => {
     return generationStore.createReference(payload);
   });
 
+  ipcMain.handle('generation:createEnvironmentReference', async (_event, payload) => {
+    return generationStore.createEnvironmentReference(payload);
+  });
+
+  ipcMain.handle('generation:updateReference', async (_event, payload) => {
+    return generationStore.updateReference(payload);
+  });
+
+  ipcMain.handle('generation:updateEnvironmentReference', async (_event, payload) => {
+    return generationStore.updateEnvironmentReference(payload);
+  });
+
+  ipcMain.handle('generation:deleteReference', async (_event, payload) => {
+    return generationStore.deleteReference(payload);
+  });
+
   ipcMain.handle('generation:ensureProjectThreadWorkspace', async () => {
     return generationStore.ensureProjectThreadWorkspace();
   });

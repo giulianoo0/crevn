@@ -1,7 +1,8 @@
 import type { CSSProperties } from 'react';
-import { useMemo, useRef, useEffect, useCallback } from 'react';
+import { useMemo, useRef, useEffect, useCallback, useState } from 'react';
 import { List, type RowComponentProps } from 'react-window';
 import { Copy, Download, Trash2 } from 'lucide-react';
+import NumberFlow from '@number-flow/react';
 
 import {
   ContextMenu,
@@ -9,12 +10,27 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
+import antigravityLogo from '@/assets/antigravity.webp';
+import codexLogo from '@/assets/codex.webp';
 
 export interface GeneratedImageGridImage {
   id: string;
   fileUrl?: string;
   fileName: string;
+  createdAt?: string;
   isLoading?: boolean;
+  provider?: 'codex' | 'antigravity' | null;
+  modelId?: string | null;
+  modelLabel?: string | null;
+  prompt?: string | null;
+  references?: Array<{
+    name: string;
+    title?: string | null;
+    description?: string | null;
+    mimeType: string;
+  }>;
+  durationMs?: number | null;
+  generationStartedAt?: string;
 }
 
 const COLUMN_COUNT = 3;
@@ -22,6 +38,101 @@ const ROW_HEIGHT = 220;
 const ROW_GAP = 12;
 const OVERSCAN_ROWS = 2;
 const DOUBLE_CLICK_DELAY_MS = 200;
+
+const providerIcons = {
+  codex: codexLogo,
+  antigravity: antigravityLogo,
+} satisfies Record<'codex' | 'antigravity', string>;
+
+const providerLabels = {
+  codex: 'Codex',
+  antigravity: 'Antigravity',
+} satisfies Record<'codex' | 'antigravity', string>;
+
+function formatElapsed(totalSeconds: number) {
+  const safeSeconds = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  const seconds = safeSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatDurationMs(durationMs: number | null | undefined) {
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) {
+    return null;
+  }
+  return formatElapsed(durationMs / 1000);
+}
+
+function useElapsedSeconds(startedAt: string | undefined, enabled: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!enabled || !startedAt) return undefined;
+
+    setNow(Date.now());
+    const intervalId = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [enabled, startedAt]);
+
+  if (!startedAt) {
+    return 0;
+  }
+
+  const startedAtMs = Date.parse(startedAt);
+  if (!Number.isFinite(startedAtMs)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.floor((now - startedAtMs) / 1000));
+}
+
+function RunningDuration({ startedAt }: { startedAt?: string }) {
+  const elapsedSeconds = useElapsedSeconds(startedAt, true);
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+
+  return (
+    <span aria-label={formatElapsed(elapsedSeconds)} className="inline-flex items-center tabular-nums">
+      <NumberFlow value={minutes} format={{ minimumIntegerDigits: 2 }} />
+      <span>:</span>
+      <NumberFlow value={seconds} format={{ minimumIntegerDigits: 2 }} />
+    </span>
+  );
+}
+
+function GenerationMetadataBadge({ image }: { image: GeneratedImageGridImage }) {
+  const provider = image.provider === 'antigravity' ? 'antigravity' : image.provider === 'codex' ? 'codex' : null;
+  const modelLabel = image.modelLabel ?? image.modelId ?? null;
+  const completedDuration = formatDurationMs(image.durationMs);
+
+  if (!provider && !modelLabel && !completedDuration && !image.isLoading) {
+    return null;
+  }
+
+  return (
+    <div
+      className={[
+        'pointer-events-none absolute bottom-3 left-3 z-10 inline-flex max-w-[calc(100%-24px)] items-center gap-2 rounded-full border border-white/10 bg-[rgba(15,16,16,0.74)] px-2.5 py-1.5 text-[11px] font-medium text-white/88 shadow-[0_12px_32px_rgba(0,0,0,0.34)] backdrop-blur-xl transition-[opacity,transform] duration-200',
+        image.isLoading ? 'opacity-100' : 'opacity-0 translate-y-1 group-hover:opacity-100 group-hover:translate-y-0',
+      ].join(' ')}
+    >
+      {provider ? (
+        <img src={providerIcons[provider]} alt={providerLabels[provider]} className="size-4 shrink-0 rounded-[5px] object-cover" />
+      ) : null}
+      {modelLabel ? <span className="min-w-0 truncate">{modelLabel}</span> : null}
+      {image.isLoading ? (
+        <span className="shrink-0 text-white/60">
+          <RunningDuration startedAt={image.generationStartedAt ?? image.createdAt} />
+        </span>
+      ) : completedDuration ? (
+        <span className="shrink-0 text-white/60">{completedDuration}</span>
+      ) : null}
+    </div>
+  );
+}
 
 interface GeneratedImageGridRowProps {
   rows: GeneratedImageGridImage[][];
@@ -72,7 +183,7 @@ function GeneratedImageGridRow({
                 }
               }}
               className={[
-                'pointer-events-auto relative h-[220px] overflow-hidden rounded-[20px] bg-[var(--surface)]/50 text-left transition-[border-color,box-shadow,transform,opacity] duration-200',
+                'group pointer-events-auto relative h-[220px] overflow-hidden rounded-[20px] bg-[var(--surface)]/50 text-left transition-[border-color,box-shadow,transform,opacity] duration-200',
                 'border',
                 selectedImageIds.includes(image.id)
                   ? 'border-[var(--accent)] shadow-[0_0_0_1px_rgba(65,130,230,0.5)]'
@@ -92,6 +203,7 @@ function GeneratedImageGridRow({
                   className="h-full w-full object-cover opacity-90"
                 />
               )}
+              <GenerationMetadataBadge image={image} />
             </button>
           </ContextMenuTrigger>
           {!image.isLoading ? (
