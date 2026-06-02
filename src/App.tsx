@@ -46,7 +46,6 @@ import {
 import NumberFlow from '@number-flow/react';
 import { toast } from 'sonner';
 import { List, type RowComponentProps, useDynamicRowHeight, useListRef } from 'react-window';
-import { Streamdown } from 'streamdown';
 import 'streamdown/styles.css';
 
 import birdsEyePreview from './assets/angle-previews/birds-eye.png';
@@ -97,6 +96,13 @@ import {
 } from './components/project-properties-dialog';
 import { ProjectRow } from './components/project-row';
 import { Shimmer } from './components/ai-elements/shimmer';
+import {
+  Message,
+  MessageActions,
+  MessageContent,
+  MessageResponse,
+  MessageToolbar,
+} from './components/ai-elements/message';
 import { ThreadRow } from './components/thread-row';
 import { PromptComposer, type PromptComposerHandle } from './components/prompt-composer';
 import { ModelPicker } from './components/model-picker';
@@ -490,6 +496,21 @@ function formatRelativeTime(value: string) {
   return `${diffDays}d ago`;
 }
 
+function formatDurationBetween(startValue: string, endValue: string) {
+  const startMs = new Date(startValue).getTime();
+  const endMs = new Date(endValue).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+    return null;
+  }
+
+  const totalSeconds = Math.max(0, Math.round((endMs - startMs) / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+}
+
 function estimateHeaderTitleWidth(title: string, includesSidebarToggle: boolean) {
   const baseShellWidth = 24 + 24 + 2;
   const toggleWidth = includesSidebarToggle ? 36 + 8 : 0;
@@ -672,7 +693,67 @@ type SavedReferenceImage = ComposerReferenceImage & {
   environmentId?: string;
 };
 
+type SavedReferenceMentionGroup = {
+  id: string;
+  title: string;
+  description: string;
+  previewUrl: string;
+  references: SavedReferenceImage[];
+};
+
 type ReferenceLibraryRoute = 'characters' | 'environment' | 'objects';
+
+function getSavedReferenceMentionGroupId(reference: SavedReferenceImage) {
+  return reference.collectionId ?? reference.environmentId ?? reference.id;
+}
+
+function buildSavedReferenceMentionGroups(savedReferences: SavedReferenceImage[]): SavedReferenceMentionGroup[] {
+  const groups = new Map<string, SavedReferenceImage[]>();
+
+  for (const reference of savedReferences) {
+    const groupId = getSavedReferenceMentionGroupId(reference);
+    groups.set(groupId, [...(groups.get(groupId) ?? []), reference]);
+  }
+
+  return [...groups.entries()].map(([id, references]) => {
+    const representative = [...references].sort((left, right) => {
+      if (left.createdAt !== right.createdAt) {
+        return left.createdAt < right.createdAt ? -1 : 1;
+      }
+      return left.id.localeCompare(right.id);
+    })[0] ?? references[0];
+    const descriptions = references
+      .map((reference) => reference.description?.trim())
+      .filter((description): description is string => Boolean(description));
+
+    return {
+      id,
+      title: representative.title,
+      description:
+        references.length > 1
+          ? `${references.length} angles${descriptions.length > 0 ? ` · ${descriptions[0]}` : ''}`
+          : representative.description ?? 'Saved library reference',
+      previewUrl: representative.previewUrl,
+      references,
+    };
+  });
+}
+
+function resolveSavedReferencesFromMentionIds(
+  savedReferences: SavedReferenceImage[],
+  selectedReferenceIds: string[]
+) {
+  const selectedIds = new Set(selectedReferenceIds);
+  const resolved = new Map<string, SavedReferenceImage>();
+
+  for (const reference of savedReferences) {
+    if (selectedIds.has(reference.id) || selectedIds.has(getSavedReferenceMentionGroupId(reference))) {
+      resolved.set(reference.id, reference);
+    }
+  }
+
+  return [...resolved.values()];
+}
 
 type ComposerGenerationMode = (typeof generationModeOptions)[number]['value'];
 type GenerationWorkspaceMode = 'classic' | 'scenes' | 'director';
@@ -986,8 +1067,10 @@ export function App() {
   const [cursorIndex, setCursorIndex] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   const [activeReferenceMentionIndex, setActiveReferenceMentionIndex] = useState(0);
-  const composerRef = useRef<PromptComposerHandle>(null);
-  const referenceInputRef = useRef<HTMLInputElement>(null);
+  const classicComposerRef = useRef<PromptComposerHandle>(null);
+  const directorComposerRef = useRef<PromptComposerHandle>(null);
+  const classicReferenceInputRef = useRef<HTMLInputElement>(null);
+  const directorReferenceInputRef = useRef<HTMLInputElement>(null);
   const referenceImagesRef = useRef<ComposerReferenceImage[]>([]);
   const savedReferencesRef = useRef<SavedReferenceImage[]>([]);
   const blurTimeoutRef = useRef<number | null>(null);
@@ -1192,6 +1275,8 @@ export function App() {
   const isClassicWorkspace = activeStudioView === 'generation' && generationWorkspaceMode === 'classic';
   const isScenesWorkspace = activeStudioView === 'generation' && generationWorkspaceMode === 'scenes';
   const isDirectorWorkspace = activeStudioView === 'generation' && generationWorkspaceMode === 'director';
+  const activeComposerRef = isDirectorWorkspace ? directorComposerRef : classicComposerRef;
+  const activeReferenceInputRef = isDirectorWorkspace ? directorReferenceInputRef : classicReferenceInputRef;
   const activeDirectorChats = selectedThreadId ? directorChatsByThreadId[selectedThreadId] ?? [] : [];
   const activeDirectorChatId = selectedThreadId ? selectedDirectorChatIdByThreadId[selectedThreadId] ?? null : null;
   const activeDirectorChat = activeDirectorChatId
@@ -1211,16 +1296,20 @@ export function App() {
       start: match.index,
     };
   }, [prompt]);
+  const savedReferenceMentionGroups = useMemo(
+    () => buildSavedReferenceMentionGroups(savedReferences),
+    [savedReferences]
+  );
   const referenceMentionOptions = useMemo(() => {
     if (!referenceMentionMatch) return [];
 
-    const savedOpts = savedReferences.map((ref) => ({
-      id: ref.id,
-      title: ref.title,
-      description: ref.description ?? 'Saved library reference',
-      previewUrl: ref.previewUrl,
+    const savedOpts = savedReferenceMentionGroups.map((group) => ({
+      id: group.id,
+      title: group.title,
+      description: group.description,
+      previewUrl: group.previewUrl,
       isSaved: true,
-      reference: ref,
+      reference: group,
     }));
 
     const attachedOpts = referenceImages.map((img) => {
@@ -1240,19 +1329,19 @@ export function App() {
     return combined
       .filter((option) => option.title.toLowerCase().includes(referenceMentionMatch.query))
       .slice(0, 24);
-  }, [referenceMentionMatch, savedReferences, referenceImages]);
+  }, [referenceMentionMatch, savedReferenceMentionGroups, referenceImages]);
   const referenceMentionCandidates = useMemo(
     () => [
-      ...savedReferences.map((reference) => ({
-        id: reference.id,
-        title: reference.title,
+      ...savedReferenceMentionGroups.map((group) => ({
+        id: group.id,
+        title: group.title,
       })),
       ...referenceImages.map((image) => ({
         id: image.id,
         title: image.name.replace(/\.[^/.]+$/, ''),
       })),
     ],
-    [referenceImages, savedReferences]
+    [referenceImages, savedReferenceMentionGroups]
   );
 
   useEffect(() => {
@@ -1260,7 +1349,7 @@ export function App() {
   }, [referenceMentionMatch?.query, referenceMentionOptions.length]);
 
   const selectedPromptReferences = useMemo(() => {
-    const savedRefs = savedReferences.filter((ref) => selectedPromptReferenceIds.includes(ref.id));
+    const savedRefs = resolveSavedReferencesFromMentionIds(savedReferences, selectedPromptReferenceIds);
     const attachedRefs = referenceImages
       .filter((img) => selectedPromptReferenceIds.includes(img.id))
       .map((img) => ({
@@ -1285,9 +1374,14 @@ export function App() {
   }, []);
 
   const insertReferenceMention = useCallback((option: { id: string; title: string }) => {
-    composerRef.current?.insertMention(option.id, option.title);
+    const range = referenceMentionMatch ? { start: referenceMentionMatch.start, end: prompt.length } : undefined;
+    activeComposerRef.current?.insertMention(
+      option.id,
+      option.title,
+      range
+    );
     holdComposerOpen();
-  }, [holdComposerOpen]);
+  }, [activeComposerRef, holdComposerOpen, prompt.length, referenceMentionMatch]);
 
   const handleReferenceMentionNavigation = useCallback(
     (key: 'ArrowDown' | 'ArrowUp' | 'Enter' | 'Escape') => {
@@ -1365,7 +1459,7 @@ export function App() {
     setPrompt('');
     setSelectedPromptReferenceIds([]);
     clearReferenceImages();
-    composerRef.current?.clear();
+    activeComposerRef.current?.clear();
     setIsFocused(false);
     setGenerationMode('manual');
     setSelectedAspectRatio('16:9');
@@ -1376,7 +1470,7 @@ export function App() {
     setIsAngleEnabled(false);
     setSelectedAngle('Low Angle');
     setIsAnglePanelOpen(false);
-  }, [clearReferenceImages]);
+  }, [activeComposerRef, clearReferenceImages]);
 
   const incrementLocalRunningThread = useCallback((threadId: string) => {
     setLocalRunningCountsByThreadId((current) => ({
@@ -1840,13 +1934,35 @@ export function App() {
       }));
     }
 
-    const referencePayload = referenceImages.map((image) => ({
-      name: image.name,
-      mimeType: image.mimeType,
-      bytesBase64: image.bytesBase64,
-      title: savedReferences.find((reference) => reference.id === image.id)?.title,
-      description: savedReferences.find((reference) => reference.id === image.id)?.description,
-    }));
+    const selectedSavedReferences = resolveSavedReferencesFromMentionIds(savedReferences, selectedPromptReferenceIds);
+    const seenDirectorReferenceBytes = new Set<string>();
+    const referencePayload = [
+      ...selectedSavedReferences.map((reference) => {
+        seenDirectorReferenceBytes.add(reference.bytesBase64);
+        const groupSize = savedReferences.filter(
+          (item) => getSavedReferenceMentionGroupId(item) === getSavedReferenceMentionGroupId(reference)
+        ).length;
+        return {
+          name: reference.name,
+          mimeType: reference.mimeType,
+          bytesBase64: reference.bytesBase64,
+          title: reference.title,
+          description:
+            groupSize > 1
+              ? [`Multiple-angle reference set: ${reference.title}.`, reference.description].filter(Boolean).join(' ')
+              : reference.description,
+        };
+      }),
+      ...referenceImages
+        .filter((image) => !seenDirectorReferenceBytes.has(image.bytesBase64))
+        .map((image) => ({
+          name: image.name,
+          mimeType: image.mimeType,
+          bytesBase64: image.bytesBase64,
+          title: savedReferences.find((reference) => reference.id === image.id)?.title,
+          description: savedReferences.find((reference) => reference.id === image.id)?.description,
+        })),
+    ];
 
     const selectedModel = getModelOptionById(selectedModelId) ?? getDefaultModelOption();
     const result = await sendDirectorMessage({
@@ -1872,7 +1988,7 @@ export function App() {
       ...current,
       [targetChatId]: mergeDirectorMessages(current[targetChatId] ?? [], [result.userMessage, result.assistantMessage]),
     }));
-    composerRef.current?.clear();
+    directorComposerRef.current?.clear();
     setPrompt('');
   }, [
     activeDirectorChatId,
@@ -1882,6 +1998,7 @@ export function App() {
     referenceImages,
     savedReferences,
     selectedModelId,
+    selectedPromptReferenceIds,
     selectedThreadId,
   ]);
 
@@ -1918,8 +2035,8 @@ export function App() {
 
   const openReferencePicker = useCallback(() => {
     isReferencePickerOpenRef.current = true;
-    referenceInputRef.current?.click();
-  }, []);
+    activeReferenceInputRef.current?.click();
+  }, [activeReferenceInputRef]);
 
   const openAnglePanel = useCallback(() => {
     setIsAnglePanelOpen(true);
@@ -1939,8 +2056,8 @@ export function App() {
 
     event.preventDefault();
     holdComposerOpen();
-    composerRef.current?.focus();
-  }, [holdComposerOpen]);
+    activeComposerRef.current?.focus();
+  }, [activeComposerRef, holdComposerOpen]);
 
   const handleSelectAngle = useCallback((angle: (typeof angleOptions)[number]['name']) => {
     setSelectedAngle(angle);
@@ -2604,17 +2721,24 @@ export function App() {
       const seenBytes = new Set<string>();
 
       // 1. Add mentioned saved references
-      const selectedSavedReferences = currentSavedReferences.filter((reference) =>
-        currentSelectedPromptReferenceIds.includes(reference.id)
+      const selectedSavedReferences = resolveSavedReferencesFromMentionIds(
+        currentSavedReferences,
+        currentSelectedPromptReferenceIds
       );
       for (const ref of selectedSavedReferences) {
         if (ref.bytesBase64) {
           seenBytes.add(ref.bytesBase64);
         }
+        const groupSize = currentSavedReferences.filter(
+          (reference) => getSavedReferenceMentionGroupId(reference) === getSavedReferenceMentionGroupId(ref)
+        ).length;
         uniqueReferenceImages.push({
           name: ref.name,
           title: ref.title,
-          description: ref.description ?? undefined,
+          description:
+            groupSize > 1
+              ? [`Multiple-angle reference set: ${ref.title}.`, ref.description].filter(Boolean).join(' ')
+              : ref.description ?? undefined,
           mimeType: ref.mimeType,
           bytesBase64: ref.bytesBase64,
         });
@@ -2638,13 +2762,19 @@ export function App() {
 
       // 3. Map prompt reference names to RefImageX (Name) placeholder format
       let mappedPrompt = trimmedPrompt;
-      const sortedRefsForReplacement = [...uniqueReferenceImages]
-        .filter((ref) => ref.title)
-        .map((ref, index) => ({
-          title: ref.title!,
+      const refsForReplacementByTitle = new Map<string, { title: string; placeholder: string }>();
+      uniqueReferenceImages.forEach((ref, index) => {
+        if (!ref.title || refsForReplacementByTitle.has(ref.title)) {
+          return;
+        }
+        refsForReplacementByTitle.set(ref.title, {
+          title: ref.title,
           placeholder: `RefImage${index + 1} (${ref.title})`,
-        }))
-        .sort((left, right) => right.title.length - left.title.length);
+        });
+      });
+      const sortedRefsForReplacement = [...refsForReplacementByTitle.values()].sort(
+        (left, right) => right.title.length - left.title.length
+      );
 
       for (const item of sortedRefsForReplacement) {
         const regex = new RegExp(escapeRegExp(item.title), 'g');
@@ -4583,7 +4713,7 @@ export function App() {
             }}
           >
             <input
-              ref={referenceInputRef}
+              ref={classicReferenceInputRef}
               data-testid="composer-reference-input"
               type="file"
               accept="image/*"
@@ -4611,7 +4741,7 @@ export function App() {
               ].join(' ')}
             >
               <PromptComposer
-                ref={composerRef}
+                ref={classicComposerRef}
                 placeholder="Escreva algo..."
                 isExpanded={isExpanded}
                 hasReferenceImages={hasReferenceImages}
@@ -4908,8 +5038,8 @@ export function App() {
         selectedProviderId={selectedProviderId}
         effectiveFastMode={effectiveFastMode}
         isStreaming={Boolean(activeDirectorRun)}
-        composerRef={composerRef}
-        referenceInputRef={referenceInputRef}
+        composerRef={directorComposerRef}
+        referenceInputRef={directorReferenceInputRef}
         plusButtonRef={plusButtonRef}
         sendButtonRef={sendFxRef}
         onPromptChange={setPrompt}
@@ -5387,6 +5517,7 @@ function DirectorMessageRow({
 }: RowComponentProps<{
   messages: DirectorMessageRecord[];
 }>) {
+  const [hasCopied, setHasCopied] = useState(false);
   const message = messages[index];
   if (!message) {
     return null;
@@ -5394,29 +5525,87 @@ function DirectorMessageRow({
 
   const isUser = message.role === 'user';
   const isThinking = message.role === 'assistant' && message.status === 'streaming' && !message.contentMarkdown.trim();
+  const isAssistant = message.role === 'assistant';
+  const isCompleteAssistant = isAssistant && message.status === 'completed' && message.contentMarkdown.trim().length > 0;
+  const durationLabel = isCompleteAssistant ? formatDurationBetween(message.createdAt, message.updatedAt) : null;
+
+  async function copyMessage() {
+    if (!message.contentMarkdown.trim()) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard?.writeText(message.contentMarkdown);
+      setHasCopied(true);
+      window.setTimeout(() => setHasCopied(false), 1400);
+    } catch (error) {
+      console.error('Failed to copy Director response', error);
+      toast.error('Failed to copy response');
+    }
+  }
 
   return (
     <div style={style} className="px-6 py-3">
-      <div className={['flex', isUser ? 'justify-end' : 'justify-start'].join(' ')}>
-        <div className={isUser ? 'max-w-[min(680px,78%)]' : 'max-w-[min(860px,100%)] py-3'}>
+      <Message
+        from={isUser ? 'user' : 'assistant'}
+        className={[
+          isUser ? 'ml-auto max-w-[min(680px,78%)] items-end' : 'max-w-[min(900px,100%)] items-start py-3',
+        ].join(' ')}
+      >
+        <MessageContent
+          data-testid="director-message-content"
+          style={{ userSelect: 'text', WebkitUserSelect: 'text' }}
+          className={
+            isUser
+              ? 'select-text whitespace-pre-wrap rounded-full bg-[var(--foreground)] px-4 py-2.5 text-[14px] leading-5 text-[var(--background)] shadow-[0_12px_30px_rgba(0,0,0,0.24)]'
+              : 'w-full select-text overflow-visible text-[14px] leading-6 text-[var(--foreground)]'
+          }
+        >
           {isThinking ? (
             <Shimmer className="text-[14px] leading-6" duration={1.6}>
               Thinking...
             </Shimmer>
           ) : isUser ? (
-            <div className="whitespace-pre-wrap rounded-full bg-[var(--foreground)] px-4 py-2.5 text-[14px] leading-5 text-[var(--background)] shadow-[0_12px_30px_rgba(0,0,0,0.24)]">
-              {message.contentMarkdown}
-            </div>
+            message.contentMarkdown
           ) : (
-            <div className="director-markdown text-[14px] leading-6 text-[var(--foreground)] [&_*]:tracking-[0] [&_a]:text-[var(--accent)] [&_a]:underline-offset-4 [&_code]:rounded-[6px] [&_code]:bg-white/8 [&_code]:px-1 [&_code]:py-0.5 [&_li]:my-1 [&_ol]:my-3 [&_p]:my-0 [&_p+p]:mt-3 [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:border [&_pre]:border-[var(--border-soft)] [&_pre]:bg-[rgba(15,16,16,0.72)] [&_pre]:p-3 [&_strong]:font-semibold [&_ul]:my-3">
-              <Streamdown isAnimating={message.status === 'streaming'}>{message.contentMarkdown}</Streamdown>
-            </div>
+            <MessageResponse
+              isAnimating={message.status === 'streaming'}
+              className="director-markdown text-[14px] leading-6 text-[var(--foreground)] [&_*]:tracking-[0] [&_a]:text-[var(--accent)] [&_a]:underline-offset-4 [&_code]:rounded-[6px] [&_code]:bg-white/8 [&_code]:px-1 [&_code]:py-0.5 [&_li]:my-1 [&_ol]:my-3 [&_p]:my-0 [&_p+p]:mt-3 [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:border [&_pre]:border-[var(--border-soft)] [&_pre]:bg-[rgba(15,16,16,0.72)] [&_pre]:p-3 [&_strong]:font-semibold [&_ul]:my-3"
+            >
+              {message.contentMarkdown}
+            </MessageResponse>
           )}
           {message.status === 'failed' ? (
             <div className="mt-3 text-[12px] text-[rgb(245,178,178)]">This response ended with an error.</div>
           ) : null}
-        </div>
-      </div>
+        </MessageContent>
+        {isCompleteAssistant ? (
+          <MessageToolbar className="mt-2 justify-start text-[12px] text-[var(--muted-foreground)]">
+            <div className="flex min-w-0 items-center gap-2">
+              {durationLabel ? <span>{durationLabel}</span> : null}
+              {message.modelLabel ? (
+                <>
+                  <span className="text-[var(--border-soft)]">/</span>
+                  <span className="truncate">{message.modelLabel}</span>
+                </>
+              ) : null}
+            </div>
+            <MessageActions>
+              <button
+                type="button"
+                aria-label="Copy Director response"
+                onClick={() => {
+                  void copyMessage();
+                }}
+                className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] px-3 text-[12px] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--surface2)] hover:text-[var(--foreground)]"
+              >
+                {hasCopied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                {hasCopied ? 'Copied' : 'Copy'}
+              </button>
+            </MessageActions>
+          </MessageToolbar>
+        ) : null}
+      </Message>
     </div>
   );
 }
@@ -5683,7 +5872,7 @@ function DirectorComposerBar({
   onMentionIdsChange: (ids: string[]) => void;
   onCursorIndexChange: (index: number) => void;
   onScrollTopChange: (value: number) => void;
-  onMentionNavigationKey: (direction: 'up' | 'down') => void;
+  onMentionNavigationKey: (key: 'ArrowDown' | 'ArrowUp' | 'Enter' | 'Escape') => boolean;
   onComposerFocus: () => void;
   onComposerBlur: () => void;
   onAddReference: () => void;
@@ -5707,6 +5896,8 @@ function DirectorComposerBar({
   leftInset: number;
   rightInset: number;
 }) {
+  const pointerMentionSelectionRef = useRef(false);
+
   return (
     <motion.div
       key="director-composer"
@@ -5740,8 +5931,28 @@ function DirectorComposerBar({
                   role="option"
                   aria-label={reference.title}
                   aria-selected={index === activeReferenceMentionIndex}
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    pointerMentionSelectionRef.current = true;
+                    onKeepOpen(event);
+                    onInsertReferenceMention(reference);
+                    window.setTimeout(() => {
+                      pointerMentionSelectionRef.current = false;
+                    }, 0);
+                  }}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onKeepOpen(event);
+                  }}
                   onMouseEnter={() => onMentionOptionHover(index)}
-                  onClick={() => onInsertReferenceMention(reference)}
+                  onClick={() => {
+                    if (pointerMentionSelectionRef.current) {
+                      return;
+                    }
+                    onInsertReferenceMention(reference);
+                  }}
                   className={[
                     'flex w-full items-center gap-3 rounded-[14px] px-2.5 py-2 text-left transition-colors hover:bg-white/6',
                     index === activeReferenceMentionIndex ? 'bg-white/8 ring-1 ring-white/10' : '',
@@ -5780,6 +5991,7 @@ function DirectorComposerBar({
             multiple
             className="hidden"
             onChange={(event) => {
+              isReferencePickerOpenRef.current = false;
               if (!event.target.files?.length) return;
               onAppendReferenceImages(event.target.files);
               event.target.value = '';
@@ -7792,13 +8004,17 @@ function AddReferenceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[860px]">
-        <DialogHeader>
+      <DialogContent
+        data-testid="add-reference-dialog"
+        className="flex max-h-[calc(100vh-32px)] max-w-[860px] flex-col overflow-hidden p-0"
+      >
+        <DialogHeader className="shrink-0 px-5 pt-5">
           <DialogTitle>Add reference</DialogTitle>
           <DialogDescription>{currentCopy.description}</DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={handleSubmit} className="mt-5 space-y-4">
+        <form onSubmit={handleSubmit} className="mt-5 flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div data-testid="add-reference-dialog-scroll" className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 pb-4">
           <div className="space-y-2">
             <div className="text-[13px] font-medium text-[var(--foreground)]">Type</div>
             <div className="inline-flex rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] p-1">
@@ -8003,8 +8219,12 @@ function AddReferenceDialog({
               className="min-h-[104px] w-full resize-none rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] px-4 py-3 text-[14px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[var(--border-strong)]"
             />
           </div>
+          </div>
 
-          <div className="flex items-center justify-end gap-2 pt-1">
+          <div
+            data-testid="add-reference-dialog-footer"
+            className="sticky bottom-0 flex shrink-0 items-center justify-end gap-2 border-t border-[var(--border-soft)] bg-[color-mix(in_srgb,var(--surface)_96%,transparent)] px-5 py-4 backdrop-blur-xl"
+          >
             <Button
               type="button"
               variant="surface"

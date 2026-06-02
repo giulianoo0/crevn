@@ -159,6 +159,9 @@ describe('generation codex runner environment', () => {
     expect(prompt).toContain('User: Draft a coverage approach.');
     expect(prompt).toContain('Assistant: Start from a wide and move into reverses.');
     expect(prompt).toContain('User: Now turn that into a six-shot plan.');
+    expect(prompt).toContain('@Reference');
+    expect(prompt).toContain('```markdown');
+    expect(prompt).toContain('copyable markdown code block');
   });
 
   it('truncates Director chat titles from the opening prompt line', () => {

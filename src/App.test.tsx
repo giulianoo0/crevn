@@ -732,6 +732,11 @@ describe('App header thread title', () => {
         unobserve() {}
       },
     });
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: vi.fn(async () => undefined),
+      },
+    });
     vi.mocked(electronApi.listReferences).mockResolvedValue([]);
     vi.mocked(electronApi.listGeneratedImages).mockResolvedValue([]);
     vi.mocked(electronApi.listSceneGroups).mockImplementation(async () => sceneGroupsFixture);
@@ -2941,6 +2946,37 @@ describe('App header thread title', () => {
     );
   });
 
+  it('keeps the add reference dialog scrollable when many images are selected', async () => {
+    const referenceImages = Array.from({ length: 14 }, (_, index) => {
+      const image = new File([`reference-${index}`], `reference-${index + 1}.png`, { type: 'image/png' });
+      Object.defineProperty(image, 'arrayBuffer', {
+        value: vi.fn(async () => Uint8Array.from([index + 1, 2, 3, 4]).buffer),
+      });
+      return image;
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add character images' }));
+    fireEvent.change(screen.getByLabelText('Images'), {
+      target: { files: referenceImages },
+    });
+
+    const dialog = screen.getByTestId('add-reference-dialog');
+    const scrollRegion = screen.getByTestId('add-reference-dialog-scroll');
+    const footer = screen.getByTestId('add-reference-dialog-footer');
+
+    expect(dialog.className).toContain('max-h-[calc(100vh-32px)]');
+    expect(scrollRegion.className).toContain('overflow-y-auto');
+    expect(footer.className).toContain('sticky');
+    expect(screen.getByRole('button', { name: 'Save reference' })).toBeInTheDocument();
+  });
+
   it('filters reference mentions after @ and inserts the selected name', async () => {
     vi.mocked(electronApi.listReferences).mockResolvedValue([
       {
@@ -2990,6 +3026,183 @@ describe('App header thread title', () => {
     expect(composerInput).toHaveValue('Use Hero face ');
     expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Hero face');
     expect(screen.getByTestId('selected-reference-mention')).toHaveStyle({ color: 'var(--accent)' });
+  });
+
+  it('groups multi-angle saved references into one @ mention option', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'garage-front',
+        collectionId: null,
+        environmentId: 'garage-env',
+        name: 'garage-front.png',
+        title: 'Garagem',
+        description: 'Front-facing symmetrical view.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+      {
+        id: 'garage-high',
+        collectionId: null,
+        environmentId: 'garage-env',
+        name: 'garage-high.png',
+        title: 'Garagem',
+        description: 'High-angle interior view.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Use @gar' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getAllByRole('option', { name: 'Garagem' })).toHaveLength(1);
+    expect(screen.getByText((content) => content.includes('2 angles'))).toBeInTheDocument();
+  });
+
+  it('expands a selected multi-angle @ reference into all images for generation', async () => {
+    const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
+      jobId: 'job-1',
+      assets: [],
+    });
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'garage-front',
+        collectionId: null,
+        environmentId: 'garage-env',
+        name: 'garage-front.png',
+        title: 'Garagem',
+        description: 'Front-facing symmetrical view.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+      {
+        id: 'garage-high',
+        collectionId: null,
+        environmentId: 'garage-env',
+        name: 'garage-high.png',
+        title: 'Garagem',
+        description: 'High-angle interior view.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Make a shot inside @gar' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      const option = screen.getByRole('option', { name: 'Garagem' });
+      fireEvent.pointerDown(option);
+      fireEvent.mouseDown(option);
+      fireEvent.click(option);
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Garagem');
+    expect(screen.queryByRole('option', { name: 'Garagem' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(generateImagesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining('RefImage1 (Garagem)'),
+        referenceImages: [
+          expect.objectContaining({
+            name: 'garage-front.png',
+            description: expect.stringContaining('Front-facing symmetrical view.'),
+          }),
+          expect.objectContaining({
+            name: 'garage-high.png',
+            description: expect.stringContaining('High-angle interior view.'),
+          }),
+        ],
+      })
+    );
+  });
+
+  it('inserts a grouped @ mention with Enter', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'garage-front',
+        collectionId: null,
+        environmentId: 'garage-env',
+        name: 'garage-front.png',
+        title: 'Garagem',
+        description: 'Front-facing symmetrical view.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+      {
+        id: 'garage-high',
+        collectionId: null,
+        environmentId: 'garage-env',
+        name: 'garage-high.png',
+        title: 'Garagem',
+        description: 'High-angle interior view.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Use @gar' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.keyDown(composerInput, { key: 'Enter' });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Garagem');
+    expect(composerInput).toHaveValue('Use Garagem ');
   });
 
   it('can tag a selected generated image and sends it as generation context', async () => {
@@ -3714,6 +3927,179 @@ describe('App header thread title', () => {
     );
   });
 
+  it('inserts grouped @ references from the Director composer', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'garage-front',
+        collectionId: null,
+        environmentId: 'garage-env',
+        name: 'garage-front.png',
+        title: 'Garagem',
+        description: 'Front-facing symmetrical view.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+      {
+        id: 'garage-high',
+        collectionId: null,
+        environmentId: 'garage-env',
+        name: 'garage-high.png',
+        title: 'Garagem',
+        description: 'High-angle interior view.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+
+    const directorInput = screen.getAllByRole('textbox').at(-1)!;
+    await act(async () => {
+      fireEvent.change(directorInput, {
+        target: { value: 'Plan shots in @gar' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getAllByRole('option', { name: 'Garagem' })).toHaveLength(1);
+
+    await act(async () => {
+      const option = screen.getByRole('option', { name: 'Garagem' });
+      fireEvent.pointerDown(option, { pointerType: 'mouse' });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Garagem');
+    expect(directorInput).toHaveValue('Plan shots in Garagem ');
+    expect(screen.queryByRole('option', { name: 'Garagem' })).not.toBeInTheDocument();
+  });
+
+  it('inserts grouped @ references from the Director composer with Enter', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'garage-front',
+        collectionId: null,
+        environmentId: 'garage-env',
+        name: 'garage-front.png',
+        title: 'Garagem',
+        description: 'Front-facing symmetrical view.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+      {
+        id: 'garage-high',
+        collectionId: null,
+        environmentId: 'garage-env',
+        name: 'garage-high.png',
+        title: 'Garagem',
+        description: 'High-angle interior view.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const directorInput = screen.getAllByRole('textbox').at(-1)!;
+    await act(async () => {
+      fireEvent.change(directorInput, {
+        target: { value: 'Plan shots in @gar' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getAllByRole('option', { name: 'Garagem' })).toHaveLength(1);
+
+    await act(async () => {
+      fireEvent.keyDown(directorInput, { key: 'Enter', code: 'Enter' });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Garagem');
+    expect(directorInput).toHaveValue('Plan shots in Garagem ');
+    expect(screen.queryByRole('option', { name: 'Garagem' })).not.toBeInTheDocument();
+  });
+
+  it('keeps Director @ reference insertion working after switching tabs away and back', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'garage-front',
+        collectionId: null,
+        environmentId: 'garage-env',
+        name: 'garage-front.png',
+        title: 'Garagem',
+        description: 'Front-facing symmetrical view.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Classic' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const directorInput = screen.getAllByRole('textbox').at(-1)!;
+    await act(async () => {
+      fireEvent.change(directorInput, {
+        target: { value: 'Plan shots in @gar' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getAllByRole('option', { name: 'Garagem' })).toHaveLength(1);
+
+    await act(async () => {
+      const option = screen.getByRole('option', { name: 'Garagem' });
+      fireEvent.pointerDown(option, { pointerType: 'mouse' });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Garagem');
+    expect(directorInput).toHaveValue('Plan shots in Garagem ');
+  });
+
   it('shows per-chat loading states when multiple Director chats stream at once', async () => {
     directorChatsFixtureByThread['thread-1'] = [
       {
@@ -3935,5 +4321,117 @@ describe('App header thread title', () => {
 
     expect(screen.getByText((content) => content.includes('Shot 1'))).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Enviar' })).toBeInTheDocument();
+  });
+
+  it('shows Director completion metadata and copies the streamed markdown', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        userMessage: {
+          id: 'director-user-message',
+          chatId: 'director-chat-1',
+          role: 'user',
+          contentMarkdown: 'Generate a shot list.',
+          status: 'completed',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+        assistantMessage: {
+          id: 'director-assistant-message',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: '',
+          status: 'streaming',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(within(screen.getByTestId('director-workspace')).getByText('Thinking...')).toBeInTheDocument();
+
+    vi.setSystemTime(new Date('2026-06-01T12:15:08.000Z'));
+    const response = '```markdown\n# Shot List\n- Shot 1: Wide @Tito in @Base\n```';
+
+    await act(async () => {
+      directorMessageCompleteListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        messageId: 'director-assistant-message',
+        content: response,
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByText('8s')).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Copy Director response' }).at(-1)!);
+
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(response);
+  });
+
+  it('allows selecting Director chat message text', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        userMessage: {
+          id: 'director-user-selectable',
+          chatId: 'director-chat-1',
+          role: 'user',
+          contentMarkdown: 'Generate a shot list.',
+          status: 'completed',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+        assistantMessage: {
+          id: 'director-assistant-selectable',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: 'Drafting coverage.',
+          status: 'completed',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:01.000Z',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    const userMessage = screen.getByText('Generate a shot list.');
+    const assistantMessage = screen.getByText('Drafting coverage.');
+
+    expect(userMessage.closest('[data-testid="director-message-content"]')).toHaveClass('select-text');
+    expect(assistantMessage.closest('[data-testid="director-message-content"]')).toHaveClass('select-text');
   });
 });

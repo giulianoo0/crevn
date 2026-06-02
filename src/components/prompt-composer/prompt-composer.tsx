@@ -65,7 +65,7 @@ export type PromptComposerHandle = {
   focus: () => void;
   clear: () => void;
   setText: (text: string, mentionCandidates?: MentionCandidate[]) => void;
-  insertMention: (id: string, title: string) => void;
+  insertMention: (id: string, title: string, range?: { start: number; end: number }) => void;
 };
 
 type PromptComposerProps = {
@@ -300,7 +300,9 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
     ref,
   ) => {
     const [editor] = useLexicalComposerContext();
-    const insertMentionRef = useRef<((id: string, title: string) => void) | null>(null);
+    const insertMentionRef = useRef<
+      ((id: string, title: string, range?: { start: number; end: number }) => void) | null
+    >(null);
 
     useImperativeHandle(
       ref,
@@ -315,8 +317,8 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
         setText: (text: string, nextMentionCandidates = mentionCandidates) => {
           writeComposerText(editor, text, nextMentionCandidates);
         },
-        insertMention: (id: string, title: string) => {
-          insertMentionRef.current?.(id, title);
+        insertMention: (id: string, title: string, range) => {
+          insertMentionRef.current?.(id, title, range);
         },
       }),
       [editor, mentionCandidates],

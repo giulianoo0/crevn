@@ -36,7 +36,7 @@ type MentionPluginProps = {
   onTextChange: (text: string) => void;
   onEnterWithMention?: () => void;
   insertMentionRef: React.MutableRefObject<
-    ((id: string, title: string) => void) | null
+    ((id: string, title: string, range?: { start: number; end: number }) => void) | null
   >;
 };
 
@@ -58,8 +58,9 @@ export function MentionPlugin({
 
   // --- Insert mention: replace @query with a MentionNode ---
   const insertMention = useCallback(
-    (id: string, title: string) => {
+    (id: string, title: string, range?: { start: number; end: number }) => {
       editor.update(() => {
+        const root = $getRoot();
         const selection = $getSelection();
         let targetNode: TextNode | null = null;
         let matchStart: number | null = null;
@@ -90,7 +91,34 @@ export function MentionPlugin({
           }
         }
 
-        if (!targetNode || matchStart === null || matchEnd === null) return;
+        if (!targetNode && range) {
+          let textOffset = 0;
+          const allNodes = root.getAllTextNodes();
+
+          for (const node of allNodes) {
+            if ($isMentionNode(node)) {
+              textOffset += node.getTextContentSize();
+              continue;
+            }
+
+            const nodeTextLength = node.getTextContentSize();
+            const nodeStart = textOffset;
+            const nodeEnd = textOffset + nodeTextLength;
+
+            if (range.start >= nodeStart && range.end <= nodeEnd) {
+              targetNode = node;
+              matchStart = range.start - nodeStart;
+              matchEnd = range.end - nodeStart;
+              break;
+            }
+
+            textOffset = nodeEnd;
+          }
+        }
+
+        if (!targetNode || matchStart === null || matchEnd === null) {
+          return;
+        }
 
         const text = targetNode.getTextContent();
         const beforeAt = text.slice(0, matchStart);
