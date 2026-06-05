@@ -34,10 +34,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - run: pnpm exec vite build
+
       # electron-builder auto-detects the runner OS and builds that platform's target.
       # Publishing is handled by the single release job below to avoid matrix jobs
       # racing to mutate the same GitHub Release.
-      - run: pnpm build -- --publish never
+      - run: pnpm exec electron-builder --publish never
 
       - uses: actions/upload-artifact@v4
         with:
@@ -48,6 +50,8 @@ jobs:
             release/*.dmg
             release/*.zip
             release/*.exe
+            release/*.blockmap
+            release/latest*.yml
           if-no-files-found: ignore
 
   release:
@@ -72,7 +76,9 @@ jobs:
             -name '*.deb' -o \
             -name '*.dmg' -o \
             -name '*.zip' -o \
-            -name '*.exe' \
+            -name '*.exe' -o \
+            -name '*.blockmap' -o \
+            -name 'latest*.yml' \
           \) | sort)
 
           if [ "${#assets[@]}" -eq 0 ]; then
@@ -80,10 +86,11 @@ jobs:
             exit 1
           fi
 
-          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            gh release upload "$TAG_NAME" "${assets[@]}" --clobber
+          if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$TAG_NAME" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
               --title "$TAG_NAME" \
               --notes "Automated release for $TAG_NAME." \
               --verify-tag
