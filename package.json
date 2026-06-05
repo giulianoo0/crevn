@@ -1,6 +1,6 @@
 {
   "name": "crevn",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Professional AI editing studio for image and video generation.",
   "author": "minelli <minelli@users.noreply.github.com>",
   "main": "electron/main.cjs",

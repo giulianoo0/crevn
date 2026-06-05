@@ -420,6 +420,11 @@ export interface UpdateStatus {
   errorMessage: string | null;
 }
 
+export interface AppInfo {
+  name: string;
+  version: string;
+}
+
 const fallbackUpdateStatus: UpdateStatus = {
   state: 'disabled',
   message: 'Electron API bridge is unavailable.',
@@ -431,6 +436,7 @@ const fallbackUpdateStatus: UpdateStatus = {
 function getElectronApi() {
   if (!window.electronAPI) {
     return {
+      getAppInfo: async () => ({ name: 'crevn', version: '0.0.0' }),
       getUpdateStatus: async () => fallbackUpdateStatus,
       checkForUpdates: async () => fallbackUpdateStatus,
       installUpdate: async () => fallbackUpdateStatus,
@@ -575,6 +581,10 @@ function getElectronApi() {
 
 export function listGeneratedImages(threadId: string) {
   return getElectronApi().listGeneratedImages(threadId) as Promise<GeneratedImageRecord[]>;
+}
+
+export function getAppInfo() {
+  return getElectronApi().getAppInfo() as Promise<AppInfo>;
 }
 
 export function getUpdateStatus() {

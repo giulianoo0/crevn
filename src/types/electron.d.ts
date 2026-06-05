@@ -36,6 +36,11 @@ interface ElectronUpdateStatus {
   errorMessage: string | null;
 }
 
+interface ElectronAppInfo {
+  name: string;
+  version: string;
+}
+
 interface ElectronThreadRecord {
   id: string;
   projectId: string;
@@ -418,6 +423,7 @@ interface ElectronSceneGroupRecord {
 interface Window {
   electronAPI?: {
     platform: string;
+    getAppInfo: () => Promise<ElectronAppInfo>;
     getUpdateStatus: () => Promise<ElectronUpdateStatus>;
     checkForUpdates: () => Promise<ElectronUpdateStatus>;
     installUpdate: () => Promise<ElectronUpdateStatus>;

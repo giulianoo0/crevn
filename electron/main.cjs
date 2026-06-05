@@ -6,6 +6,7 @@ const { pathToFileURL } = require('node:url');
 const { createAutoUpdateManager } = require('./autoUpdate.cjs');
 const { createAppLogger, installConsoleFileLogger } = require('./appLogger.cjs');
 const { createGenerationStore, getAppDataPaths } = require('./generation.cjs');
+const packageManifest = require('../package.json');
 
 let mainWindow = null;
 let generationStore = null;
@@ -97,7 +98,7 @@ async function showImportOpenDialog({ extension, label }) {
 
 function getSourceAppInfo() {
   return {
-    name: app.getName(),
+    name: packageManifest.name ?? app.getName(),
     version: app.getVersion(),
   };
 }
@@ -473,6 +474,10 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('app:getUpdateStatus', async () => {
     return autoUpdateManager.getStatus();
+  });
+
+  ipcMain.handle('app:getInfo', async () => {
+    return getSourceAppInfo();
   });
 
   ipcMain.handle('app:checkForUpdates', async () => {

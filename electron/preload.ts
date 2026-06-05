@@ -2,6 +2,10 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
+  getAppInfo: () => ipcRenderer.invoke('app:getInfo'),
+  getUpdateStatus: () => ipcRenderer.invoke('app:getUpdateStatus'),
+  checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
+  installUpdate: () => ipcRenderer.invoke('app:installUpdate'),
   listGeneratedImages: (threadId: string) => ipcRenderer.invoke('generation:listGeneratedImages', threadId),
   listProjectsWithThreads: () => ipcRenderer.invoke('generation:listProjectsWithThreads'),
   listReferences: () => ipcRenderer.invoke('generation:listReferences'),
@@ -58,6 +62,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   copyGeneratedImage: (imageId: string) => ipcRenderer.invoke('generation:copyGeneratedImage', imageId),
   downloadGeneratedImage: (imageId: string) => ipcRenderer.invoke('generation:downloadGeneratedImage', imageId),
   deleteGeneratedImage: (imageId: string) => ipcRenderer.invoke('generation:deleteGeneratedImage', imageId),
+  subscribeToUpdateStatus: (listener: (payload: unknown) => void) => {
+    const wrappedListener = (_event: unknown, payload: unknown) => listener(payload);
+    ipcRenderer.on('app:updateStatus', wrappedListener);
+    return () => {
+      ipcRenderer.removeListener('app:updateStatus', wrappedListener);
+    };
+  },
   subscribeToScenePlan: (listener: (payload: unknown) => void) => {
     const wrappedListener = (_event: unknown, payload: unknown) => listener(payload);
     ipcRenderer.on('generation:scenePlan', wrappedListener);

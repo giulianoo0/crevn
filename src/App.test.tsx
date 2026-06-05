@@ -19,6 +19,9 @@ let directorSceneReadyListener:
 let imageReadyListener:
   | ((event: { jobId: string; clientRunId?: string; threadId: string; asset: Record<string, unknown> }) => void)
   | null = null;
+let updateStatusListener:
+  | ((event: { state: string; message: string; version: string | null; percent: number | null; errorMessage: string | null }) => void)
+  | null = null;
 let directorMessageStartListener:
   | ((event: {
       threadId: string;
@@ -148,6 +151,36 @@ let directorMessagesFixtureByChat: Record<
 };
 
 vi.mock('./lib/electron-api', () => ({
+  getAppInfo: vi.fn(async () => ({ name: 'crevn', version: '9.8.7' })),
+  getUpdateStatus: vi.fn(async () => ({
+    state: 'idle',
+    message: 'Updates have not been checked yet.',
+    version: null,
+    percent: null,
+    errorMessage: null,
+  })),
+  checkForUpdates: vi.fn(async () => ({
+    state: 'not_available',
+    message: 'No updates available.',
+    version: '9.8.7',
+    percent: null,
+    errorMessage: null,
+  })),
+  installUpdate: vi.fn(async () => ({
+    state: 'installing',
+    message: 'Installing update.',
+    version: '9.8.8',
+    percent: 100,
+    errorMessage: null,
+  })),
+  subscribeToUpdateStatus: vi.fn((listener) => {
+    updateStatusListener = listener;
+    return () => {
+      if (updateStatusListener === listener) {
+        updateStatusListener = null;
+      }
+    };
+  }),
   ensureProjectThreadWorkspace: vi.fn(async () => ({
     project: projectFixture,
     thread: projectFixture.threads[0],
@@ -2347,6 +2380,17 @@ describe('App header thread title', () => {
     expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
   });
 
+  it('shows the real app version in the sidebar', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.getAppInfo).toHaveBeenCalled();
+    expect(screen.getByText('crevn v9.8.7')).toBeInTheDocument();
+  });
+
   it('slides to the settings view when settings is clicked', async () => {
     render(<App />);
 
@@ -2362,6 +2406,26 @@ describe('App header thread title', () => {
     expect(screen.getByRole('button', { name: 'Objects' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Characters' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Back to projects' })).toBeInTheDocument();
+  });
+
+  it('checks for updates from the settings view', async () => {
+    const checkForUpdatesMock = vi.mocked(electronApi.checkForUpdates);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(checkForUpdatesMock).toHaveBeenCalled();
+    expect(screen.getByText('No updates available.')).toBeInTheDocument();
   });
 
   it('exports projects and threads from sidebar row actions', async () => {

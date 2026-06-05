@@ -167,19 +167,24 @@ import {
   exportProject,
   exportReference,
   exportThread,
+  getAppInfo,
+  getUpdateStatus,
   generateImages,
   importCrenv,
   importReference,
+  installUpdate,
   listGeneratedImages,
   listProjectsWithThreads,
   listReferences,
   listSceneGroups,
   renameProject,
   renameThread,
+  checkForUpdates,
   subscribeToImageReady,
   subscribeToSceneFrameReady,
   structureScenePrompt,
   subscribeToScenePlan,
+  subscribeToUpdateStatus,
   type SceneGroupRecord,
   updateProjectSettings,
   updateSceneFrame,
@@ -189,6 +194,8 @@ import {
   type DirectorMessageRecord,
   type ProjectRecord,
   type ReferenceImageRecord,
+  type AppInfo,
+  type UpdateStatus,
   cancelDirectorChat,
 } from './lib/electron-api';
 import { getDefaultModelOption, getModelOptionById } from './lib/model-catalog';
@@ -1143,6 +1150,10 @@ export function App() {
   const [openProjects, setOpenProjects] = useState<Record<string, boolean>>({});
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [sidebarView, setSidebarView] = useState<'projects' | 'settings'>('projects');
+  const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
   const [activeStudioView, setActiveStudioView] = useState<'generation' | 'references'>('generation');
   const [activeReferenceLibraryRoute, setActiveReferenceLibraryRoute] = useState<ReferenceLibraryRoute>('characters');
   const [isAddReferenceDialogOpen, setIsAddReferenceDialogOpen] = useState(false);
@@ -1411,6 +1422,38 @@ export function App() {
     setIsScenesSidebarResizing(true);
   }, [scenesSidebarWidth]);
 
+  const handleCheckForUpdates = useCallback(async () => {
+    setIsCheckingUpdates(true);
+    try {
+      const status = await checkForUpdates();
+      setUpdateStatus(status);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      setUpdateStatus({
+        state: 'error',
+        message: 'Update check failed.',
+        version: null,
+        percent: null,
+        errorMessage: message,
+      });
+      toast.error(message);
+    } finally {
+      setIsCheckingUpdates(false);
+    }
+  }, []);
+
+  const handleInstallUpdate = useCallback(async () => {
+    setIsInstallingUpdate(true);
+    try {
+      const status = await installUpdate();
+      setUpdateStatus(status);
+    } catch (error) {
+      toast.error(getErrorMessage(error));
+    } finally {
+      setIsInstallingUpdate(false);
+    }
+  }, []);
+
   const hasPrompt = prompt.trim().length > 0;
   const hasReferenceImages = referenceImages.length > 0;
   const selectedGeneratedImageIds = useMemo(
@@ -1460,6 +1503,42 @@ export function App() {
       ? activeDirectorChat.title
       : null;
   const referenceMentionMatch = promptMentionMatch;
+  const isUpdateBusy =
+    isCheckingUpdates || updateStatus?.state === 'checking' || updateStatus?.state === 'downloading';
+  const canInstallUpdate = updateStatus?.state === 'downloaded';
+
+  useEffect(() => {
+    let isMounted = true;
+
+    void getAppInfo()
+      .then((info) => {
+        if (isMounted) {
+          setAppInfo(info);
+        }
+      })
+      .catch((error) => {
+        console.error('[crevn:renderer] app info failed', error);
+      });
+
+    void getUpdateStatus()
+      .then((status) => {
+        if (isMounted) {
+          setUpdateStatus(status);
+        }
+      })
+      .catch((error) => {
+        console.error('[crevn:renderer] update status failed', error);
+      });
+
+    const unsubscribe = subscribeToUpdateStatus((status) => {
+      setUpdateStatus(status);
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     activeDirectorChatIdRef.current = activeDirectorChatId;
@@ -5168,6 +5247,66 @@ export function App() {
                   </button>
                 ))}
               </div>
+              <div className="mt-6 space-y-3 px-2">
+                <div className="px-3 text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
+                  Updates
+                </div>
+                <div className="space-y-3 rounded-[18px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.42)] p-3">
+                  <div className="min-h-9">
+                    <p className="text-[13px] leading-5 tracking-[0] text-[var(--foreground)]">
+                      {updateStatus?.message ?? 'Updates have not been checked yet.'}
+                    </p>
+                    {updateStatus?.errorMessage ? (
+                      <p className="mt-1 text-[12px] leading-4 text-[rgb(245,178,178)]">
+                        {updateStatus.errorMessage}
+                      </p>
+                    ) : updateStatus?.version ? (
+                      <p className="mt-1 text-[12px] leading-4 text-[var(--muted-foreground)]">
+                        Version {updateStatus.version}
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="surface"
+                      onClick={() => void handleCheckForUpdates()}
+                      disabled={isUpdateBusy}
+                      className="h-9 flex-1 rounded-full px-3 text-[13px]"
+                    >
+                      {isUpdateBusy ? (
+                        <LoaderCircle className="size-4 animate-spin" />
+                      ) : (
+                        <Search className="size-4" />
+                      )}
+                      {isUpdateBusy ? 'Checking' : 'Check for updates'}
+                    </Button>
+                    {canInstallUpdate ? (
+                      <Button
+                        type="button"
+                        onClick={() => void handleInstallUpdate()}
+                        disabled={isInstallingUpdate}
+                        className="h-9 rounded-full px-3 text-[13px]"
+                      >
+                        {isInstallingUpdate ? (
+                          <LoaderCircle className="size-4 animate-spin" />
+                        ) : (
+                          <Download className="size-4" />
+                        )}
+                        Install
+                      </Button>
+                    ) : null}
+                  </div>
+                  {updateStatus?.percent !== null && updateStatus?.percent !== undefined ? (
+                    <div className="h-1.5 overflow-hidden rounded-full bg-[var(--surface)]">
+                      <div
+                        className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-200"
+                        style={{ width: `${updateStatus.percent}%` }}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              </div>
             </div>
           </motion.div>
         </div>
@@ -5218,6 +5357,9 @@ export function App() {
               </AnimatePresence>
             </span>
           </button>
+          <div className="mt-2 px-3 text-[11px] leading-4 tracking-[0] text-[var(--muted-foreground)]">
+            {appInfo ? `${appInfo.name} v${appInfo.version}` : 'crevn'}
+          </div>
         </div>
         </div>
       </aside>
