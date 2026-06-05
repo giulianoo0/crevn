@@ -1,10 +1,15 @@
+const {
+  buildCodexThreadSandboxParams,
+  buildCodexTurnSandboxParams,
+} = require('./codexSandboxPolicy.cjs');
+
 const TRACE_DIRECTOR_RUNTIME = process.env.CRENV_CODEX_APP_SERVER_TRACE === '1';
 
 function buildDirectorThreadStartParams({ cwd, model, fastMode }) {
   return {
     cwd,
     approvalPolicy: 'never',
-    sandbox: 'workspace-write',
+    ...buildCodexThreadSandboxParams(),
     ...(model ? { model } : {}),
     ...(fastMode ? { serviceTier: 'fast' } : {}),
   };
@@ -15,7 +20,7 @@ function buildDirectorTurnStartParams({ threadId, prompt, model, fastMode }) {
     threadId,
     input: [{ type: 'text', text: prompt }],
     approvalPolicy: 'never',
-    sandboxPolicy: { type: 'workspaceWrite' },
+    ...buildCodexTurnSandboxParams(),
     ...(model ? { model } : {}),
     ...(fastMode ? { serviceTier: 'fast' } : {}),
   };

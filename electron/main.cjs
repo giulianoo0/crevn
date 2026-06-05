@@ -45,6 +45,63 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 
+function sanitizeExportFileName(value, fallback) {
+  const sanitized = String(value ?? '')
+    .trim()
+    .replace(/[/\\]+/g, '-')
+    .replace(/[^a-zA-Z0-9._ -]+/g, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/^-+|-+$/g, '');
+  return sanitized || fallback;
+}
+
+function withExtension(fileName, extension) {
+  return fileName.toLowerCase().endsWith(extension) ? fileName : `${fileName}${extension}`;
+}
+
+async function showExportSaveDialog({ defaultName, extension, label }) {
+  const result = await dialog.showSaveDialog(mainWindow ?? undefined, {
+    defaultPath: withExtension(defaultName, extension),
+    filters: [
+      {
+        name: label,
+        extensions: [extension.slice(1)],
+      },
+    ],
+  });
+
+  if (result.canceled || !result.filePath) {
+    return null;
+  }
+
+  return withExtension(result.filePath, extension);
+}
+
+async function showImportOpenDialog({ extension, label }) {
+  const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
+    properties: ['openFile'],
+    filters: [
+      {
+        name: label,
+        extensions: [extension.slice(1)],
+      },
+    ],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+
+  return result.filePaths[0];
+}
+
+function getSourceAppInfo() {
+  return {
+    name: app.getName(),
+    version: app.getVersion(),
+  };
+}
+
 const createWindow = () => {
   mainWindow = new BrowserWindow({
     width: 1024,
@@ -239,6 +296,77 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('generation:updateProjectSettings', async (_event, projectId, payload) => {
     return generationStore.updateProjectSettings(projectId, payload);
+  });
+
+  ipcMain.handle('generation:exportProject', async (_event, projectId) => {
+    const projects = await generationStore.listProjectsWithThreads();
+    const project = projects.find((candidate) => candidate.id === projectId);
+    const filePath = await showExportSaveDialog({
+      defaultName: sanitizeExportFileName(project?.name, 'project'),
+      extension: '.crenv',
+      label: 'Crenv Export',
+    });
+    if (!filePath) {
+      return { status: 'canceled' };
+    }
+    await generationStore.exportProject(projectId, filePath, {
+      sourceApp: getSourceAppInfo(),
+    });
+    return { status: 'exported', filePath };
+  });
+
+  ipcMain.handle('generation:exportThread', async (_event, threadId) => {
+    const projects = await generationStore.listProjectsWithThreads();
+    const thread = projects.flatMap((project) => project.threads).find((candidate) => candidate.id === threadId);
+    const filePath = await showExportSaveDialog({
+      defaultName: sanitizeExportFileName(thread?.name, 'thread'),
+      extension: '.crenv',
+      label: 'Crenv Export',
+    });
+    if (!filePath) {
+      return { status: 'canceled' };
+    }
+    await generationStore.exportThread(threadId, filePath, {
+      sourceApp: getSourceAppInfo(),
+    });
+    return { status: 'exported', filePath };
+  });
+
+  ipcMain.handle('generation:exportReference', async (_event, payload) => {
+    const filePath = await showExportSaveDialog({
+      defaultName: sanitizeExportFileName(payload?.title, 'reference'),
+      extension: '.refc',
+      label: 'Reference Export',
+    });
+    if (!filePath) {
+      return { status: 'canceled' };
+    }
+    await generationStore.exportReference(payload, filePath, {
+      sourceApp: getSourceAppInfo(),
+    });
+    return { status: 'exported', filePath };
+  });
+
+  ipcMain.handle('generation:importCrenv', async (_event, targetProjectId) => {
+    const filePath = await showImportOpenDialog({
+      extension: '.crenv',
+      label: 'Crenv Export',
+    });
+    if (!filePath) {
+      return { status: 'canceled' };
+    }
+    return generationStore.importCrenvArchive(filePath, { targetProjectId });
+  });
+
+  ipcMain.handle('generation:importReference', async () => {
+    const filePath = await showImportOpenDialog({
+      extension: '.refc',
+      label: 'Reference Export',
+    });
+    if (!filePath) {
+      return { status: 'canceled' };
+    }
+    return generationStore.importReferenceArchive(filePath);
   });
 
   ipcMain.handle('generation:renameThread', async (_event, threadId, name) => {

@@ -31,6 +31,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   renameProject: (projectId, name) => ipcRenderer.invoke('generation:renameProject', projectId, name),
   updateProjectSettings: (projectId, payload) =>
     ipcRenderer.invoke('generation:updateProjectSettings', projectId, payload),
+  exportProject: (projectId) => ipcRenderer.invoke('generation:exportProject', projectId),
+  exportThread: (threadId) => ipcRenderer.invoke('generation:exportThread', threadId),
+  exportReference: (payload) => ipcRenderer.invoke('generation:exportReference', payload),
+  importCrenv: (targetProjectId) => ipcRenderer.invoke('generation:importCrenv', targetProjectId),
+  importReference: () => ipcRenderer.invoke('generation:importReference'),
   renameThread: (threadId, name) => ipcRenderer.invoke('generation:renameThread', threadId, name),
   deleteProject: (projectId) => ipcRenderer.invoke('generation:deleteProject', projectId),
   deleteThread: (threadId) => ipcRenderer.invoke('generation:deleteThread', threadId),

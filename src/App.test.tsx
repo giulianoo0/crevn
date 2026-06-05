@@ -498,6 +498,21 @@ vi.mock('./lib/electron-api', () => ({
   createThread: vi.fn(),
   renameProject: vi.fn(),
   updateProjectSettings: vi.fn(),
+  exportProject: vi.fn(async () => ({ status: 'exported', filePath: '/tmp/project.crenv' })),
+  exportThread: vi.fn(async () => ({ status: 'exported', filePath: '/tmp/thread.crenv' })),
+  exportReference: vi.fn(async () => ({ status: 'exported', filePath: '/tmp/reference.refc' })),
+  importCrenv: vi.fn(async () => ({
+    status: 'imported',
+    scope: 'project',
+    projectId: 'project-1',
+    threadIds: ['thread-1'],
+  })),
+  importReference: vi.fn(async () => ({
+    status: 'imported',
+    category: 'characters',
+    collectionId: 'imported-reference-pack',
+    referenceIds: ['imported-reference'],
+  })),
   renameThread: vi.fn(),
   deleteProject: vi.fn(),
   deleteThread: vi.fn(),
@@ -712,6 +727,7 @@ vi.mock('./components/project-row', () => ({
     onPrepareThreadDraft,
     onOpenProperties,
     onRename,
+    onExport,
     onDelete,
   }: {
     id: string;
@@ -719,6 +735,7 @@ vi.mock('./components/project-row', () => ({
     onPrepareThreadDraft: (projectId: string) => void;
     onOpenProperties: (projectId: string) => void;
     onRename: () => void;
+    onExport?: (projectId: string) => void;
     onDelete: () => void;
   }) => (
     <div>
@@ -732,6 +749,11 @@ vi.mock('./components/project-row', () => ({
       <button type="button" onClick={onRename}>
         Rename {name}
       </button>
+      {onExport ? (
+        <button type="button" onClick={() => onExport(id)}>
+          Export {name}
+        </button>
+      ) : null}
       <button type="button" onClick={onDelete}>
         Delete {name}
       </button>
@@ -741,16 +763,20 @@ vi.mock('./components/project-row', () => ({
 
 vi.mock('./components/thread-row', () => ({
   ThreadRow: ({
+    id,
     name,
     isRunning,
     onClick,
     onRename,
+    onExport,
     onDelete,
   }: {
+    id: string;
     name: string;
     isRunning: boolean;
     onClick: () => void;
     onRename: () => void;
+    onExport?: (threadId: string) => void;
     onDelete: () => void;
   }) => (
     <div>
@@ -761,6 +787,11 @@ vi.mock('./components/thread-row', () => ({
       <button type="button" onClick={onRename}>
         Rename {name}
       </button>
+      {onExport ? (
+        <button type="button" onClick={() => onExport(id)}>
+          Export {name}
+        </button>
+      ) : null}
       <button type="button" onClick={onDelete}>
         Delete {name}
       </button>
@@ -2331,6 +2362,129 @@ describe('App header thread title', () => {
     expect(screen.getByRole('button', { name: 'Objects' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Characters' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Back to projects' })).toBeInTheDocument();
+  });
+
+  it('exports projects and threads from sidebar row actions', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Export Project One' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Export Thread One' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.exportProject).toHaveBeenCalledWith('project-1');
+    expect(electronApi.exportThread).toHaveBeenCalledWith('thread-1');
+  });
+
+  it('imports project and thread archives from the project sidebar', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import project or thread' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.importCrenv).toHaveBeenCalledWith('project-1');
+  });
+
+  it('imports reference archives from the references workspace', async () => {
+    vi.mocked(electronApi.listReferences)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 'imported-reference',
+          collectionId: 'imported-reference-pack',
+          environmentId: null,
+          name: 'imported-reference.png',
+          title: 'Imported Reference',
+          description: 'Imported from a .refc archive.',
+          mimeType: 'image/png',
+          bytesBase64: 'AQID',
+          createdAt: '2026-05-26T12:00:00.000Z',
+          category: 'characters',
+        },
+      ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import reference' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.importReference).toHaveBeenCalled();
+    expect(screen.getByText('Imported Reference')).toBeInTheDocument();
+  });
+
+  it('exports only the clicked reference from the reference context menu', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'hero-front',
+        collectionId: 'hero-pack',
+        environmentId: null,
+        name: 'hero-front.png',
+        title: 'Hero Pack',
+        description: 'Front view',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'characters',
+      },
+      {
+        id: 'villain-front',
+        collectionId: 'villain-pack',
+        environmentId: null,
+        name: 'villain-front.png',
+        title: 'Villain Pack',
+        description: 'Should not export.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'characters',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    const heroCard = screen.getByText('Hero Pack').closest('article');
+    expect(heroCard).not.toBeNull();
+
+    fireEvent.contextMenu(heroCard!);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Export reference...' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.exportReference).toHaveBeenCalledWith({
+      id: 'hero-front',
+      title: 'Hero Pack',
+      category: 'characters',
+      collectionId: 'hero-pack',
+      environmentId: null,
+    });
   });
 
   it('switches between classic and scenes from the header tabs', async () => {

@@ -24,6 +24,30 @@ export interface UpdateProjectSettingsPayload {
   artStyle: string;
 }
 
+export type ExportResult =
+  | {
+      status: 'exported';
+      filePath: string;
+    }
+  | {
+      status: 'canceled';
+    };
+
+export type ImportResult =
+  | {
+      status: 'imported';
+      scope?: 'project' | 'thread';
+      projectId?: string | null;
+      threadIds?: string[];
+      category?: ReferenceCategory;
+      collectionId?: string | null;
+      environmentId?: string | null;
+      referenceIds?: string[];
+    }
+  | {
+      status: 'canceled';
+    };
+
 export interface WorkspaceRecord {
   project: ProjectRecord;
   thread: ThreadRecord;
@@ -134,6 +158,14 @@ export interface DeleteReferencePayload {
   category: 'characters' | 'environment' | 'objects';
   collectionId?: string;
   environmentId?: string;
+}
+
+export interface ExportReferencePayload {
+  id: string;
+  title: string;
+  category: 'characters' | 'environment' | 'objects';
+  collectionId?: string | null;
+  environmentId?: string | null;
 }
 
 export interface GenerateImagesPayload {
@@ -459,6 +491,21 @@ function getElectronApi() {
       updateProjectSettings: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
+      exportProject: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      exportThread: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      exportReference: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      importCrenv: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      importReference: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
       renameThread: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
@@ -644,6 +691,26 @@ export function renameProject(projectId: string, name: string) {
 
 export function updateProjectSettings(projectId: string, payload: UpdateProjectSettingsPayload) {
   return getElectronApi().updateProjectSettings(projectId, payload) as Promise<void>;
+}
+
+export function exportProject(projectId: string) {
+  return getElectronApi().exportProject(projectId) as Promise<ExportResult>;
+}
+
+export function exportThread(threadId: string) {
+  return getElectronApi().exportThread(threadId) as Promise<ExportResult>;
+}
+
+export function exportReference(payload: ExportReferencePayload) {
+  return getElectronApi().exportReference(payload) as Promise<ExportResult>;
+}
+
+export function importCrenv(targetProjectId: string | null) {
+  return getElectronApi().importCrenv(targetProjectId) as Promise<ImportResult>;
+}
+
+export function importReference() {
+  return getElectronApi().importReference() as Promise<ImportResult>;
 }
 
 export function renameThread(threadId: string, name: string) {

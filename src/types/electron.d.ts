@@ -60,6 +60,30 @@ interface ElectronUpdateProjectSettingsPayload {
   artStyle: string;
 }
 
+type ElectronExportResult =
+  | {
+      status: 'exported';
+      filePath: string;
+    }
+  | {
+      status: 'canceled';
+    };
+
+type ElectronImportResult =
+  | {
+      status: 'imported';
+      scope?: 'project' | 'thread';
+      projectId?: string;
+      threadIds?: string[];
+      category?: 'characters' | 'environment' | 'objects';
+      collectionId?: string | null;
+      environmentId?: string | null;
+      referenceIds?: string[];
+    }
+  | {
+      status: 'canceled';
+    };
+
 interface ElectronReferenceImageRecord {
   id: string;
   name: string;
@@ -165,6 +189,14 @@ interface ElectronDeleteReferencePayload {
   category: 'characters' | 'environment' | 'objects';
   collectionId?: string;
   environmentId?: string;
+}
+
+interface ElectronExportReferencePayload {
+  id: string;
+  title: string;
+  category: 'characters' | 'environment' | 'objects';
+  collectionId?: string | null;
+  environmentId?: string | null;
 }
 
 interface ElectronGenerateImagesPayload {
@@ -441,6 +473,11 @@ interface Window {
       projectId: string,
       payload: ElectronUpdateProjectSettingsPayload
     ) => Promise<void>;
+    exportProject: (projectId: string) => Promise<ElectronExportResult>;
+    exportThread: (threadId: string) => Promise<ElectronExportResult>;
+    exportReference: (payload: ElectronExportReferencePayload) => Promise<ElectronExportResult>;
+    importCrenv: (targetProjectId: string | null) => Promise<ElectronImportResult>;
+    importReference: () => Promise<ElectronImportResult>;
     renameThread: (threadId: string, name: string) => Promise<void>;
     deleteProject: (projectId: string) => Promise<void>;
     deleteThread: (threadId: string) => Promise<void>;

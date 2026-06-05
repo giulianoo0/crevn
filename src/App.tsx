@@ -60,6 +60,7 @@ import {
   Search,
   Settings,
   Trash2,
+  Upload,
   WandSparkles,
   X,
   Zap,
@@ -163,7 +164,12 @@ import {
   deleteThread,
   downloadGeneratedImage,
   ensureProjectThreadWorkspace,
+  exportProject,
+  exportReference,
+  exportThread,
   generateImages,
+  importCrenv,
+  importReference,
   listGeneratedImages,
   listProjectsWithThreads,
   listReferences,
@@ -523,6 +529,10 @@ function formatRelativeTime(value: string) {
 
   const diffDays = Math.floor(diffHours / 24);
   return `${diffDays}d ago`;
+}
+
+function getExportedFileName(filePath: string) {
+  return filePath.split(/[\\/]/).pop() || filePath;
 }
 
 function formatDurationBetween(startValue: string, endValue: string) {
@@ -3183,6 +3193,97 @@ export function App() {
     }
   }, [refreshProjects]);
 
+  const handleExportProject = useCallback(async (projectId: string) => {
+    try {
+      const result = await exportProject(projectId);
+      if (result.status === 'exported') {
+        toast.success(`Exported to ${getExportedFileName(result.filePath)}`);
+      }
+    } catch (error) {
+      console.error('Failed to export project', error);
+      toast.error(getErrorMessage(error, 'Export failed'));
+    }
+  }, []);
+
+  const handleExportThread = useCallback(async (threadId: string) => {
+    try {
+      const result = await exportThread(threadId);
+      if (result.status === 'exported') {
+        toast.success(`Exported to ${getExportedFileName(result.filePath)}`);
+      }
+    } catch (error) {
+      console.error('Failed to export thread', error);
+      toast.error(getErrorMessage(error, 'Export failed'));
+    }
+  }, []);
+
+  const handleExportReference = useCallback(async (reference: SavedReferenceImage) => {
+    try {
+      const result = await exportReference({
+        id: reference.id,
+        title: reference.title,
+        category: reference.category,
+        collectionId: reference.collectionId ?? null,
+        environmentId: reference.environmentId ?? null,
+      });
+      if (result.status === 'exported') {
+        toast.success(`Exported to ${getExportedFileName(result.filePath)}`);
+      }
+    } catch (error) {
+      console.error('Failed to export reference', error);
+      toast.error(getErrorMessage(error, 'Export failed'));
+    }
+  }, []);
+
+  const handleImportCrenv = useCallback(async () => {
+    try {
+      const result = await importCrenv(selectedProjectId);
+      if (result.status === 'canceled') {
+        return;
+      }
+
+      const nextProjects = await refreshProjects();
+      const nextProjectId = result.projectId ?? selectedProjectId ?? nextProjects[0]?.id ?? null;
+      const nextThreadId =
+        result.threadIds?.[0] ?? nextProjects.find((project) => project.id === nextProjectId)?.threads[0]?.id ?? null;
+
+      if (nextProjectId && nextThreadId) {
+        await handleSelectThread(nextProjectId, nextThreadId);
+      } else {
+        setSelectedProjectId(nextProjectId);
+        setSelectedThreadIdImmediately(null);
+        setGeneratedImages([]);
+      }
+
+      toast.success(result.scope === 'thread' ? 'Thread imported' : 'Project imported');
+    } catch (error) {
+      console.error('Failed to import project or thread', error);
+      toast.error(getErrorMessage(error, 'Import failed'));
+    }
+  }, [handleSelectThread, refreshProjects, selectedProjectId, setSelectedThreadIdImmediately]);
+
+  const handleImportReference = useCallback(async () => {
+    try {
+      const result = await importReference();
+      if (result.status === 'canceled') {
+        return;
+      }
+
+      const references = await listReferences();
+      setSavedReferences((current) => {
+        for (const reference of current) {
+          revokeReferencePreviewUrl(reference);
+        }
+        return references.map(toSavedReferenceImage);
+      });
+
+      toast.success('Reference imported');
+    } catch (error) {
+      console.error('Failed to import reference', error);
+      toast.error(getErrorMessage(error, 'Import failed'));
+    }
+  }, []);
+
   const handleDeleteProject = useCallback(async (projectId: string) => {
     try {
       await deleteProject(projectId);
@@ -4514,6 +4615,8 @@ export function App() {
                   title: reference.title,
                 })
               }
+              onExportReference={handleExportReference}
+              onImportReference={() => void handleImportReference()}
             />
           ) : (
             <div
@@ -4934,14 +5037,24 @@ export function App() {
                 <div className="text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
                   Projects
                 </div>
-                <button
-                  type="button"
-                  aria-label="Create new project"
-                  onClick={() => setIsCreateProjectDialogOpen(true)}
-                  className="inline-flex h-7 w-7 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
-                >
-                  <FolderPlus className="size-3.5" />
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    aria-label="Import project or thread"
+                    onClick={() => void handleImportCrenv()}
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
+                  >
+                    <Upload className="size-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Create new project"
+                    onClick={() => setIsCreateProjectDialogOpen(true)}
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
+                  >
+                    <FolderPlus className="size-3.5" />
+                  </button>
+                </div>
               </div>
               <div className="mt-1 space-y-1 px-2">
                 {projects.map((project) => {
@@ -4969,6 +5082,7 @@ export function App() {
                             name: project.name,
                           })
                         }
+                        onExport={handleExportProject}
                         onDelete={(projectId) =>
                           openSidebarEntityDialog({
                             mode: 'delete',
@@ -5008,6 +5122,7 @@ export function App() {
                                       projectId: project.id,
                                     })
                                   }
+                                  onExport={handleExportThread}
                                   onDelete={() =>
                                     openSidebarEntityDialog({
                                       mode: 'delete',
@@ -8956,12 +9071,16 @@ function ReferencesWorkspace({
   onAddReference,
   onEditReference,
   onDeleteReference,
+  onExportReference,
+  onImportReference,
 }: {
   references: SavedReferenceImage[];
   route: ReferenceLibraryRoute;
   onAddReference: () => void;
   onEditReference: (reference: SavedReferenceImage) => void;
   onDeleteReference: (reference: SavedReferenceImage) => void;
+  onExportReference: (reference: SavedReferenceImage) => void;
+  onImportReference: () => void;
 }) {
   const filteredReferences = useMemo(() => {
     const scoped = references.filter((reference) => reference.category === route);
@@ -9019,63 +9138,88 @@ function ReferencesWorkspace({
               {routeCopy.description}
             </p>
           </div>
-          <Button
-            type="button"
-            onClick={onAddReference}
-            className="h-10 rounded-full px-4"
-          >
-            <ImagePlus className="size-4" />
-            {routeCopy.addLabel}
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              type="button"
+              variant="surface"
+              onClick={onImportReference}
+              className="h-10 rounded-full px-4"
+            >
+              <Upload className="size-4" />
+              Import reference
+            </Button>
+            <Button
+              type="button"
+              onClick={onAddReference}
+              className="h-10 rounded-full px-4"
+            >
+              <ImagePlus className="size-4" />
+              {routeCopy.addLabel}
+            </Button>
+          </div>
         </div>
 
         {filteredReferences.length > 0 ? (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3" data-testid="reference-grid">
             {filteredReferences.map((reference) => (
-              <article
-                key={reference.id}
-                className="group overflow-hidden rounded-[22px] border border-[var(--border-soft)] bg-[var(--surface)] transition-[border-color,background-color] duration-200 hover:border-[var(--border-strong)] hover:bg-[var(--surface2)]"
-              >
-                <div className="relative aspect-[4/3] overflow-hidden bg-[var(--surface2)]">
-                  <img
-                    src={reference.previewUrl}
-                    alt={reference.title}
-                    className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:scale-[1.025]"
-                  />
-                  <div className="absolute right-3 top-3 flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
-                    <button
-                      type="button"
-                      aria-label={`Edit ${reference.title}`}
-                      onClick={() => onEditReference(reference)}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
-                    >
-                      <Pencil className="size-4" />
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={`Delete ${reference.title}`}
-                      onClick={() => onDeleteReference(reference)}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-[rgba(190,58,58,0.8)]"
-                    >
-                      <Trash2 className="size-4" />
-                    </button>
-                  </div>
-                </div>
-                <div className="space-y-2 p-4">
-                  <h2 className="line-clamp-1 text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
-                    {reference.title}
-                  </h2>
-                  {reference.description ? (
-                    <p className="line-clamp-2 text-[13px] leading-5 text-[var(--muted-foreground)]">
-                      {reference.description}
-                    </p>
-                  ) : (
-                    <p className="text-[13px] leading-5 text-[var(--muted-foreground)]">
-                      No description
-                    </p>
-                  )}
-                </div>
-              </article>
+              <ContextMenu key={reference.id}>
+                <ContextMenuTrigger asChild>
+                  <article
+                    className="group overflow-hidden rounded-[22px] border border-[var(--border-soft)] bg-[var(--surface)] transition-[border-color,background-color] duration-200 hover:border-[var(--border-strong)] hover:bg-[var(--surface2)]"
+                  >
+                    <div className="relative aspect-[4/3] overflow-hidden bg-[var(--surface2)]">
+                      <img
+                        src={reference.previewUrl}
+                        alt={reference.title}
+                        className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:scale-[1.025]"
+                      />
+                      <div className="absolute right-3 top-3 flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
+                        <button
+                          type="button"
+                          aria-label={`Edit ${reference.title}`}
+                          onClick={() => onEditReference(reference)}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
+                        >
+                          <Pencil className="size-4" />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Delete ${reference.title}`}
+                          onClick={() => onDeleteReference(reference)}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-[rgba(190,58,58,0.8)]"
+                        >
+                          <Trash2 className="size-4" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="space-y-2 p-4">
+                      <h2 className="line-clamp-1 text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                        {reference.title}
+                      </h2>
+                      {reference.description ? (
+                        <p className="line-clamp-2 text-[13px] leading-5 text-[var(--muted-foreground)]">
+                          {reference.description}
+                        </p>
+                      ) : (
+                        <p className="text-[13px] leading-5 text-[var(--muted-foreground)]">
+                          No description
+                        </p>
+                      )}
+                    </div>
+                  </article>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem onClick={() => onExportReference(reference)}>Export reference...</ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem onClick={() => onEditReference(reference)}>Edit reference</ContextMenuItem>
+                  <ContextMenuItem
+                    className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
+                    onClick={() => onDeleteReference(reference)}
+                  >
+                    Delete reference
+                  </ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             ))}
           </div>
         ) : (

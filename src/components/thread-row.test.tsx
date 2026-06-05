@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ThreadRow } from './thread-row';
@@ -58,5 +58,27 @@ describe('ThreadRow', () => {
     );
 
     expect(screen.queryByLabelText('New Thread 2 is generating')).not.toBeInTheDocument();
+  });
+
+  it('shows an export context-menu action for threads', () => {
+    const handleExport = vi.fn();
+
+    render(
+      <ThreadRow
+        id="thread_1"
+        name="New Thread"
+        createdAtLabel="Just now"
+        isRunning={false}
+        onClick={() => {}}
+        onRename={() => {}}
+        onExport={handleExport}
+        onDelete={() => {}}
+      />
+    );
+
+    fireEvent.contextMenu(screen.getByRole('button', { name: /New Thread/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Export thread...' }));
+
+    expect(handleExport).toHaveBeenCalledWith('thread_1');
   });
 });

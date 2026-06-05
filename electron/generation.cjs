@@ -11,6 +11,8 @@ const { createClient } = require('@libsql/client/node');
 const { and, desc, eq, inArray, sql } = require('drizzle-orm');
 const { drizzle } = require('drizzle-orm/libsql');
 const { sqliteTable, text, integer } = require('drizzle-orm/sqlite-core');
+const yazl = require('yazl');
+const yauzl = require('yauzl');
 
 const { createCodexAppServerClient } = require('./codexAppServerClient.cjs');
 const { runDirectorAppServerTurn } = require('./directorAppServerRuntime.cjs');
@@ -1220,6 +1222,264 @@ async function pathExists(filePath) {
   }
 }
 
+function sanitizeArchiveSegment(value, fallback = 'asset') {
+  const sanitized = String(value ?? '')
+    .trim()
+    .replace(/[/\\]+/g, '-')
+    .replace(/[^a-zA-Z0-9._ -]+/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return sanitized || fallback;
+}
+
+function getExportAssetArchivePath(kind, asset) {
+  const directory =
+    kind === 'scene'
+      ? 'assets/scenes'
+      : kind === 'reference' || kind === 'scene-reference'
+      ? 'assets/references'
+      : 'assets/generated';
+  const fileName = sanitizeArchiveSegment(asset.fileName ?? asset.name ?? `${asset.id}.bin`, `${asset.id}.bin`);
+  return `${directory}/${sanitizeArchiveSegment(asset.id, 'asset')}-${fileName}`;
+}
+
+async function collectFileAssetEntry({ type, id, sourcePath, archivePath }) {
+  try {
+    await fsp.access(sourcePath);
+    return {
+      entry: {
+        type,
+        id,
+        sourcePath,
+        archivePath,
+      },
+      missing: null,
+    };
+  } catch {
+    return {
+      entry: null,
+      missing: {
+        id,
+        type,
+        sourcePath,
+        archivePath,
+      },
+    };
+  }
+}
+
+function collectBufferAssetEntry({ type, id, bytesBase64, archivePath }) {
+  return {
+    type,
+    id,
+    archivePath,
+    buffer: Buffer.from(bytesBase64 || '', 'base64'),
+  };
+}
+
+async function writeExportArchive({ filePath, format, snapshot, exportedAt, sourceApp }) {
+  const fileEntries = [];
+  const bufferEntries = [];
+  const assets = [];
+  const missingAssets = [];
+
+  for (const asset of snapshot.generatedAssets ?? []) {
+    const archivePath = getExportAssetArchivePath('generated', asset);
+    const collected = await collectFileAssetEntry({
+      type: 'generated',
+      id: asset.id,
+      sourcePath: asset.storedPath,
+      archivePath,
+    });
+    if (collected.entry) {
+      fileEntries.push(collected.entry);
+      assets.push({
+        id: asset.id,
+        type: 'generated',
+        sourcePath: asset.storedPath,
+        archivePath,
+      });
+    }
+    if (collected.missing) {
+      missingAssets.push(collected.missing);
+    }
+  }
+
+  for (const asset of snapshot.sceneFrameAssets ?? []) {
+    const archivePath = getExportAssetArchivePath('scene', asset);
+    const collected = await collectFileAssetEntry({
+      type: 'scene',
+      id: asset.id,
+      sourcePath: asset.storedPath,
+      archivePath,
+    });
+    if (collected.entry) {
+      fileEntries.push(collected.entry);
+      assets.push({
+        id: asset.id,
+        type: 'scene',
+        sourcePath: asset.storedPath,
+        archivePath,
+      });
+    }
+    if (collected.missing) {
+      missingAssets.push(collected.missing);
+    }
+  }
+
+  for (const reference of snapshot.references ?? []) {
+    const archivePath = getExportAssetArchivePath('reference', reference);
+    bufferEntries.push(
+      collectBufferAssetEntry({
+        type: 'reference',
+        id: reference.id,
+        bytesBase64: reference.bytesBase64,
+        archivePath,
+      })
+    );
+    assets.push({
+      id: reference.id,
+      type: 'reference',
+      archivePath,
+    });
+  }
+
+  for (const reference of snapshot.sceneFrameReferences ?? []) {
+    const archivePath = getExportAssetArchivePath('scene-reference', reference);
+    bufferEntries.push(
+      collectBufferAssetEntry({
+        type: 'scene-reference',
+        id: reference.id,
+        bytesBase64: reference.bytesBase64,
+        archivePath,
+      })
+    );
+    assets.push({
+      id: reference.id,
+      type: 'scene-reference',
+      archivePath,
+    });
+  }
+
+  const manifest = {
+    format,
+    version: 1,
+    exportedAt: exportedAt ?? new Date().toISOString(),
+    scope: snapshot.scope,
+    sourceApp: sourceApp ?? null,
+    data: snapshot,
+    assets,
+    missingAssets,
+  };
+
+  await fsp.mkdir(path.dirname(filePath), { recursive: true });
+
+  await new Promise((resolve, reject) => {
+    const zipFile = new yazl.ZipFile();
+    const output = fs.createWriteStream(filePath);
+
+    output.on('close', resolve);
+    output.on('error', reject);
+    zipFile.outputStream.on('error', reject);
+
+    zipFile.addBuffer(Buffer.from(JSON.stringify(manifest, null, 2)), 'data/manifest.json');
+    for (const entry of fileEntries) {
+      zipFile.addFile(entry.sourcePath, entry.archivePath);
+    }
+    for (const entry of bufferEntries) {
+      zipFile.addBuffer(entry.buffer, entry.archivePath);
+    }
+    zipFile.end();
+    zipFile.outputStream.pipe(output);
+  });
+
+  return {
+    filePath,
+    missingAssets,
+  };
+}
+
+async function readZipArchiveEntries(filePath) {
+  return new Promise((resolve, reject) => {
+    const entries = new Map();
+    yauzl.open(filePath, { lazyEntries: true }, (openError, zipFile) => {
+      if (openError) {
+        reject(openError);
+        return;
+      }
+      if (!zipFile) {
+        reject(new Error('Failed to open archive.'));
+        return;
+      }
+
+      zipFile.on('error', reject);
+      zipFile.on('end', () => resolve(entries));
+      zipFile.readEntry();
+      zipFile.on('entry', (entry) => {
+        if (/\/$/.test(entry.fileName)) {
+          zipFile.readEntry();
+          return;
+        }
+        zipFile.openReadStream(entry, (streamError, readStream) => {
+          if (streamError) {
+            reject(streamError);
+            return;
+          }
+          if (!readStream) {
+            reject(new Error(`Failed to read archive entry ${entry.fileName}.`));
+            return;
+          }
+          const chunks = [];
+          readStream.on('data', (chunk) => chunks.push(chunk));
+          readStream.on('error', reject);
+          readStream.on('end', () => {
+            entries.set(entry.fileName, Buffer.concat(chunks));
+            zipFile.readEntry();
+          });
+        });
+      });
+    });
+  });
+}
+
+async function readExportManifestFromArchive(filePath) {
+  const entries = await readZipArchiveEntries(filePath);
+  const manifestBuffer = entries.get('data/manifest.json');
+  if (!manifestBuffer) {
+    throw new Error('Archive is missing data/manifest.json.');
+  }
+
+  const manifest = JSON.parse(manifestBuffer.toString('utf8'));
+  return { manifest, entries };
+}
+
+function findArchiveAsset(manifest, type, id) {
+  return Array.isArray(manifest.assets)
+    ? manifest.assets.find((asset) => asset.type === type && asset.id === id)
+    : null;
+}
+
+function extensionForImportedAsset(fileName, mimeType) {
+  const extension = path.extname(fileName ?? '').toLowerCase();
+  if (extension) return extension;
+  if (mimeType === 'image/jpeg') return '.jpg';
+  if (mimeType === 'image/webp') return '.webp';
+  if (mimeType === 'image/gif') return '.gif';
+  return '.png';
+}
+
+async function writeImportedAssetBuffer({ buffer, assetId, fileName, mimeType, generatedImagesDir }) {
+  await fsp.mkdir(generatedImagesDir, { recursive: true });
+  const storedFileName = `${assetId}${extensionForImportedAsset(fileName, mimeType)}`;
+  const storedPath = path.join(generatedImagesDir, storedFileName);
+  await fsp.writeFile(storedPath, buffer);
+  return {
+    fileName: storedFileName,
+    storedPath,
+  };
+}
+
 async function copyDirectoryWithoutOverwrite(sourceDirectory, targetDirectory) {
   const entries = await fsp.readdir(sourceDirectory, { withFileTypes: true });
   await fsp.mkdir(targetDirectory, { recursive: true });
@@ -1511,6 +1771,682 @@ async function createGenerationStore(userDataDir, options = {}) {
       ...project,
       threads: threadsByProjectId.get(project.id) ?? [],
     }));
+  }
+
+  async function collectThreadExportRecords(threadIds) {
+    if (threadIds.length === 0) {
+      return {
+        generationJobs: [],
+        generatedAssets: [],
+        directorChats: [],
+        directorMessages: [],
+        sceneGroups: [],
+        sceneFrames: [],
+        sceneFrameReferences: [],
+        sceneGroupRuns: [],
+        sceneFrameAssets: [],
+      };
+    }
+
+    const generationJobs = await db
+      .select()
+      .from(generationJobsTable)
+      .where(inArray(generationJobsTable.threadId, threadIds))
+      .orderBy(generationJobsTable.createdAt, generationJobsTable.id);
+    const generationJobIds = generationJobs.map((job) => job.id);
+    const generatedAssets = generationJobIds.length
+      ? await db
+          .select()
+          .from(generatedAssetsTable)
+          .where(inArray(generatedAssetsTable.jobId, generationJobIds))
+          .orderBy(generatedAssetsTable.createdAt, generatedAssetsTable.id)
+      : [];
+
+    const directorChats = await db
+      .select()
+      .from(directorChatsTable)
+      .where(inArray(directorChatsTable.threadId, threadIds))
+      .orderBy(directorChatsTable.createdAt, directorChatsTable.id);
+    const directorChatIds = directorChats.map((chat) => chat.id);
+    const directorMessages = directorChatIds.length
+      ? await db
+          .select()
+          .from(directorMessagesTable)
+          .where(inArray(directorMessagesTable.chatId, directorChatIds))
+          .orderBy(directorMessagesTable.messageOrder, directorMessagesTable.createdAt, directorMessagesTable.id)
+      : [];
+
+    const sceneGroups = await db
+      .select()
+      .from(sceneGroupsTable)
+      .where(inArray(sceneGroupsTable.threadId, threadIds))
+      .orderBy(sceneGroupsTable.tocOrder, sceneGroupsTable.createdAt, sceneGroupsTable.id);
+    const sceneGroupIds = sceneGroups.map((sceneGroup) => sceneGroup.id);
+    const sceneFrames = sceneGroupIds.length
+      ? await db
+          .select()
+          .from(sceneFramesTable)
+          .where(inArray(sceneFramesTable.sceneGroupId, sceneGroupIds))
+          .orderBy(sceneFramesTable.frameOrder, sceneFramesTable.createdAt, sceneFramesTable.id)
+      : [];
+    const sceneFrameIds = sceneFrames.map((sceneFrame) => sceneFrame.id);
+    const sceneFrameReferences = sceneFrameIds.length
+      ? await db
+          .select()
+          .from(sceneFrameReferencesTable)
+          .where(inArray(sceneFrameReferencesTable.sceneFrameId, sceneFrameIds))
+          .orderBy(sceneFrameReferencesTable.createdAt, sceneFrameReferencesTable.id)
+      : [];
+    const sceneGroupRuns = sceneGroupIds.length
+      ? await db
+          .select()
+          .from(sceneGroupRunsTable)
+          .where(inArray(sceneGroupRunsTable.sceneGroupId, sceneGroupIds))
+          .orderBy(sceneGroupRunsTable.createdAt, sceneGroupRunsTable.id)
+      : [];
+    const sceneGroupRunIds = sceneGroupRuns.map((run) => run.id);
+    const sceneFrameAssets = sceneGroupRunIds.length
+      ? await db
+          .select()
+          .from(sceneFrameAssetsTable)
+          .where(inArray(sceneFrameAssetsTable.sceneGroupRunId, sceneGroupRunIds))
+          .orderBy(sceneFrameAssetsTable.outputIndex, sceneFrameAssetsTable.createdAt, sceneFrameAssetsTable.id)
+      : [];
+
+    return {
+      generationJobs,
+      generatedAssets,
+      directorChats,
+      directorMessages,
+      sceneGroups,
+      sceneFrames,
+      sceneFrameReferences,
+      sceneGroupRuns,
+      sceneFrameAssets,
+    };
+  }
+
+  async function createThreadExportSnapshot(threadId) {
+    const [thread] = await db
+      .select()
+      .from(threadsTable)
+      .where(eq(threadsTable.id, threadId))
+      .limit(1);
+    if (!thread) {
+      throw new Error('Thread not found.');
+    }
+
+    const [project] = await db
+      .select()
+      .from(projectsTable)
+      .where(eq(projectsTable.id, thread.projectId))
+      .limit(1);
+    if (!project) {
+      throw new Error('Project not found.');
+    }
+
+    return {
+      scope: 'thread',
+      project,
+      threads: [thread],
+      ...(await collectThreadExportRecords([thread.id])),
+    };
+  }
+
+  async function createProjectExportSnapshot(projectId) {
+    const [project] = await db
+      .select()
+      .from(projectsTable)
+      .where(eq(projectsTable.id, projectId))
+      .limit(1);
+    if (!project) {
+      throw new Error('Project not found.');
+    }
+
+    const threads = await db
+      .select()
+      .from(threadsTable)
+      .where(eq(threadsTable.projectId, projectId))
+      .orderBy(threadsTable.createdAt, threadsTable.id);
+
+    return {
+      scope: 'project',
+      project,
+      threads,
+      ...(await collectThreadExportRecords(threads.map((thread) => thread.id))),
+    };
+  }
+
+  async function createReferenceExportSnapshot(payload) {
+    const category = normalizeReferenceCollectionCategory(payload?.category);
+    const collectionId = payload?.collectionId ?? null;
+    const environmentId = payload?.environmentId ?? collectionId ?? null;
+
+    if (category === 'environment') {
+      if (!environmentId) {
+        throw new Error('Environment reference export requires environmentId.');
+      }
+      const [environment] = await db
+        .select()
+        .from(environmentReferencesTable)
+        .where(eq(environmentReferencesTable.id, environmentId))
+        .limit(1);
+      if (!environment) {
+        throw new Error('Reference not found.');
+      }
+      const attachments = await db
+        .select()
+        .from(environmentReferenceAttachmentsTable)
+        .where(eq(environmentReferenceAttachmentsTable.environmentId, environmentId))
+        .orderBy(environmentReferenceAttachmentsTable.createdAt, environmentReferenceAttachmentsTable.id);
+      const references = attachments.map((attachment) => ({
+        id: attachment.id,
+        collectionId: environment.id,
+        environmentId: environment.id,
+        name: attachment.name,
+        title: environment.title,
+        description: attachment.description ?? environment.description ?? null,
+        mimeType: attachment.mimeType,
+        bytesBase64: attachment.bytesBase64,
+        createdAt: attachment.createdAt,
+        category: 'environment',
+      }));
+      return {
+        scope: 'reference',
+        reference: {
+          id: environment.id,
+          title: environment.title,
+          description: environment.description,
+          category: 'environment',
+          collectionId: environment.id,
+          environmentId: environment.id,
+          createdAt: environment.createdAt,
+        },
+        references,
+      };
+    }
+
+    if (collectionId) {
+      const collectionTable =
+        category === 'objects' ? objectReferenceCollectionsTable : characterReferenceCollectionsTable;
+      const attachmentTable =
+        category === 'objects' ? objectReferenceAttachmentsTable : characterReferenceAttachmentsTable;
+      const [collection] = await db
+        .select()
+        .from(collectionTable)
+        .where(eq(collectionTable.id, collectionId))
+        .limit(1);
+      if (!collection) {
+        throw new Error('Reference not found.');
+      }
+      const attachments = await db
+        .select()
+        .from(attachmentTable)
+        .where(eq(attachmentTable.collectionId, collectionId))
+        .orderBy(attachmentTable.createdAt, attachmentTable.id);
+      const references = attachments.map((attachment) => ({
+        id: attachment.id,
+        collectionId,
+        environmentId: null,
+        name: attachment.name,
+        title: collection.title,
+        description: attachment.description ?? collection.description ?? null,
+        mimeType: attachment.mimeType,
+        bytesBase64: attachment.bytesBase64,
+        createdAt: attachment.createdAt,
+        category,
+      }));
+      return {
+        scope: 'reference',
+        reference: {
+          id: collection.id,
+          title: collection.title,
+          description: collection.description,
+          category,
+          collectionId,
+          environmentId: null,
+          createdAt: collection.createdAt,
+        },
+        references,
+      };
+    }
+
+    const table = category === 'objects' ? objectReferencesTable : characterReferencesTable;
+    const [reference] = await db
+      .select()
+      .from(table)
+      .where(eq(table.id, payload?.id))
+      .limit(1);
+    if (!reference) {
+      throw new Error('Reference not found.');
+    }
+    return {
+      scope: 'reference',
+      reference: {
+        id: reference.id,
+        title: reference.title,
+        description: reference.description,
+        category,
+        collectionId: null,
+        environmentId: null,
+        createdAt: reference.createdAt,
+      },
+      references: [
+        {
+          ...reference,
+          category,
+          collectionId: null,
+          environmentId: null,
+        },
+      ],
+    };
+  }
+
+  async function exportProject(projectId, filePath, options = {}) {
+    const snapshot = await createProjectExportSnapshot(projectId);
+    return writeExportArchive({
+      filePath,
+      format: 'crenv',
+      snapshot,
+      exportedAt: options.exportedAt,
+      sourceApp: options.sourceApp,
+    });
+  }
+
+  async function exportThread(threadId, filePath, options = {}) {
+    const snapshot = await createThreadExportSnapshot(threadId);
+    return writeExportArchive({
+      filePath,
+      format: 'crenv',
+      snapshot,
+      exportedAt: options.exportedAt,
+      sourceApp: options.sourceApp,
+    });
+  }
+
+  async function exportReference(payload, filePath, options = {}) {
+    const snapshot = await createReferenceExportSnapshot(payload);
+    return writeExportArchive({
+      filePath,
+      format: 'refc',
+      snapshot,
+      exportedAt: options.exportedAt,
+      sourceApp: options.sourceApp,
+    });
+  }
+
+  async function importCrenvArchive(filePath, importOptions = {}) {
+    const { manifest, entries } = await readExportManifestFromArchive(filePath);
+    if (manifest.format !== 'crenv' || manifest.version !== 1) {
+      throw new Error('Unsupported .crenv archive.');
+    }
+
+    const snapshot = manifest.data;
+    if (!snapshot || (snapshot.scope !== 'project' && snapshot.scope !== 'thread')) {
+      throw new Error('Archive does not contain a project or thread export.');
+    }
+
+    const timestamp = new Date().toISOString();
+    const projectIdMap = new Map();
+    const threadIdMap = new Map();
+    const jobIdMap = new Map();
+    const assetIdMap = new Map();
+    const chatIdMap = new Map();
+    const messageIdMap = new Map();
+    const sceneGroupIdMap = new Map();
+    const sceneFrameIdMap = new Map();
+    const sceneRunIdMap = new Map();
+
+    let targetProjectId = null;
+    if (snapshot.scope === 'project') {
+      const importedProjectId = nanoid();
+      projectIdMap.set(snapshot.project.id, importedProjectId);
+      targetProjectId = importedProjectId;
+      await db.insert(projectsTable).values({
+        id: importedProjectId,
+        name: snapshot.project.name || 'Imported Project',
+        systemInstructions: snapshot.project.systemInstructions ?? '',
+        artStyle: snapshot.project.artStyle ?? '',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+    } else {
+      targetProjectId = importOptions.targetProjectId;
+      if (!targetProjectId) {
+        throw new Error('Thread import requires a target project.');
+      }
+      const [targetProject] = await db
+        .select({ id: projectsTable.id })
+        .from(projectsTable)
+        .where(eq(projectsTable.id, targetProjectId))
+        .limit(1);
+      if (!targetProject) {
+        throw new Error('Target project not found.');
+      }
+      if (snapshot.project?.id) {
+        projectIdMap.set(snapshot.project.id, targetProjectId);
+      }
+    }
+
+    const importedThreads = [];
+    for (const thread of snapshot.threads ?? []) {
+      const importedThreadId = nanoid();
+      threadIdMap.set(thread.id, importedThreadId);
+      importedThreads.push(importedThreadId);
+      await db.insert(threadsTable).values({
+        id: importedThreadId,
+        projectId: snapshot.scope === 'project' ? projectIdMap.get(thread.projectId) ?? targetProjectId : targetProjectId,
+        name: thread.name || 'Imported Thread',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+    }
+
+    for (const job of snapshot.generationJobs ?? []) {
+      const importedThreadId = threadIdMap.get(job.threadId);
+      if (!importedThreadId) continue;
+      const importedJobId = nanoid();
+      jobIdMap.set(job.id, importedJobId);
+      await db.insert(generationJobsTable).values({
+        id: importedJobId,
+        threadId: importedThreadId,
+        prompt: job.prompt ?? '',
+        requestedCount: Number.isInteger(job.requestedCount) ? job.requestedCount : 1,
+        status: job.status ?? 'succeeded',
+        workingDirectory: '',
+        manifestPath: '',
+        errorMessage: job.errorMessage ?? null,
+        provider: job.provider ?? null,
+        modelId: job.modelId ?? null,
+        modelLabel: job.modelLabel ?? null,
+        referenceImagesJson: job.referenceImagesJson ?? null,
+        durationMs: Number.isInteger(job.durationMs) ? job.durationMs : null,
+        providerThreadId: job.providerThreadId ?? null,
+        providerTurnId: job.providerTurnId ?? null,
+        runtime: job.runtime ?? 'imported',
+        importedCount: Number.isInteger(job.importedCount) ? job.importedCount : 0,
+        createdAt: job.createdAt ?? timestamp,
+        updatedAt: timestamp,
+      });
+    }
+
+    for (const asset of snapshot.generatedAssets ?? []) {
+      const importedJobId = jobIdMap.get(asset.jobId);
+      if (!importedJobId) continue;
+      const archiveAsset = findArchiveAsset(manifest, 'generated', asset.id);
+      const buffer = archiveAsset ? entries.get(archiveAsset.archivePath) : null;
+      if (!buffer) continue;
+      const importedAssetId = nanoid();
+      assetIdMap.set(asset.id, importedAssetId);
+      const imported = await writeImportedAssetBuffer({
+        buffer,
+        assetId: importedAssetId,
+        fileName: asset.fileName,
+        mimeType: asset.mimeType,
+        generatedImagesDir: paths.generatedImagesDir,
+      });
+      await db.insert(generatedAssetsTable).values({
+        id: importedAssetId,
+        jobId: importedJobId,
+        originalPath: asset.originalPath ?? '',
+        storedPath: imported.storedPath,
+        fileName: imported.fileName,
+        mimeType: asset.mimeType ?? 'image/png',
+        width: Number.isInteger(asset.width) ? asset.width : null,
+        height: Number.isInteger(asset.height) ? asset.height : null,
+        providerImageId: asset.providerImageId ?? null,
+        outputIndex: Number.isInteger(asset.outputIndex) ? asset.outputIndex : null,
+        reviewStatus: asset.reviewStatus ?? null,
+        createdAt: asset.createdAt ?? timestamp,
+      });
+    }
+
+    for (const chat of snapshot.directorChats ?? []) {
+      const importedThreadId = threadIdMap.get(chat.threadId);
+      if (!importedThreadId) continue;
+      const importedChatId = nanoid();
+      chatIdMap.set(chat.id, importedChatId);
+      await db.insert(directorChatsTable).values({
+        id: importedChatId,
+        threadId: importedThreadId,
+        title: chat.title ?? 'Imported chat',
+        providerThreadId: chat.providerThreadId ?? null,
+        providerRuntime: chat.providerRuntime ?? 'imported',
+        createdAt: chat.createdAt ?? timestamp,
+        updatedAt: chat.updatedAt ?? timestamp,
+      });
+    }
+
+    for (const message of snapshot.directorMessages ?? []) {
+      const importedChatId = chatIdMap.get(message.chatId);
+      if (!importedChatId) continue;
+      const importedMessageId = nanoid();
+      messageIdMap.set(message.id, importedMessageId);
+      await db.insert(directorMessagesTable).values({
+        id: importedMessageId,
+        chatId: importedChatId,
+        role: message.role ?? 'assistant',
+        contentMarkdown: message.contentMarkdown ?? '',
+        status: message.status ?? 'completed',
+        modelId: message.modelId ?? null,
+        modelLabel: message.modelLabel ?? null,
+        fastMode: message.fastMode ? 1 : 0,
+        referenceImagesJson: message.referenceImagesJson ?? null,
+        messageOrder: Number.isInteger(message.messageOrder) ? message.messageOrder : null,
+        providerTurnId: message.providerTurnId ?? null,
+        providerItemId: message.providerItemId ?? null,
+        createdAt: message.createdAt ?? timestamp,
+        updatedAt: message.updatedAt ?? timestamp,
+      });
+    }
+
+    for (const sceneGroup of snapshot.sceneGroups ?? []) {
+      const importedThreadId = threadIdMap.get(sceneGroup.threadId);
+      if (!importedThreadId) continue;
+      const importedSceneGroupId = nanoid();
+      sceneGroupIdMap.set(sceneGroup.id, importedSceneGroupId);
+      await db.insert(sceneGroupsTable).values({
+        id: importedSceneGroupId,
+        threadId: importedThreadId,
+        title: sceneGroup.title ?? 'Imported scene',
+        prompt: sceneGroup.prompt ?? '',
+        tocOrder: Number.isInteger(sceneGroup.tocOrder) ? sceneGroup.tocOrder : 1,
+        createdAt: sceneGroup.createdAt ?? timestamp,
+        updatedAt: sceneGroup.updatedAt ?? timestamp,
+      });
+    }
+
+    for (const sceneFrame of snapshot.sceneFrames ?? []) {
+      const importedSceneGroupId = sceneGroupIdMap.get(sceneFrame.sceneGroupId);
+      if (!importedSceneGroupId) continue;
+      const importedSceneFrameId = nanoid();
+      sceneFrameIdMap.set(sceneFrame.id, importedSceneFrameId);
+      await db.insert(sceneFramesTable).values({
+        id: importedSceneFrameId,
+        sceneGroupId: importedSceneGroupId,
+        title: sceneFrame.title ?? 'Imported frame',
+        prompt: sceneFrame.prompt ?? '',
+        frameOrder: Number.isInteger(sceneFrame.frameOrder) ? sceneFrame.frameOrder : 1,
+        createdAt: sceneFrame.createdAt ?? timestamp,
+        updatedAt: sceneFrame.updatedAt ?? timestamp,
+      });
+    }
+
+    for (const reference of snapshot.sceneFrameReferences ?? []) {
+      const importedSceneFrameId = sceneFrameIdMap.get(reference.sceneFrameId);
+      if (!importedSceneFrameId) continue;
+      await db.insert(sceneFrameReferencesTable).values({
+        id: nanoid(),
+        sceneFrameId: importedSceneFrameId,
+        referenceKind: reference.referenceKind ?? 'uploaded_attachment',
+        referenceId: reference.referenceId ?? null,
+        name: reference.name ?? 'reference.png',
+        mimeType: reference.mimeType ?? 'image/png',
+        bytesBase64: reference.bytesBase64 ?? '',
+        createdAt: reference.createdAt ?? timestamp,
+      });
+    }
+
+    for (const run of snapshot.sceneGroupRuns ?? []) {
+      const importedSceneGroupId = sceneGroupIdMap.get(run.sceneGroupId);
+      const importedThreadId = threadIdMap.get(run.threadId);
+      if (!importedSceneGroupId || !importedThreadId) continue;
+      const importedRunId = nanoid();
+      sceneRunIdMap.set(run.id, importedRunId);
+      await db.insert(sceneGroupRunsTable).values({
+        id: importedRunId,
+        sceneGroupId: importedSceneGroupId,
+        threadId: importedThreadId,
+        status: run.status ?? 'succeeded',
+        provider: run.provider ?? 'codex',
+        modelId: run.modelId ?? 'unknown',
+        modelLabel: run.modelLabel ?? 'Imported',
+        requestedFrameCount: Number.isInteger(run.requestedFrameCount) ? run.requestedFrameCount : 0,
+        errorMessage: run.errorMessage ?? null,
+        durationMs: Number.isInteger(run.durationMs) ? run.durationMs : null,
+        createdAt: run.createdAt ?? timestamp,
+        updatedAt: run.updatedAt ?? timestamp,
+      });
+    }
+
+    for (const asset of snapshot.sceneFrameAssets ?? []) {
+      const importedRunId = sceneRunIdMap.get(asset.sceneGroupRunId);
+      const importedSceneFrameId = sceneFrameIdMap.get(asset.sceneFrameId);
+      if (!importedRunId || !importedSceneFrameId) continue;
+      const archiveAsset = findArchiveAsset(manifest, 'scene', asset.id);
+      const buffer = archiveAsset ? entries.get(archiveAsset.archivePath) : null;
+      if (!buffer) continue;
+      const importedAssetId = nanoid();
+      const imported = await writeImportedAssetBuffer({
+        buffer,
+        assetId: importedAssetId,
+        fileName: asset.fileName,
+        mimeType: asset.mimeType,
+        generatedImagesDir: paths.generatedImagesDir,
+      });
+      await db.insert(sceneFrameAssetsTable).values({
+        id: importedAssetId,
+        sceneGroupRunId: importedRunId,
+        sceneFrameId: importedSceneFrameId,
+        outputIndex: Number.isInteger(asset.outputIndex) ? asset.outputIndex : 0,
+        originalPath: asset.originalPath ?? '',
+        storedPath: imported.storedPath,
+        fileName: imported.fileName,
+        mimeType: asset.mimeType ?? 'image/png',
+        width: Number.isInteger(asset.width) ? asset.width : null,
+        height: Number.isInteger(asset.height) ? asset.height : null,
+        createdAt: asset.createdAt ?? timestamp,
+      });
+    }
+
+    return {
+      status: 'imported',
+      scope: snapshot.scope,
+      projectId: targetProjectId,
+      threadIds: importedThreads,
+    };
+  }
+
+  async function importReferenceArchive(filePath) {
+    const { manifest } = await readExportManifestFromArchive(filePath);
+    if (manifest.format !== 'refc' || manifest.version !== 1) {
+      throw new Error('Unsupported .refc archive.');
+    }
+    const snapshot = manifest.data;
+    if (!snapshot || snapshot.scope !== 'reference' || !Array.isArray(snapshot.references)) {
+      throw new Error('Archive does not contain a reference export.');
+    }
+
+    const timestamp = new Date().toISOString();
+    const category = normalizeReferenceCollectionCategory(snapshot.reference?.category);
+    const title = snapshot.reference?.title || snapshot.references[0]?.title || 'Imported reference';
+    const description = snapshot.reference?.description ?? snapshot.references[0]?.description ?? null;
+
+    if (category === 'environment') {
+      const environmentId = nanoid();
+      await db.insert(environmentReferencesTable).values({
+        id: environmentId,
+        title,
+        description,
+        createdAt: timestamp,
+      });
+      const attachments = snapshot.references.map((reference) => ({
+        id: nanoid(),
+        environmentId,
+        name: reference.name ?? 'reference.png',
+        mimeType: reference.mimeType ?? 'image/png',
+        bytesBase64: reference.bytesBase64 ?? '',
+        description: reference.description ?? null,
+        createdAt: reference.createdAt ?? timestamp,
+      }));
+      if (attachments.length > 0) {
+        await db.insert(environmentReferenceAttachmentsTable).values(attachments);
+      }
+      return {
+        status: 'imported',
+        category: 'environment',
+        collectionId: environmentId,
+        environmentId,
+        referenceIds: attachments.map((attachment) => attachment.id),
+      };
+    }
+
+    const isCollection = Boolean(snapshot.reference?.collectionId) || snapshot.references.length > 1;
+    if (isCollection) {
+      const collectionId = nanoid();
+      const collectionTable =
+        category === 'objects' ? objectReferenceCollectionsTable : characterReferenceCollectionsTable;
+      const attachmentTable =
+        category === 'objects' ? objectReferenceAttachmentsTable : characterReferenceAttachmentsTable;
+      await db.insert(collectionTable).values({
+        id: collectionId,
+        title,
+        description,
+        createdAt: timestamp,
+      });
+      const attachments = snapshot.references.map((reference) => ({
+        id: nanoid(),
+        collectionId,
+        name: reference.name ?? 'reference.png',
+        mimeType: reference.mimeType ?? 'image/png',
+        bytesBase64: reference.bytesBase64 ?? '',
+        description: reference.description ?? null,
+        createdAt: reference.createdAt ?? timestamp,
+      }));
+      if (attachments.length > 0) {
+        await db.insert(attachmentTable).values(attachments);
+      }
+      return {
+        status: 'imported',
+        category,
+        collectionId,
+        environmentId: null,
+        referenceIds: attachments.map((attachment) => attachment.id),
+      };
+    }
+
+    const reference = snapshot.references[0];
+    if (!reference) {
+      throw new Error('Reference archive is empty.');
+    }
+    const referenceId = nanoid();
+    const table = category === 'objects' ? objectReferencesTable : characterReferencesTable;
+    await db.insert(table).values({
+      id: referenceId,
+      name: reference.name ?? 'reference.png',
+      title,
+      description,
+      mimeType: reference.mimeType ?? 'image/png',
+      bytesBase64: reference.bytesBase64 ?? '',
+      createdAt: timestamp,
+    });
+    return {
+      status: 'imported',
+      category,
+      collectionId: null,
+      environmentId: null,
+      referenceIds: [referenceId],
+    };
   }
 
   async function createReference(payload) {
@@ -4169,6 +5105,14 @@ async function createGenerationStore(userDataDir, options = {}) {
     renameThread,
     deleteProject,
     deleteThread,
+    exportProject,
+    exportThread,
+    exportReference,
+    importCrenvArchive,
+    importReferenceArchive,
+    createProjectExportSnapshot,
+    createThreadExportSnapshot,
+    createReferenceExportSnapshot,
     ensureProjectThreadWorkspace,
     generateImages,
     getGeneratedImage,
@@ -5855,5 +6799,6 @@ module.exports = {
     truncateDirectorChatTitle,
     toGenerationReferenceMetadata,
     toRendererAsset,
+    writeExportArchive,
   },
 };

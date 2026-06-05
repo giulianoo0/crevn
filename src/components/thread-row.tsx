@@ -15,6 +15,7 @@ export function ThreadRow({
   isSelected = false,
   onClick,
   onRename,
+  onExport,
   onDelete,
 }: {
   id: string;
@@ -24,6 +25,7 @@ export function ThreadRow({
   isSelected?: boolean;
   onClick: (id: string) => void;
   onRename: (id: string) => void;
+  onExport?: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
   return (
@@ -55,6 +57,7 @@ export function ThreadRow({
       </ContextMenuTrigger>
       <ContextMenuContent>
         <ContextMenuItem onClick={() => onRename(id)}>Rename thread</ContextMenuItem>
+        {onExport ? <ContextMenuItem onClick={() => onExport(id)}>Export thread...</ContextMenuItem> : null}
         <ContextMenuSeparator />
         <ContextMenuItem
           className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"

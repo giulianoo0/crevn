@@ -1,5 +1,9 @@
 const path = require('node:path');
 const fsp = require('node:fs/promises');
+const {
+  buildCodexThreadSandboxParams,
+  buildCodexTurnSandboxParams,
+} = require('./codexSandboxPolicy.cjs');
 
 const IMAGE_READY_PREFIX = 'CRENV_IMAGE_READY ';
 const IMAGE_READY_SCHEMA = 'crenv.image.ready.v1';
@@ -187,7 +191,7 @@ async function runCodexImageAppServerJob({
   const opened = await client.startThread({
     cwd: workingDirectory,
     approvalPolicy: 'never',
-    sandbox: 'workspace-write',
+    ...buildCodexThreadSandboxParams(),
     ...(model ? { model } : {}),
     ...(fastMode ? { serviceTier: 'fast' } : {}),
   });
@@ -349,7 +353,7 @@ async function runCodexImageAppServerJob({
       threadId: providerThreadId,
       input: [{ type: 'text', text: prompt }],
       approvalPolicy: 'never',
-      sandboxPolicy: { type: 'workspaceWrite' },
+      ...buildCodexTurnSandboxParams(),
       ...(model ? { model } : {}),
       ...(fastMode ? { serviceTier: 'fast' } : {}),
     });

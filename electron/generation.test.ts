@@ -872,4 +872,634 @@ describe('generation codex runner environment', () => {
       store.close();
     }
   });
+
+  it('builds thread export snapshots without sibling thread data', async () => {
+    const userDataDir = await makeTempUserDataDir();
+    const store = await generationModule.createGenerationStore(userDataDir, {
+      seedCodexSkills: false,
+      warmCodexAppServer: false,
+    });
+    const client = createClient({ url: `file:${path.join(userDataDir, 'crenv.sqlite')}` });
+
+    try {
+      const workspace = await store.createProject('Export Project');
+      const siblingThread = await store.createThread(workspace.project.id);
+      await store.renameThread(workspace.thread.id, 'Hero selects');
+      await store.renameThread(siblingThread.id, 'Sibling selects');
+
+      await client.execute({
+        sql: `
+          INSERT INTO generation_jobs (
+            id,
+            thread_id,
+            prompt,
+            requested_count,
+            status,
+            working_directory,
+            manifest_path,
+            error_message,
+            provider,
+            model_id,
+            model_label,
+            reference_images_json,
+            duration_ms,
+            provider_thread_id,
+            provider_turn_id,
+            runtime,
+            imported_count,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        args: [
+          'job_thread',
+          workspace.thread.id,
+          'hero prompt',
+          1,
+          'succeeded',
+          '/tmp/job-thread',
+          '/tmp/job-thread/manifest.json',
+          null,
+          'codex',
+          'codex-gpt-5-4-mini',
+          'Codex / GPT-5.4 Mini',
+          null,
+          1200,
+          'provider-thread',
+          'provider-turn',
+          'codex-app-server',
+          1,
+          '2026-06-05T10:00:00.000Z',
+          '2026-06-05T10:00:02.000Z',
+        ],
+      });
+      await client.execute({
+        sql: `
+          INSERT INTO generated_assets (
+            id,
+            job_id,
+            original_path,
+            stored_path,
+            file_name,
+            mime_type,
+            width,
+            height,
+            provider_image_id,
+            output_index,
+            review_status,
+            created_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        args: [
+          'asset_thread',
+          'job_thread',
+          '/tmp/job-thread/output/hero.png',
+          path.join(userDataDir, 'generated-images', 'hero.png'),
+          'hero.png',
+          'image/png',
+          1024,
+          1024,
+          'provider-image',
+          0,
+          'selected',
+          '2026-06-05T10:00:03.000Z',
+        ],
+      });
+      await client.execute({
+        sql: `
+          INSERT INTO generation_jobs (
+            id,
+            thread_id,
+            prompt,
+            requested_count,
+            status,
+            working_directory,
+            manifest_path,
+            error_message,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        args: [
+          'job_sibling',
+          siblingThread.id,
+          'sibling prompt',
+          1,
+          'succeeded',
+          '/tmp/job-sibling',
+          '/tmp/job-sibling/manifest.json',
+          null,
+          '2026-06-05T10:01:00.000Z',
+          '2026-06-05T10:01:02.000Z',
+        ],
+      });
+
+      const chat = await store.createDirectorChat(workspace.thread.id);
+      await client.execute({
+        sql: `
+          INSERT INTO director_messages (
+            id,
+            chat_id,
+            role,
+            content_markdown,
+            status,
+            fast_mode,
+            message_order,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        args: [
+          'director_message_thread',
+          chat.id,
+          'user',
+          'Make this scene exportable.',
+          'completed',
+          0,
+          1,
+          '2026-06-05T10:02:00.000Z',
+          '2026-06-05T10:02:00.000Z',
+        ],
+      });
+
+      const snapshot = await store.createThreadExportSnapshot(workspace.thread.id);
+
+      expect(snapshot.scope).toBe('thread');
+      expect(snapshot.project.id).toBe(workspace.project.id);
+      expect(snapshot.threads.map((thread) => thread.id)).toEqual([workspace.thread.id]);
+      expect(snapshot.generationJobs.map((job) => job.id)).toEqual(['job_thread']);
+      expect(snapshot.generatedAssets.map((asset) => asset.id)).toEqual(['asset_thread']);
+      expect(snapshot.directorChats.map((snapshotChat) => snapshotChat.id)).toEqual([chat.id]);
+      expect(snapshot.directorMessages.map((message) => message.id)).toEqual(['director_message_thread']);
+      expect(snapshot.generationJobs.some((job) => job.id === 'job_sibling')).toBe(false);
+    } finally {
+      client.close();
+      store.close();
+    }
+  });
+
+  it('builds project export snapshots with all project threads', async () => {
+    const userDataDir = await makeTempUserDataDir();
+    const store = await generationModule.createGenerationStore(userDataDir, {
+      seedCodexSkills: false,
+      warmCodexAppServer: false,
+    });
+    const client = createClient({ url: `file:${path.join(userDataDir, 'crenv.sqlite')}` });
+
+    try {
+      const workspace = await store.createProject('Project Export');
+      const secondThread = await store.createThread(workspace.project.id);
+      await client.execute({
+        sql: `
+          INSERT INTO generation_jobs (
+            id,
+            thread_id,
+            prompt,
+            requested_count,
+            status,
+            working_directory,
+            manifest_path,
+            error_message,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        args: [
+          'job_first_thread',
+          workspace.thread.id,
+          'first thread prompt',
+          1,
+          'succeeded',
+          '/tmp/job-first',
+          '/tmp/job-first/manifest.json',
+          null,
+          '2026-06-05T10:00:00.000Z',
+          '2026-06-05T10:00:01.000Z',
+        ],
+      });
+      await client.execute({
+        sql: `
+          INSERT INTO generation_jobs (
+            id,
+            thread_id,
+            prompt,
+            requested_count,
+            status,
+            working_directory,
+            manifest_path,
+            error_message,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        args: [
+          'job_second_thread',
+          secondThread.id,
+          'second thread prompt',
+          1,
+          'succeeded',
+          '/tmp/job-second',
+          '/tmp/job-second/manifest.json',
+          null,
+          '2026-06-05T10:01:00.000Z',
+          '2026-06-05T10:01:01.000Z',
+        ],
+      });
+
+      const snapshot = await store.createProjectExportSnapshot(workspace.project.id);
+
+      expect(snapshot.scope).toBe('project');
+      expect(snapshot.project.id).toBe(workspace.project.id);
+      expect(snapshot.threads.map((thread) => thread.id).sort()).toEqual(
+        [workspace.thread.id, secondThread.id].sort()
+      );
+      expect(snapshot.generationJobs.map((job) => job.id).sort()).toEqual([
+        'job_first_thread',
+        'job_second_thread',
+      ]);
+    } finally {
+      client.close();
+      store.close();
+    }
+  }, 15_000);
+
+  it('builds reference export snapshots for only the clicked reference group', async () => {
+    const userDataDir = await makeTempUserDataDir();
+    const store = await generationModule.createGenerationStore(userDataDir, {
+      seedCodexSkills: false,
+      warmCodexAppServer: false,
+    });
+
+    try {
+      const [firstHero, secondHero] = await store.createReferenceCollection({
+        category: 'characters',
+        title: 'Hero Pack',
+        description: 'Main character continuity.',
+        attachments: [
+          {
+            name: 'hero-front.png',
+            mimeType: 'image/png',
+            bytesBase64: Buffer.from('front').toString('base64'),
+            description: 'Front view',
+          },
+          {
+            name: 'hero-side.png',
+            mimeType: 'image/png',
+            bytesBase64: Buffer.from('side').toString('base64'),
+            description: 'Side view',
+          },
+        ],
+      });
+      await store.createReferenceCollection({
+        category: 'characters',
+        title: 'Villain Pack',
+        description: 'Should not export.',
+        attachments: [
+          {
+            name: 'villain.png',
+            mimeType: 'image/png',
+            bytesBase64: Buffer.from('villain').toString('base64'),
+          },
+        ],
+      });
+
+      const snapshot = await store.createReferenceExportSnapshot({
+        id: firstHero.id,
+        category: 'characters',
+        collectionId: firstHero.collectionId,
+      });
+
+      expect(snapshot.scope).toBe('reference');
+      expect(snapshot.reference.title).toBe('Hero Pack');
+      expect(snapshot.reference.category).toBe('characters');
+      expect(snapshot.reference.collectionId).toBe(firstHero.collectionId);
+      expect(snapshot.references.map((reference) => reference.id).sort()).toEqual(
+        [firstHero.id, secondHero.id].sort()
+      );
+      expect(snapshot.references.map((reference) => reference.name).sort()).toEqual([
+        'hero-front.png',
+        'hero-side.png',
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('writes export archives with manifest entries and missing stored assets', async () => {
+    const archivePath = path.join(await makeTempUserDataDir(), 'thread-export.crenv');
+    const snapshot = {
+      scope: 'thread',
+      project: {
+        id: 'project_1',
+        name: 'Export Project',
+        systemInstructions: '',
+        artStyle: '',
+        createdAt: '2026-06-05T10:00:00.000Z',
+        updatedAt: '2026-06-05T10:00:00.000Z',
+      },
+      threads: [
+        {
+          id: 'thread_1',
+          projectId: 'project_1',
+          name: 'Hero selects',
+          createdAt: '2026-06-05T10:00:01.000Z',
+          updatedAt: '2026-06-05T10:00:01.000Z',
+        },
+      ],
+      generationJobs: [],
+      generatedAssets: [
+        {
+          id: 'asset_missing',
+          jobId: 'job_1',
+          originalPath: '/tmp/missing.png',
+          storedPath: path.join(path.dirname(archivePath), 'missing.png'),
+          fileName: 'missing.png',
+          mimeType: 'image/png',
+          width: 1024,
+          height: 1024,
+          createdAt: '2026-06-05T10:00:02.000Z',
+        },
+      ],
+      directorChats: [],
+      directorMessages: [],
+      sceneGroups: [],
+      sceneFrames: [],
+      sceneFrameReferences: [],
+      sceneGroupRuns: [],
+      sceneFrameAssets: [],
+    };
+
+    const result = await generationModule.__test__.writeExportArchive({
+      filePath: archivePath,
+      format: 'crenv',
+      snapshot,
+      exportedAt: '2026-06-05T12:00:00.000Z',
+      sourceApp: { name: 'crevn', version: '0.1.5' },
+    });
+
+    const archiveBytes = await fsp.readFile(archivePath);
+
+    expect(result).toEqual({
+      filePath: archivePath,
+      missingAssets: [
+        {
+          id: 'asset_missing',
+          type: 'generated',
+          sourcePath: snapshot.generatedAssets[0].storedPath,
+          archivePath: 'assets/generated/asset_missing-missing.png',
+        },
+      ],
+    });
+    expect(archiveBytes.subarray(0, 2).toString('utf8')).toBe('PK');
+  }, 15_000);
+
+  it('imports a project export archive as a new project with remapped records', async () => {
+    const userDataDir = await makeTempUserDataDir();
+    const sourceAssetPath = path.join(userDataDir, 'source-asset.png');
+    const archivePath = path.join(userDataDir, 'project-import.crenv');
+    await fsp.writeFile(sourceAssetPath, Buffer.from('png-bytes'));
+
+    await generationModule.__test__.writeExportArchive({
+      filePath: archivePath,
+      format: 'crenv',
+      exportedAt: '2026-06-05T12:00:00.000Z',
+      sourceApp: { name: 'crevn', version: '0.1.5' },
+      snapshot: {
+        scope: 'project',
+        project: {
+          id: 'old_project',
+          name: 'Imported Project',
+          systemInstructions: 'Keep it cinematic.',
+          artStyle: 'editorial',
+          createdAt: '2026-06-05T10:00:00.000Z',
+          updatedAt: '2026-06-05T10:00:00.000Z',
+        },
+        threads: [
+          {
+            id: 'old_thread',
+            projectId: 'old_project',
+            name: 'Imported Thread',
+            createdAt: '2026-06-05T10:01:00.000Z',
+            updatedAt: '2026-06-05T10:01:00.000Z',
+          },
+        ],
+        generationJobs: [
+          {
+            id: 'old_job',
+            threadId: 'old_thread',
+            prompt: 'Imported prompt',
+            requestedCount: 1,
+            status: 'succeeded',
+            workingDirectory: '/tmp/old-job',
+            manifestPath: '/tmp/old-job/manifest.json',
+            errorMessage: null,
+            provider: 'codex',
+            modelId: 'codex-gpt-5-4-mini',
+            modelLabel: 'Codex / GPT-5.4 Mini',
+            referenceImagesJson: null,
+            durationMs: 1000,
+            providerThreadId: null,
+            providerTurnId: null,
+            runtime: 'codex-app-server',
+            importedCount: 1,
+            createdAt: '2026-06-05T10:02:00.000Z',
+            updatedAt: '2026-06-05T10:02:01.000Z',
+          },
+        ],
+        generatedAssets: [
+          {
+            id: 'old_asset',
+            jobId: 'old_job',
+            originalPath: '/tmp/old-job/output/image.png',
+            storedPath: sourceAssetPath,
+            fileName: 'image.png',
+            mimeType: 'image/png',
+            width: 1024,
+            height: 1024,
+            createdAt: '2026-06-05T10:02:02.000Z',
+          },
+        ],
+        directorChats: [],
+        directorMessages: [],
+        sceneGroups: [],
+        sceneFrames: [],
+        sceneFrameReferences: [],
+        sceneGroupRuns: [],
+        sceneFrameAssets: [],
+      },
+    });
+
+    const store = await generationModule.createGenerationStore(path.join(userDataDir, 'target'), {
+      seedCodexSkills: false,
+      warmCodexAppServer: false,
+    });
+
+    try {
+      const result = await store.importCrenvArchive(archivePath);
+      const projects = await store.listProjectsWithThreads();
+      const importedProject = projects.find((project) => project.id === result.projectId);
+      const importedThread = importedProject?.threads[0];
+      const importedImages = importedThread ? await store.listGeneratedImages(importedThread.id) : [];
+
+      expect(result.status).toBe('imported');
+      expect(result.scope).toBe('project');
+      expect(importedProject).toEqual(
+        expect.objectContaining({
+          id: expect.not.stringMatching(/^old_project$/),
+          name: 'Imported Project',
+          systemInstructions: 'Keep it cinematic.',
+          artStyle: 'editorial',
+        })
+      );
+      expect(importedThread).toEqual(
+        expect.objectContaining({
+          id: expect.not.stringMatching(/^old_thread$/),
+          name: 'Imported Thread',
+          projectId: result.projectId,
+        })
+      );
+      expect(importedImages).toEqual([
+        expect.objectContaining({
+          id: expect.not.stringMatching(/^old_asset$/),
+          fileName: expect.stringMatching(/\.png$/),
+          prompt: 'Imported prompt',
+        }),
+      ]);
+    } finally {
+      store.close();
+    }
+  }, 15_000);
+
+  it('imports a thread export archive into a target project', async () => {
+    const userDataDir = await makeTempUserDataDir();
+    const archivePath = path.join(userDataDir, 'thread-import.crenv');
+    await generationModule.__test__.writeExportArchive({
+      filePath: archivePath,
+      format: 'crenv',
+      exportedAt: '2026-06-05T12:00:00.000Z',
+      sourceApp: { name: 'crevn', version: '0.1.5' },
+      snapshot: {
+        scope: 'thread',
+        project: {
+          id: 'old_project',
+          name: 'Source Project',
+          systemInstructions: '',
+          artStyle: '',
+          createdAt: '2026-06-05T10:00:00.000Z',
+          updatedAt: '2026-06-05T10:00:00.000Z',
+        },
+        threads: [
+          {
+            id: 'old_thread',
+            projectId: 'old_project',
+            name: 'Imported Thread Only',
+            createdAt: '2026-06-05T10:01:00.000Z',
+            updatedAt: '2026-06-05T10:01:00.000Z',
+          },
+        ],
+        generationJobs: [],
+        generatedAssets: [],
+        directorChats: [],
+        directorMessages: [],
+        sceneGroups: [],
+        sceneFrames: [],
+        sceneFrameReferences: [],
+        sceneGroupRuns: [],
+        sceneFrameAssets: [],
+      },
+    });
+
+    const store = await generationModule.createGenerationStore(path.join(userDataDir, 'target'), {
+      seedCodexSkills: false,
+      warmCodexAppServer: false,
+    });
+
+    try {
+      const workspace = await store.createProject('Target Project');
+      const result = await store.importCrenvArchive(archivePath, { targetProjectId: workspace.project.id });
+      const projects = await store.listProjectsWithThreads();
+      const targetProject = projects.find((project) => project.id === workspace.project.id);
+
+      expect(result.status).toBe('imported');
+      expect(result.scope).toBe('thread');
+      expect(result.projectId).toBe(workspace.project.id);
+      expect(targetProject?.threads.some((thread) => thread.name === 'Imported Thread Only')).toBe(true);
+    } finally {
+      store.close();
+    }
+  }, 15_000);
+
+  it('imports a reference export archive as a new reference group', async () => {
+    const userDataDir = await makeTempUserDataDir();
+    const archivePath = path.join(userDataDir, 'reference-import.refc');
+    await generationModule.__test__.writeExportArchive({
+      filePath: archivePath,
+      format: 'refc',
+      exportedAt: '2026-06-05T12:00:00.000Z',
+      sourceApp: { name: 'crevn', version: '0.1.5' },
+      snapshot: {
+        scope: 'reference',
+        reference: {
+          id: 'old_collection',
+          title: 'Imported Hero',
+          description: 'Imported hero continuity.',
+          category: 'characters',
+          collectionId: 'old_collection',
+          environmentId: null,
+          createdAt: '2026-06-05T10:00:00.000Z',
+        },
+        references: [
+          {
+            id: 'old_reference_front',
+            collectionId: 'old_collection',
+            environmentId: null,
+            name: 'front.png',
+            title: 'Imported Hero',
+            description: 'Front view',
+            mimeType: 'image/png',
+            bytesBase64: Buffer.from('front').toString('base64'),
+            createdAt: '2026-06-05T10:01:00.000Z',
+            category: 'characters',
+          },
+          {
+            id: 'old_reference_side',
+            collectionId: 'old_collection',
+            environmentId: null,
+            name: 'side.png',
+            title: 'Imported Hero',
+            description: 'Side view',
+            mimeType: 'image/png',
+            bytesBase64: Buffer.from('side').toString('base64'),
+            createdAt: '2026-06-05T10:02:00.000Z',
+            category: 'characters',
+          },
+        ],
+      },
+    });
+
+    const store = await generationModule.createGenerationStore(path.join(userDataDir, 'target'), {
+      seedCodexSkills: false,
+      warmCodexAppServer: false,
+    });
+
+    try {
+      const result = await store.importReferenceArchive(archivePath);
+      const references = await store.listReferences();
+      const imported = references.filter((reference) => reference.collectionId === result.collectionId);
+
+      expect(result.status).toBe('imported');
+      expect(result.category).toBe('characters');
+      expect(result.collectionId).not.toBe('old_collection');
+      expect(imported.map((reference) => reference.name).sort()).toEqual(['front.png', 'side.png']);
+      expect(imported.every((reference) => reference.id.startsWith('old_reference'))).toBe(false);
+    } finally {
+      store.close();
+    }
+  }, 15_000);
 });
