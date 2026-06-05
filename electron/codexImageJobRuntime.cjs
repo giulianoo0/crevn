@@ -4,6 +4,7 @@ const fsp = require('node:fs/promises');
 const IMAGE_READY_PREFIX = 'CRENV_IMAGE_READY ';
 const IMAGE_READY_SCHEMA = 'crenv.image.ready.v1';
 const TRACE_IMAGE_RUNTIME = process.env.CRENV_CODEX_APP_SERVER_TRACE === '1';
+const READY_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 
 function parseCrenvImageReadyLine(line) {
   const text = String(line ?? '').trim();
@@ -26,7 +27,7 @@ function validateCrenvImageReadyEvent(event, context) {
   if (!event || event.schema !== IMAGE_READY_SCHEMA) {
     return { ok: false, errorMessage: 'Invalid ready-event schema.' };
   }
-  if (event.jobId !== context.jobId) {
+  if (event.jobId !== null && event.jobId !== context.jobId) {
     return { ok: false, errorMessage: 'Ready event belongs to a different job.' };
   }
   if (typeof event.imageId !== 'string' || !event.imageId.trim()) {
@@ -42,16 +43,21 @@ function validateCrenvImageReadyEvent(event, context) {
     return { ok: false, errorMessage: 'Ready event is missing image path.' };
   }
 
+  const absoluteOutputDirectory = path.resolve(context.outputDirectory);
+  const readyDirectory = path.join(absoluteOutputDirectory, 'ready');
   const normalizedPath = event.path.replace(/\\/g, '/');
-  if (!normalizedPath.startsWith('output/ready/')) {
+  let absolutePath;
+
+  if (normalizedPath.startsWith('output/ready/')) {
+    const relativeToOutput = normalizedPath.slice('output/'.length);
+    absolutePath = path.resolve(absoluteOutputDirectory, relativeToOutput);
+  } else if (path.isAbsolute(event.path)) {
+    absolutePath = path.resolve(event.path);
+  } else {
     return { ok: false, errorMessage: 'Ready image must be under output/ready.' };
   }
 
-  const absoluteOutputDirectory = path.resolve(context.outputDirectory);
-  const relativeToOutput = normalizedPath.slice('output/'.length);
-  const absolutePath = path.resolve(absoluteOutputDirectory, relativeToOutput);
-
-  if (!isPathInside(absolutePath, path.join(absoluteOutputDirectory, 'ready'))) {
+  if (!isPathInside(absolutePath, readyDirectory)) {
     return { ok: false, errorMessage: 'Ready image path escapes output/ready.' };
   }
 
@@ -77,6 +83,7 @@ function buildCrenvImageReadyPromptContract({ jobId, outputDirectory, requestedC
     '- Move only accepted images into output/ready.',
     '- For every accepted image, write output/ready/<imageId>.json with the same JSON object you emit.',
     '- Append each accepted-image JSON object to output/events.jsonl.',
+    '- In every event, set path to a relative forward-slash path like output/ready/000.png, never a Windows backslash path.',
     '- Print exactly one single-line event for each accepted image:',
     `CRENV_IMAGE_READY {"schema":"${IMAGE_READY_SCHEMA}","jobId":"${jobId}","imageId":"unique-image-id","outputIndex":0,"path":"output/ready/000.png","reviewStatus":"accepted"}`,
     '- No final manifest is required.',
@@ -87,6 +94,7 @@ async function discoverCrenvImageReadyEvents(outputDirectory) {
   const events = [];
   const readyDirectory = path.join(outputDirectory, 'ready');
   const eventsPath = path.join(outputDirectory, 'events.jsonl');
+  const referencedPaths = new Set();
 
   try {
     const entries = await fsp.readdir(readyDirectory);
@@ -98,6 +106,9 @@ async function discoverCrenvImageReadyEvents(outputDirectory) {
         const event = JSON.parse(await fsp.readFile(path.join(readyDirectory, entry), 'utf8'));
         if (event?.schema === IMAGE_READY_SCHEMA) {
           events.push(event);
+          if (typeof event.path === 'string') {
+            referencedPaths.add(normalizeReadyEventPath(event.path));
+          }
         }
       } catch {}
     }
@@ -113,12 +124,46 @@ async function discoverCrenvImageReadyEvents(outputDirectory) {
         const event = JSON.parse(line);
         if (event?.schema === IMAGE_READY_SCHEMA) {
           events.push(event);
+          if (typeof event.path === 'string') {
+            referencedPaths.add(normalizeReadyEventPath(event.path));
+          }
         }
       } catch {}
     }
   } catch {}
 
+  try {
+    const entries = await fsp.readdir(readyDirectory, { withFileTypes: true });
+    let fallbackIndex = events.length;
+    for (const entry of entries) {
+      if (!entry.isFile()) {
+        continue;
+      }
+      const extension = path.extname(entry.name).toLowerCase();
+      if (!READY_IMAGE_EXTENSIONS.has(extension)) {
+        continue;
+      }
+      const relativePath = `output/ready/${entry.name}`;
+      if (referencedPaths.has(normalizeReadyEventPath(relativePath))) {
+        continue;
+      }
+      events.push({
+        schema: IMAGE_READY_SCHEMA,
+        jobId: null,
+        imageId: path.basename(entry.name, extension) || `ready-${fallbackIndex + 1}`,
+        outputIndex: fallbackIndex,
+        path: relativePath,
+        reviewStatus: 'accepted',
+      });
+      fallbackIndex += 1;
+    }
+  } catch {}
+
   return events;
+}
+
+function normalizeReadyEventPath(value) {
+  return String(value ?? '').replace(/\\/g, '/');
 }
 
 async function runCodexImageAppServerJob({
@@ -158,6 +203,7 @@ async function runCodexImageAppServerJob({
   let hasDispatchedScenePlan = false;
   let cancelableRunRegistered = false;
   const seenImageIds = new Set();
+  const seenAbsolutePaths = new Set();
   const readyEventPromises = [];
   const textBuffer = { value: '' };
   let settle;
@@ -194,7 +240,13 @@ async function runCodexImageAppServerJob({
       console.info(`[crenv:codex:${jobId}] ignored duplicate CRENV_IMAGE_READY imageId=${event.imageId}`);
       return;
     }
+    const absolutePathKey = path.resolve(validation.absolutePath);
+    if (seenAbsolutePaths.has(absolutePathKey)) {
+      console.info(`[crenv:codex:${jobId}] ignored duplicate CRENV_IMAGE_READY path=${validation.absolutePath}`);
+      return;
+    }
     seenImageIds.add(event.imageId);
+    seenAbsolutePaths.add(absolutePathKey);
     console.info(
       `[crenv:codex:${jobId}] accepted CRENV_IMAGE_READY imageId=${event.imageId} outputIndex=${event.outputIndex}`
     );

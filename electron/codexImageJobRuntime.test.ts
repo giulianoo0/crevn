@@ -1,13 +1,31 @@
 import { createRequire } from 'node:module';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
 const {
+  discoverCrenvImageReadyEvents,
   parseCrenvImageReadyLine,
   validateCrenvImageReadyEvent,
   buildCrenvImageReadyPromptContract,
 } = require('./codexImageJobRuntime.cjs');
+
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  for (const dir of tempDirs.splice(0)) {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+async function makeTempOutputDirectory() {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'crenv-image-runtime-'));
+  tempDirs.push(root);
+  return path.join(root, 'output');
+}
 
 describe('Codex image job ready events', () => {
   it('parses a single CRENV_IMAGE_READY line', () => {
@@ -41,6 +59,28 @@ describe('Codex image job ready events', () => {
         imageId: 'img-1',
         outputIndex: 0,
         path: 'output/ready/000.png',
+        reviewStatus: 'accepted',
+      },
+      {
+        jobId: 'job-1',
+        outputDirectory: '/tmp/job/output',
+      }
+    );
+
+    expect(validation).toEqual({
+      ok: true,
+      absolutePath: '/tmp/job/output/ready/000.png',
+    });
+  });
+
+  it('accepts fallback events discovered from ready image files', () => {
+    const validation = validateCrenvImageReadyEvent(
+      {
+        schema: 'crenv.image.ready.v1',
+        jobId: null,
+        imageId: '000',
+        outputIndex: 0,
+        path: 'output\\ready\\000.png',
         reviewStatus: 'accepted',
       },
       {
@@ -110,6 +150,28 @@ describe('Codex image job ready events', () => {
     expect(contract).toContain('output/tmp');
     expect(contract).toContain('output/ready');
     expect(contract).toContain('events.jsonl');
+    expect(contract).toContain('relative forward-slash path');
     expect(contract).toContain('No final manifest is required.');
+  });
+
+  it('discovers ready image files when sidecar events are missing or malformed', async () => {
+    const outputDirectory = await makeTempOutputDirectory();
+    const readyDirectory = path.join(outputDirectory, 'ready');
+    await fsp.mkdir(readyDirectory, { recursive: true });
+    await fsp.writeFile(path.join(readyDirectory, '000.png'), 'fake image bytes');
+    await fsp.writeFile(path.join(readyDirectory, '000.json'), '{"schema":"crenv.image.ready.v1",bad');
+
+    const events = await discoverCrenvImageReadyEvents(outputDirectory);
+
+    expect(events).toEqual([
+      {
+        schema: 'crenv.image.ready.v1',
+        jobId: null,
+        imageId: '000',
+        outputIndex: 0,
+        path: 'output/ready/000.png',
+        reviewStatus: 'accepted',
+      },
+    ]);
   });
 });

@@ -1,12 +1,15 @@
 const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const fs = require('node:fs/promises');
 const path = require('path');
 const { pathToFileURL } = require('node:url');
+const { createAutoUpdateManager } = require('./autoUpdate.cjs');
 const { createAppLogger, installConsoleFileLogger } = require('./appLogger.cjs');
 const { createGenerationStore, getAppDataPaths } = require('./generation.cjs');
 
 let mainWindow = null;
 let generationStore = null;
+let autoUpdateManager = null;
 const ASSET_PROTOCOL = 'crenv-asset';
 const appLogger = createAppLogger();
 
@@ -334,8 +337,27 @@ app.whenReady().then(async () => {
     await generationStore.deleteGeneratedImage(imageId);
   });
 
+  autoUpdateManager = createAutoUpdateManager({
+    app,
+    autoUpdater,
+    getWindow: () => mainWindow,
+  });
+
+  ipcMain.handle('app:getUpdateStatus', async () => {
+    return autoUpdateManager.getStatus();
+  });
+
+  ipcMain.handle('app:checkForUpdates', async () => {
+    return autoUpdateManager.checkNow();
+  });
+
+  ipcMain.handle('app:installUpdate', async () => {
+    return autoUpdateManager.installNow();
+  });
+
   createWindow();
   console.info('[crenv:app] main window created');
+  autoUpdateManager.start();
 
   app.on('activate', () => {
     console.info('[crenv:app] activate');
@@ -350,5 +372,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   console.info('[crenv:app] before-quit');
+  autoUpdateManager?.dispose();
   generationStore?.close();
 });

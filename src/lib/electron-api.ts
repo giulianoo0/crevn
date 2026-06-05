@@ -369,9 +369,39 @@ export interface SceneGroupRecord {
   runs: SceneGroupRunRecord[];
 }
 
+export type UpdateStatusState =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'not_available'
+  | 'downloading'
+  | 'downloaded'
+  | 'installing'
+  | 'disabled'
+  | 'error';
+
+export interface UpdateStatus {
+  state: UpdateStatusState;
+  message: string;
+  version: string | null;
+  percent: number | null;
+  errorMessage: string | null;
+}
+
+const fallbackUpdateStatus: UpdateStatus = {
+  state: 'disabled',
+  message: 'Electron API bridge is unavailable.',
+  version: null,
+  percent: null,
+  errorMessage: null,
+};
+
 function getElectronApi() {
   if (!window.electronAPI) {
     return {
+      getUpdateStatus: async () => fallbackUpdateStatus,
+      checkForUpdates: async () => fallbackUpdateStatus,
+      installUpdate: async () => fallbackUpdateStatus,
       listGeneratedImages: async () => [],
       listProjectsWithThreads: async () => [],
       listReferences: async () => [],
@@ -481,6 +511,7 @@ function getElectronApi() {
       cancelSceneGroupGeneration: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
+      subscribeToUpdateStatus: () => () => {},
       subscribeToScenePlan: () => () => {},
       subscribeToSceneFrameReady: () => () => {},
       subscribeToDirectorSceneReady: () => () => {},
@@ -497,6 +528,22 @@ function getElectronApi() {
 
 export function listGeneratedImages(threadId: string) {
   return getElectronApi().listGeneratedImages(threadId) as Promise<GeneratedImageRecord[]>;
+}
+
+export function getUpdateStatus() {
+  return getElectronApi().getUpdateStatus() as Promise<UpdateStatus>;
+}
+
+export function checkForUpdates() {
+  return getElectronApi().checkForUpdates() as Promise<UpdateStatus>;
+}
+
+export function installUpdate() {
+  return getElectronApi().installUpdate() as Promise<UpdateStatus>;
+}
+
+export function subscribeToUpdateStatus(listener: (event: UpdateStatus) => void) {
+  return getElectronApi().subscribeToUpdateStatus(listener) as () => void;
 }
 
 export function listProjectsWithThreads() {

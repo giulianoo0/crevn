@@ -2,6 +2,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
+  getUpdateStatus: () => ipcRenderer.invoke('app:getUpdateStatus'),
+  checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
+  installUpdate: () => ipcRenderer.invoke('app:installUpdate'),
   listGeneratedImages: (threadId) => ipcRenderer.invoke('generation:listGeneratedImages', threadId),
   listProjectsWithThreads: () => ipcRenderer.invoke('generation:listProjectsWithThreads'),
   listReferences: () => ipcRenderer.invoke('generation:listReferences'),
@@ -48,6 +51,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   copyGeneratedImage: (imageId) => ipcRenderer.invoke('generation:copyGeneratedImage', imageId),
   downloadGeneratedImage: (imageId) => ipcRenderer.invoke('generation:downloadGeneratedImage', imageId),
   deleteGeneratedImage: (imageId) => ipcRenderer.invoke('generation:deleteGeneratedImage', imageId),
+  subscribeToUpdateStatus: (listener) => {
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on('app:updateStatus', wrappedListener);
+    return () => {
+      ipcRenderer.removeListener('app:updateStatus', wrappedListener);
+    };
+  },
   subscribeToScenePlan: (listener) => {
     const wrappedListener = (_event, payload) => listener(payload);
     ipcRenderer.on('generation:scenePlan', wrappedListener);

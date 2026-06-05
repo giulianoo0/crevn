@@ -17,6 +17,25 @@ interface ElectronGeneratedImageRecord {
   durationMs?: number | null;
 }
 
+type ElectronUpdateStatusState =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'not_available'
+  | 'downloading'
+  | 'downloaded'
+  | 'installing'
+  | 'disabled'
+  | 'error';
+
+interface ElectronUpdateStatus {
+  state: ElectronUpdateStatusState;
+  message: string;
+  version: string | null;
+  percent: number | null;
+  errorMessage: string | null;
+}
+
 interface ElectronThreadRecord {
   id: string;
   projectId: string;
@@ -367,6 +386,9 @@ interface ElectronSceneGroupRecord {
 interface Window {
   electronAPI?: {
     platform: string;
+    getUpdateStatus: () => Promise<ElectronUpdateStatus>;
+    checkForUpdates: () => Promise<ElectronUpdateStatus>;
+    installUpdate: () => Promise<ElectronUpdateStatus>;
     listGeneratedImages: (threadId: string) => Promise<ElectronGeneratedImageRecord[]>;
     listProjectsWithThreads: () => Promise<ElectronProjectRecord[]>;
     listReferences: () => Promise<ElectronReferenceImageRecord[]>;
@@ -491,6 +513,7 @@ interface Window {
     copyGeneratedImage: (imageId: string) => Promise<void>;
     downloadGeneratedImage: (imageId: string) => Promise<boolean>;
     deleteGeneratedImage: (imageId: string) => Promise<void>;
+    subscribeToUpdateStatus: (listener: (event: ElectronUpdateStatus) => void) => () => void;
     subscribeToScenePlan: (listener: (event: ElectronScenePlanEvent) => void) => () => void;
     subscribeToSceneFrameReady: (listener: (event: ElectronSceneFrameReadyEvent) => void) => () => void;
     subscribeToDirectorSceneReady: (listener: (event: ElectronDirectorSceneReadyEvent) => void) => () => void;
