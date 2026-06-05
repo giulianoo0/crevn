@@ -186,6 +186,7 @@ function insertClipboardNodes(nodes: ReturnType<typeof createNodesFromClipboardS
     const paragraph = $createParagraphNode();
     paragraph.append(...nodes);
     root.append(paragraph);
+    paragraph.selectEnd();
     return;
   }
 
@@ -270,6 +271,7 @@ function writeComposerText(
     const nodes = segments ? createNodesFromClipboardSegments(segments) : [$createTextNode(text)];
     paragraph.append(...nodes);
     root.append(paragraph);
+    paragraph.selectEnd();
   });
 }
 

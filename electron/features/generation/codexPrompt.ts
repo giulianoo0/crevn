@@ -1,3 +1,18 @@
+const IMAGE_PRODUCTION_GUIDANCE = [
+  'Imagen production guidance:',
+  '- These are static image keyframes for later animation in Seedance.',
+  '- The generated frames will be used by Seedance as reference images, so each still must be a complete, stable, animatable frame.',
+  '- Prepare outputs so the later seedance-cartoon stage can turn them into video prompts with subject lock, one clear motion beat, camera language, lighting/style, and negative constraints.',
+  '- Preserve environment identity using coverage plates and detail plates: same layout, materials, fixed object positions, door/window placement, lighting direction, palette, and scale.',
+  '- Use environment coverage plates and closest detail plates for the visible area instead of redesigning the location.',
+  '- Lock character identity with named character-sheet anchors: exact face shape, proportions, wardrobe, hair silhouette, palette, age read, and distinguishing details.',
+  '- Use consistent character names, exact wardrobe, proportions, face shape, hair silhouette, palette, and distinguishing details in every prompt where that character appears.',
+  '- Re-anchor recurring characters to the original sheet or strongest approved keyframe whenever prompt drift appears.',
+  '- Give every visible character a natural performance beat: emotion, eyes, brows, mouth, posture, weight shift, hands, walk phase, and interaction with the set.',
+  '- Put camera angle and shot size early in the prompt using standard cinematography terms; avoid contradictions such as close-up plus full room.',
+  '- Do not write video motion, duration, tracking, pan, or animation instructions into image prompts; describe the single frozen visual instant.',
+].join('\n');
+
 export function buildCodexImageGenerationPrompt(input: {
   mode?: 'manual' | 'scene' | 'pinpoint' | 'camera';
   userPrompt: string;
@@ -35,6 +50,8 @@ export function buildCodexImageGenerationPrompt(input: {
     `Generation mode: ${mode}`,
     '',
     `Creative prompt: ${input.userPrompt}`,
+    '',
+    IMAGE_PRODUCTION_GUIDANCE,
     '',
     ...(input.referenceImages.length > 0
       ? [

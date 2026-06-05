@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type UIEvent as ReactUIEvent,
   type ErrorInfo,
   type FormEvent,
   type DragEvent as ReactDragEvent,
@@ -17,6 +18,24 @@ import {
   type CSSProperties,
 } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
+import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  MouseSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import {
   ArrowUp,
   Camera as CameraIcon,
@@ -30,6 +49,7 @@ import {
   Download,
   FolderPlus,
   Folder,
+  GripVertical,
   ImagePlus,
   LoaderCircle,
   Pencil,
@@ -37,6 +57,7 @@ import {
   PanelLeftOpen,
   Play,
   Plus,
+  Search,
   Settings,
   Trash2,
   WandSparkles,
@@ -45,7 +66,7 @@ import {
 } from 'lucide-react';
 import NumberFlow from '@number-flow/react';
 import { toast } from 'sonner';
-import { List, type RowComponentProps, useDynamicRowHeight, useListRef } from 'react-window';
+import { List, useDynamicRowHeight, useListRef, type RowComponentProps } from 'react-window';
 import 'streamdown/styles.css';
 
 import birdsEyePreview from './assets/angle-previews/birds-eye.png';
@@ -108,6 +129,7 @@ import { PromptComposer, type PromptComposerHandle } from './components/prompt-c
 import { ModelPicker } from './components/model-picker';
 import { getErrorMessage } from './lib/errors';
 import {
+  approveDirectorAction,
   cancelSceneGroupGeneration,
   copyGeneratedImage,
   createProject,
@@ -117,8 +139,11 @@ import {
   createSceneFrame,
   createSceneGroup,
   deleteDirectorChat,
+  deleteSceneGroup,
+  deleteSceneFrame,
   deleteReference,
   describeReferenceCollection,
+  declineDirectorAction,
   generateSceneGroup,
   listDirectorChats,
   listDirectorMessages,
@@ -129,6 +154,7 @@ import {
   subscribeToDirectorMessageDelta,
   subscribeToDirectorMessageError,
   subscribeToDirectorMessageStart,
+  subscribeToDirectorSceneReady,
   updateReferenceCollection,
   updateReference,
   createThread,
@@ -144,6 +170,7 @@ import {
   listSceneGroups,
   renameProject,
   renameThread,
+  subscribeToImageReady,
   subscribeToSceneFrameReady,
   structureScenePrompt,
   subscribeToScenePlan,
@@ -199,6 +226,8 @@ const generationModeOptions = [
   { value: 'manual', label: 'Manual' },
   { value: 'scene', label: 'Scene' },
 ] as const;
+
+const DIRECTOR_MESSAGE_CACHE_LIMIT = 3;
 
 // Each angle carries a `prompt`: a precise, AI-facing cinematographic directive
 // written in standard film terminology. It states where the camera sits, how the
@@ -538,6 +567,21 @@ function mergeDirectorMessages(
   }
 
   return Array.from(messageById.values()).sort((left, right) => {
+    const leftOrder = Number.isInteger(left.messageOrder) ? left.messageOrder : null;
+    const rightOrder = Number.isInteger(right.messageOrder) ? right.messageOrder : null;
+
+    if (leftOrder !== null || rightOrder !== null) {
+      if (leftOrder === null) {
+        return 1;
+      }
+      if (rightOrder === null) {
+        return -1;
+      }
+      if (leftOrder !== rightOrder) {
+        return leftOrder - rightOrder;
+      }
+    }
+
     const createdAtOrder = left.createdAt.localeCompare(right.createdAt);
     if (createdAtOrder !== 0) {
       return createdAtOrder;
@@ -892,10 +936,19 @@ function wrapCameraRotation(value: number) {
   return Math.round(clampValue(value, 0, CAMERA_MAX_ROTATION_DEG));
 }
 
-const INITIAL_SCENE_FRAMES: SceneFrame[] = [
-  { id: 'scene-frame-1', title: 'Frame 1', prompt: '', references: [], assets: [], isCollapsed: false, isRenaming: false },
-  { id: 'scene-frame-2', title: 'Frame 2', prompt: '', references: [], assets: [], isCollapsed: false, isRenaming: false },
-];
+export function getReferenceMentionReplacementRange(
+  mentionMatch: { query: string; start: number } | null,
+  cursorIndex: number
+) {
+  if (!mentionMatch) return undefined;
+
+  return {
+    start: mentionMatch.start,
+    end: Math.max(mentionMatch.start, cursorIndex),
+  };
+}
+
+const INITIAL_SCENE_FRAMES: SceneFrame[] = [];
 const DEFAULT_SCENES_SIDEBAR_WIDTH = 500;
 const MIN_SCENES_SIDEBAR_WIDTH = 250;
 
@@ -964,6 +1017,11 @@ type SceneWorkspaceFrameCard = {
   isGenerating: boolean;
 };
 
+type DirectorRenderedBlock =
+  | { type: 'markdown'; content: string }
+  | { type: 'action'; content: string; data: Record<string, unknown> | null }
+  | { type: 'status'; content: string; data: Record<string, unknown> | null };
+
 type DirectorChatUi = DirectorChatRecord & {
   isStreaming: boolean;
 };
@@ -978,9 +1036,50 @@ type DirectorActiveRun = {
   startedAt: string;
 };
 
+function parseDirectorJsonBlock(content: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(content);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseDirectorRenderedBlocks(markdown: string): DirectorRenderedBlock[] {
+  const blocks: DirectorRenderedBlock[] = [];
+  const pattern = /```(imagen-action|imagen-status)\s*\n([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(markdown)) !== null) {
+    const leading = markdown.slice(lastIndex, match.index);
+    if (leading.trim()) {
+      blocks.push({ type: 'markdown', content: leading });
+    }
+
+    const type = match[1] === 'imagen-status' ? 'status' : 'action';
+    const content = match[2]?.trim() ?? '';
+    blocks.push({ type, content, data: parseDirectorJsonBlock(content) });
+    lastIndex = pattern.lastIndex;
+  }
+
+  const trailing = markdown.slice(lastIndex);
+  if (trailing.trim()) {
+    blocks.push({ type: 'markdown', content: trailing });
+  }
+
+  return blocks.length > 0 ? blocks : [{ type: 'markdown', content: markdown }];
+}
+
+function getDirectorBlockText(data: Record<string, unknown> | null, key: string, fallback = '') {
+  const value = data?.[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
 export function App() {
   const inputId = useId();
   const [prompt, setPrompt] = useState('');
+  const [promptMentionMatch, setPromptMentionMatch] = useState<{ query: string; start: number } | null>(null);
   const [isFocused, setIsFocused] = useState(false);
   const [generationMode, setGenerationMode] = useState<ComposerGenerationMode>('manual');
   const [generationWorkspaceMode, setGenerationWorkspaceMode] = useState<GenerationWorkspaceMode>('classic');
@@ -990,6 +1089,13 @@ export function App() {
   const [directorMessagesByChatId, setDirectorMessagesByChatId] = useState<Record<string, DirectorMessageRecord[]>>({});
   const [selectedDirectorChatIdByThreadId, setSelectedDirectorChatIdByThreadId] = useState<Record<string, string | null>>({});
   const [activeDirectorRunsByChatId, setActiveDirectorRunsByChatId] = useState<Record<string, DirectorActiveRun>>({});
+  const directorMessagesByChatIdRef = useRef<Record<string, DirectorMessageRecord[]>>({});
+  const directorMessagesCacheRef = useRef<Record<string, DirectorMessageRecord[]>>({});
+  const directorMessagesCacheOrderRef = useRef<string[]>([]);
+  const directorMessageLoadPromisesRef = useRef<Record<string, Promise<DirectorMessageRecord[]> | undefined>>({});
+  const activeDirectorChatIdRef = useRef<string | null>(null);
+  const pendingDirectorChatSelectionRef = useRef<{ threadId: string; chatId: string } | null>(null);
+  const directorChatSelectionFrameRef = useRef<number | null>(null);
   const [activeSceneGenerationRunsByGroupId, setActiveSceneGenerationRunsByGroupId] = useState<
     Record<string, ActiveSceneGenerationRun>
   >({});
@@ -1085,10 +1191,14 @@ export function App() {
   const headerTitleMeasureRef = useRef<HTMLDivElement>(null);
   const headerThreadMeasureRef = useRef<HTMLSpanElement>(null);
   const headerChatMeasureRef = useRef<HTMLSpanElement>(null);
+  const workspaceTabsRef = useRef<HTMLDivElement>(null);
   const isReferencePickerOpenRef = useRef(false);
   const activeRunsRef = useRef<Record<string, ActiveGenerationRun>>({});
+  const pendingDirectorDeltaByMessageIdRef = useRef<Record<string, { chatId: string; content: string }>>({});
+  const directorDeltaFlushTimerRef = useRef<number | null>(null);
   const activeDirectorRunsRef = useRef<Record<string, DirectorActiveRun>>({});
   const selectedThreadIdRef = useRef<string | null>(null);
+  const activeSceneGroupIdRef = useRef<string | null>(null);
   const selectedModel = useMemo(
     () => getModelOptionById(selectedModelId) ?? getDefaultModelOption(),
     [selectedModelId]
@@ -1112,6 +1222,53 @@ export function App() {
     activeDirectorRunsRef.current = activeDirectorRunsByChatId;
   }, [activeDirectorRunsByChatId]);
 
+  const setSelectedThreadIdImmediately = useCallback((threadId: string | null) => {
+    selectedThreadIdRef.current = threadId;
+    setSelectedThreadId(threadId);
+  }, []);
+
+  const limitDirectorMessagesByChatId = useCallback((
+    messagesByChatId: Record<string, DirectorMessageRecord[]>,
+    touchedChatId?: string
+  ) => {
+    let cacheOrder = directorMessagesCacheOrderRef.current.filter((chatId) => messagesByChatId[chatId]);
+
+    for (const chatId of Object.keys(messagesByChatId)) {
+      if (!cacheOrder.includes(chatId)) {
+        cacheOrder.push(chatId);
+      }
+    }
+
+    if (touchedChatId && messagesByChatId[touchedChatId]) {
+      cacheOrder = cacheOrder.filter((chatId) => chatId !== touchedChatId);
+      cacheOrder.push(touchedChatId);
+    }
+
+    const protectedChatIds = new Set([
+      activeDirectorChatIdRef.current,
+      ...Object.keys(activeDirectorRunsRef.current),
+    ].filter((chatId): chatId is string => Boolean(chatId)));
+    const nextMessagesByChatId = { ...messagesByChatId };
+    let retainedCount = Object.keys(nextMessagesByChatId).length;
+
+    for (const chatId of cacheOrder) {
+      if (retainedCount <= DIRECTOR_MESSAGE_CACHE_LIMIT) {
+        break;
+      }
+      if (protectedChatIds.has(chatId)) {
+        continue;
+      }
+
+      delete nextMessagesByChatId[chatId];
+      delete directorMessagesCacheRef.current[chatId];
+      retainedCount -= 1;
+    }
+
+    const retainedChatIds = new Set(Object.keys(nextMessagesByChatId));
+    directorMessagesCacheOrderRef.current = cacheOrder.filter((chatId) => retainedChatIds.has(chatId));
+    return nextMessagesByChatId;
+  }, []);
+
   useEffect(() => {
     setDirectorChatsByThreadId((current) =>
       Object.fromEntries(
@@ -1129,6 +1286,10 @@ export function App() {
   useEffect(() => {
     selectedThreadIdRef.current = selectedThreadId;
   }, [selectedThreadId]);
+
+  useEffect(() => {
+    activeSceneGroupIdRef.current = activeSceneGroupId;
+  }, [activeSceneGroupId]);
 
   useEffect(() => {
     if (generationMode === 'scene' && isAnglePanelOpen) {
@@ -1288,14 +1449,27 @@ export function App() {
     isDirectorWorkspace && activeDirectorChat?.title && activeDirectorChat.title !== 'New chat'
       ? activeDirectorChat.title
       : null;
-  const referenceMentionMatch = useMemo(() => {
-    const match = prompt.match(/@([^\s@]*)$/);
-    if (!match || match.index === undefined) return null;
-    return {
-      query: match[1].toLowerCase(),
-      start: match.index,
+  const referenceMentionMatch = promptMentionMatch;
+
+  useEffect(() => {
+    activeDirectorChatIdRef.current = activeDirectorChatId;
+  }, [activeDirectorChatId]);
+
+  useEffect(() => {
+    directorMessagesByChatIdRef.current = directorMessagesByChatId;
+    for (const [chatId, messages] of Object.entries(directorMessagesByChatId)) {
+      directorMessagesCacheRef.current[chatId] = messages;
+    }
+  }, [directorMessagesByChatId]);
+
+  useEffect(() => {
+    return () => {
+      if (directorChatSelectionFrameRef.current !== null) {
+        window.cancelAnimationFrame(directorChatSelectionFrameRef.current);
+      }
     };
-  }, [prompt]);
+  }, []);
+
   const savedReferenceMentionGroups = useMemo(
     () => buildSavedReferenceMentionGroups(savedReferences),
     [savedReferences]
@@ -1374,14 +1548,14 @@ export function App() {
   }, []);
 
   const insertReferenceMention = useCallback((option: { id: string; title: string }) => {
-    const range = referenceMentionMatch ? { start: referenceMentionMatch.start, end: prompt.length } : undefined;
+    const range = getReferenceMentionReplacementRange(referenceMentionMatch, cursorIndex);
     activeComposerRef.current?.insertMention(
       option.id,
       option.title,
       range
     );
     holdComposerOpen();
-  }, [activeComposerRef, holdComposerOpen, prompt.length, referenceMentionMatch]);
+  }, [activeComposerRef, cursorIndex, holdComposerOpen, referenceMentionMatch]);
 
   const handleReferenceMentionNavigation = useCallback(
     (key: 'ArrowDown' | 'ArrowUp' | 'Enter' | 'Escape') => {
@@ -1840,13 +2014,44 @@ export function App() {
   }, []);
 
   const loadDirectorMessagesForChat = useCallback(async (chatId: string) => {
-    const messages = await listDirectorMessages(chatId);
-    setDirectorMessagesByChatId((current) => ({
-      ...current,
-      [chatId]: messages,
-    }));
-    return messages;
-  }, []);
+    const cachedMessages = directorMessagesCacheRef.current[chatId];
+    if (cachedMessages) {
+      if (activeDirectorChatIdRef.current === chatId && !directorMessagesByChatIdRef.current[chatId]) {
+        setDirectorMessagesByChatId((current) =>
+          limitDirectorMessagesByChatId({
+            ...current,
+            [chatId]: cachedMessages,
+          }, chatId)
+        );
+      }
+      return cachedMessages;
+    }
+
+    const existingLoad = directorMessageLoadPromisesRef.current[chatId];
+    if (existingLoad) {
+      return existingLoad;
+    }
+
+    const loadPromise = listDirectorMessages(chatId)
+      .then((messages) => {
+        directorMessagesCacheRef.current[chatId] = messages;
+        if (activeDirectorChatIdRef.current === chatId) {
+          setDirectorMessagesByChatId((current) =>
+            limitDirectorMessagesByChatId({
+              ...current,
+              [chatId]: messages,
+            }, chatId)
+          );
+        }
+        return messages;
+      })
+      .finally(() => {
+        delete directorMessageLoadPromisesRef.current[chatId];
+      });
+
+    directorMessageLoadPromisesRef.current[chatId] = loadPromise;
+    return loadPromise;
+  }, [limitDirectorMessagesByChatId]);
 
   const handleCreateDirectorChat = useCallback(async () => {
     if (!selectedThreadId) {
@@ -1867,14 +2072,56 @@ export function App() {
         ...current,
         [selectedThreadId]: chat.id,
       }));
-      setDirectorMessagesByChatId((current) => ({
-        ...current,
-        [chat.id]: [],
-      }));
+      setDirectorMessagesByChatId((current) =>
+        limitDirectorMessagesByChatId({
+          ...current,
+          [chat.id]: [],
+        }, chat.id)
+      );
     } finally {
       setIsCreatingDirectorChat(false);
     }
   }, [selectedThreadId]);
+
+  const handleSelectDirectorChat = useCallback((chatId: string) => {
+    if (!selectedThreadId) {
+      return;
+    }
+
+    pendingDirectorChatSelectionRef.current = {
+      threadId: selectedThreadId,
+      chatId,
+    };
+
+    if (directorChatSelectionFrameRef.current !== null) {
+      window.cancelAnimationFrame(directorChatSelectionFrameRef.current);
+    }
+
+    directorChatSelectionFrameRef.current = window.requestAnimationFrame(() => {
+      directorChatSelectionFrameRef.current = null;
+      const pendingSelection = pendingDirectorChatSelectionRef.current;
+      pendingDirectorChatSelectionRef.current = null;
+
+      if (!pendingSelection) {
+        return;
+      }
+
+      const cachedMessages = directorMessagesCacheRef.current[pendingSelection.chatId];
+      setSelectedDirectorChatIdByThreadId((current) => ({
+        ...current,
+        [pendingSelection.threadId]: pendingSelection.chatId,
+      }));
+
+      if (cachedMessages && !directorMessagesByChatIdRef.current[pendingSelection.chatId]) {
+        setDirectorMessagesByChatId((current) =>
+          limitDirectorMessagesByChatId({
+            ...current,
+            [pendingSelection.chatId]: cachedMessages,
+          }, pendingSelection.chatId)
+        );
+      }
+    });
+  }, [limitDirectorMessagesByChatId, selectedThreadId]);
 
   const handleRenameDirectorChat = useCallback(async (chatId: string, title: string) => {
     const updated = await renameDirectorChat(chatId, title);
@@ -1899,6 +2146,9 @@ export function App() {
     setDirectorMessagesByChatId((current) => {
       const next = { ...current };
       delete next[chatId];
+      delete directorMessagesCacheRef.current[chatId];
+      delete directorMessageLoadPromisesRef.current[chatId];
+      directorMessagesCacheOrderRef.current = directorMessagesCacheOrderRef.current.filter((id) => id !== chatId);
       return next;
     });
     setSelectedDirectorChatIdByThreadId((current) =>
@@ -1909,29 +2159,67 @@ export function App() {
   }, []);
 
   const handleSendDirectorPrompt = useCallback(async () => {
-    if (!selectedThreadId || !prompt.trim() || activeDirectorRun) {
+    const promptText = prompt.trim();
+    if (!promptText || activeDirectorRun) {
+      return;
+    }
+
+    let activeProjectId = selectedProjectId;
+    let activeThreadId = selectedThreadId;
+
+    if (!activeProjectId) {
+      try {
+        const workspace = await ensureProjectThreadWorkspace();
+        activeProjectId = workspace.project.id;
+        activeThreadId = workspace.thread.id;
+        setSelectedProjectId(workspace.project.id);
+        setSelectedThreadIdImmediately(workspace.thread.id);
+        await refreshProjects();
+      } catch (error) {
+        console.error('Failed to prepare workspace for Director chat', error);
+        toast.error(getErrorMessage(error, 'Failed to prepare Director chat.'));
+        return;
+      }
+    }
+
+    if (!activeThreadId && activeProjectId) {
+      try {
+        const thread = await createThread(activeProjectId);
+        activeThreadId = thread.id;
+        setSelectedThreadIdImmediately(thread.id);
+        await refreshProjects();
+      } catch (error) {
+        console.error('Failed to create thread before Director chat', error);
+        toast.error(getErrorMessage(error, 'Failed to create thread for Director chat.'));
+        return;
+      }
+    }
+
+    if (!activeThreadId) {
       return;
     }
 
     let targetChatId = activeDirectorChatId;
     if (!targetChatId) {
-      const createdChat = await createDirectorChat(selectedThreadId);
+      const createdChat = await createDirectorChat(activeThreadId);
       targetChatId = createdChat.id;
       setDirectorChatsByThreadId((current) => ({
         ...current,
-        [selectedThreadId]: [
+        [activeThreadId]: [
           { ...createdChat, isStreaming: false },
-          ...(current[selectedThreadId] ?? []),
+          ...(current[activeThreadId] ?? []),
         ],
       }));
       setSelectedDirectorChatIdByThreadId((current) => ({
         ...current,
-        [selectedThreadId]: createdChat.id,
+        [activeThreadId]: createdChat.id,
       }));
-      setDirectorMessagesByChatId((current) => ({
-        ...current,
-        [createdChat.id]: current[createdChat.id] ?? [],
-      }));
+      setDirectorMessagesByChatId((current) =>
+        limitDirectorMessagesByChatId({
+          ...current,
+          [createdChat.id]: current[createdChat.id] ?? [],
+        }, createdChat.id)
+      );
     }
 
     const selectedSavedReferences = resolveSavedReferencesFromMentionIds(savedReferences, selectedPromptReferenceIds);
@@ -1965,41 +2253,129 @@ export function App() {
     ];
 
     const selectedModel = getModelOptionById(selectedModelId) ?? getDefaultModelOption();
-    const result = await sendDirectorMessage({
+    const optimisticRunId = `director-optimistic-${Date.now()}`;
+    const optimisticTimestamp = new Date().toISOString();
+    const optimisticUserMessage: DirectorMessageRecord = {
+      id: `${optimisticRunId}-user`,
       chatId: targetChatId,
-      threadId: selectedThreadId,
-      prompt: prompt.trim(),
+      role: 'user',
+      contentMarkdown: prompt.trim(),
+      status: 'completed',
       modelId: selectedModel.providerId === 'codex' ? selectedModel.id : getDefaultModelOption().id,
+      modelLabel: selectedModel.providerId === 'codex' ? selectedModel.label : getDefaultModelOption().label,
       fastMode: effectiveFastMode,
-      referenceImages: referencePayload,
-    });
+      references: [],
+      createdAt: optimisticTimestamp,
+      updatedAt: optimisticTimestamp,
+    };
+    const optimisticAssistantMessage: DirectorMessageRecord = {
+      id: `${optimisticRunId}-assistant`,
+      chatId: targetChatId,
+      role: 'assistant',
+      contentMarkdown: '',
+      status: 'streaming',
+      modelId: optimisticUserMessage.modelId,
+      modelLabel: optimisticUserMessage.modelLabel,
+      fastMode: effectiveFastMode,
+      references: [],
+      createdAt: optimisticTimestamp,
+      updatedAt: optimisticTimestamp,
+    };
+
+    setActiveDirectorRunsByChatId((current) => ({
+      ...current,
+      [targetChatId]: {
+        chatId: targetChatId,
+        threadId: activeThreadId,
+        messageId: optimisticAssistantMessage.id,
+        modelId: optimisticAssistantMessage.modelId,
+        modelLabel: optimisticAssistantMessage.modelLabel,
+        fastMode: optimisticAssistantMessage.fastMode,
+        startedAt: optimisticAssistantMessage.createdAt,
+      },
+    }));
+    setDirectorMessagesByChatId((current) =>
+      limitDirectorMessagesByChatId({
+        ...current,
+        [targetChatId]: mergeDirectorMessages(current[targetChatId] ?? [], [
+          optimisticUserMessage,
+          optimisticAssistantMessage,
+        ]),
+      }, targetChatId)
+    );
+
+    let result: Awaited<ReturnType<typeof sendDirectorMessage>>;
+    try {
+      result = await sendDirectorMessage({
+        chatId: targetChatId,
+        threadId: activeThreadId,
+        prompt: promptText,
+        modelId: selectedModel.providerId === 'codex' ? selectedModel.id : getDefaultModelOption().id,
+        fastMode: effectiveFastMode,
+        referenceImages: referencePayload,
+      });
+    } catch (error) {
+      setActiveDirectorRunsByChatId((current) => {
+        const next = { ...current };
+        delete next[targetChatId];
+        return next;
+      });
+      setDirectorMessagesByChatId((current) =>
+        limitDirectorMessagesByChatId({
+          ...current,
+          [targetChatId]: mergeDirectorMessages(
+            (current[targetChatId] ?? []).filter((message) => message.id !== optimisticAssistantMessage.id),
+            [
+              {
+                ...optimisticAssistantMessage,
+                status: 'failed',
+                contentMarkdown: error instanceof Error ? error.message : 'Director failed to start.',
+                updatedAt: new Date().toISOString(),
+              },
+            ]
+          ),
+        }, targetChatId)
+      );
+      throw error;
+    }
 
     if (result.chat) {
       setDirectorChatsByThreadId((current) => ({
         ...current,
-        [selectedThreadId]: [
+        [activeThreadId]: [
           { ...result.chat, isStreaming: true },
-          ...(current[selectedThreadId] ?? []).filter((chat) => chat.id !== result.chat?.id),
+          ...(current[activeThreadId] ?? []).filter((chat) => chat.id !== result.chat?.id),
         ],
       }));
     }
 
-    setDirectorMessagesByChatId((current) => ({
-      ...current,
-      [targetChatId]: mergeDirectorMessages(current[targetChatId] ?? [], [result.userMessage, result.assistantMessage]),
-    }));
+    setDirectorMessagesByChatId((current) =>
+      limitDirectorMessagesByChatId({
+        ...current,
+        [targetChatId]: mergeDirectorMessages(
+          (current[targetChatId] ?? []).filter(
+            (message) => message.id !== optimisticUserMessage.id && message.id !== optimisticAssistantMessage.id
+          ),
+          [result.userMessage, result.assistantMessage]
+        ),
+      }, targetChatId)
+    );
     directorComposerRef.current?.clear();
     setPrompt('');
   }, [
     activeDirectorChatId,
     activeDirectorRun,
     effectiveFastMode,
+    ensureProjectThreadWorkspace,
     prompt,
     referenceImages,
     savedReferences,
     selectedModelId,
     selectedPromptReferenceIds,
+    selectedProjectId,
+    setSelectedThreadIdImmediately,
     selectedThreadId,
+    limitDirectorMessagesByChatId,
   ]);
 
   const handleCancelActiveDirectorChat = useCallback(async () => {
@@ -2008,6 +2384,42 @@ export function App() {
     }
     await cancelDirectorChat(activeDirectorChatId);
   }, [activeDirectorChatId]);
+
+  const handleApproveDirectorAction = useCallback(async (messageId: string, actionIndex: number) => {
+    try {
+      const updatedMessage = await approveDirectorAction({ messageId, actionIndex });
+      if (!updatedMessage) {
+        return;
+      }
+      setDirectorMessagesByChatId((current) =>
+        limitDirectorMessagesByChatId({
+          ...current,
+          [updatedMessage.chatId]: mergeDirectorMessages(current[updatedMessage.chatId] ?? [], [updatedMessage]),
+        }, updatedMessage.chatId)
+      );
+    } catch (error) {
+      console.error('Failed to approve Director action', error);
+      toast.error(getErrorMessage(error, 'Failed to approve Director action.'));
+    }
+  }, [limitDirectorMessagesByChatId]);
+
+  const handleDeclineDirectorAction = useCallback(async (messageId: string, actionIndex: number) => {
+    try {
+      const updatedMessage = await declineDirectorAction({ messageId, actionIndex });
+      if (!updatedMessage) {
+        return;
+      }
+      setDirectorMessagesByChatId((current) =>
+        limitDirectorMessagesByChatId({
+          ...current,
+          [updatedMessage.chatId]: mergeDirectorMessages(current[updatedMessage.chatId] ?? [], [updatedMessage]),
+        }, updatedMessage.chatId)
+      );
+    } catch (error) {
+      console.error('Failed to decline Director action', error);
+      toast.error(getErrorMessage(error, 'Failed to decline Director action.'));
+    }
+  }, [limitDirectorMessagesByChatId]);
 
   const appendReferenceImages = useCallback(async (files: FileList | File[]) => {
     const imageFiles = Array.from(files).filter((file) => file.type.startsWith('image/'));
@@ -2081,44 +2493,46 @@ export function App() {
   const loadSceneGroups = useCallback(async (threadId: string) => {
     const existingSceneGroups = await listSceneGroups(threadId);
 
-    if (existingSceneGroups.length === 0) {
-      const createdSceneGroup = await createSceneGroup(threadId, {
+    let sceneGroupRecords = existingSceneGroups;
+    if (sceneGroupRecords.length === 0) {
+      await createSceneGroup(threadId, {
         title: 'Scene 1',
         prompt: '',
         tocOrder: 1,
       });
-
-      await createSceneFrame(createdSceneGroup.id, {
-        title: 'Frame 1',
-        prompt: '',
-        frameOrder: 1,
-      });
-      await createSceneFrame(createdSceneGroup.id, {
-        title: 'Frame 2',
-        prompt: '',
-        frameOrder: 2,
-      });
+      sceneGroupRecords = await listSceneGroups(threadId);
     }
 
-    const nextSceneGroups = (await listSceneGroups(threadId)).map(toSceneGroupUi);
+    const nextSceneGroups = sceneGroupRecords.map(toSceneGroupUi);
+    if (selectedThreadIdRef.current !== threadId) {
+      return nextSceneGroups;
+    }
     setSceneGroups(nextSceneGroups);
-    setActiveSceneGroupId((current) => current ?? nextSceneGroups[0]?.id ?? null);
-    setSceneFrames(nextSceneGroups[0]?.frames ?? INITIAL_SCENE_FRAMES);
+    const nextActiveSceneGroup =
+      nextSceneGroups.find((sceneGroup) => sceneGroup.id === activeSceneGroupIdRef.current) ?? nextSceneGroups[0] ?? null;
+    setActiveSceneGroupId(nextActiveSceneGroup?.id ?? null);
+    setSceneFrames(nextActiveSceneGroup?.frames ?? INITIAL_SCENE_FRAMES);
     return nextSceneGroups;
   }, []);
 
   const loadThreadImages = useCallback(async (threadId: string) => {
     const images = await listGeneratedImages(threadId);
+    if (selectedThreadIdRef.current !== threadId) {
+      return;
+    }
     syncVisibleThreadImages(threadId, images);
   }, [syncVisibleThreadImages]);
 
   const handleSelectThread = useCallback(async (projectId: string, threadId: string) => {
     setSelectedProjectId(projectId);
-    setSelectedThreadId(threadId);
+    setSelectedThreadIdImmediately(threadId);
     syncVisibleThreadImages(threadId, []);
-    await loadSceneGroups(threadId);
+    setSceneGroups([]);
+    setActiveSceneGroupId(null);
+    setSceneFrames(INITIAL_SCENE_FRAMES);
+    setSceneGroupReferences([]);
     await loadThreadImages(threadId);
-  }, [loadSceneGroups, loadThreadImages, syncVisibleThreadImages]);
+  }, [loadThreadImages, setSelectedThreadIdImmediately, syncVisibleThreadImages]);
 
   useEffect(() => {
     if (!selectedThreadId) {
@@ -2128,24 +2542,28 @@ export function App() {
       return;
     }
 
+    if (generationWorkspaceMode !== 'scenes') {
+      return;
+    }
+
     void loadSceneGroups(selectedThreadId).catch((error) => {
       console.error('Failed to load scene groups', error);
     });
-  }, [loadSceneGroups, selectedThreadId]);
+  }, [generationWorkspaceMode, loadSceneGroups, selectedThreadId]);
 
   const handleCreateProject = useCallback(async (projectName: string) => {
     try {
       const workspace = await createProject(projectName);
       await refreshProjects();
       setSelectedProjectId(workspace.project.id);
-      setSelectedThreadId(null);
+      setSelectedThreadIdImmediately(null);
       setGeneratedImages([]);
       toast.success('Project created');
     } catch (error) {
       console.error('Failed to create project', error);
       toast.error('Failed to create project');
     }
-  }, [refreshProjects]);
+  }, [refreshProjects, setSelectedThreadIdImmediately]);
 
   const activeSceneGroup =
     sceneGroups.find((sceneGroup) => sceneGroup.id === activeSceneGroupId) ?? sceneGroups[0] ?? null;
@@ -2154,7 +2572,6 @@ export function App() {
     : null;
   const activeSceneGroupGeneratingFrameIds = activeSceneGenerationRun?.frameIds ?? [];
   const isActiveSceneGroupGenerating = activeSceneGroupGeneratingFrameIds.length > 0;
-  const activeSceneWorkspaceRun = activeSceneGroup?.runs[0] ?? null;
   const activeSceneWorkspaceFrameCards = useMemo(() => {
     if (!activeSceneGroup) {
       return [];
@@ -2184,6 +2601,121 @@ export function App() {
       .filter((card) => card.images.length > 0);
   }, [activeSceneGenerationRun, activeSceneGroup, activeSceneGroupGeneratingFrameIds, sceneFrames]);
 
+  const handleSelectSceneGroup = useCallback((sceneGroupId: string) => {
+    const nextSceneGroup = sceneGroups.find((sceneGroup) => sceneGroup.id === sceneGroupId);
+    if (!nextSceneGroup) {
+      return;
+    }
+
+    setActiveSceneGroupId(nextSceneGroup.id);
+    setSceneFrames(nextSceneGroup.frames);
+  }, [sceneGroups]);
+
+  const handleRenameSceneGroup = useCallback(
+    async (sceneGroupId: string, title: string) => {
+      const trimmedTitle = title.trim();
+      if (!trimmedTitle) {
+        return;
+      }
+
+      const sceneGroup = sceneGroups.find((entry) => entry.id === sceneGroupId);
+      if (!sceneGroup) {
+        return;
+      }
+
+      setSceneGroups((current) =>
+        current.map((entry) => (entry.id === sceneGroupId ? { ...entry, title: trimmedTitle } : entry))
+      );
+
+      try {
+        const updatedSceneGroup = await updateSceneGroup(sceneGroupId, {
+          title: trimmedTitle,
+          prompt: sceneGroup.prompt,
+          tocOrder: sceneGroup.tocOrder,
+        });
+        if (updatedSceneGroup) {
+          setSceneGroups((current) =>
+            current.map((entry) => (entry.id === updatedSceneGroup.id ? toSceneGroupUi(updatedSceneGroup) : entry))
+          );
+        }
+      } catch (error) {
+        console.error('Failed to rename scene', error);
+        toast.error(getErrorMessage(error, 'Failed to rename scene.'));
+      }
+    },
+    [sceneGroups]
+  );
+
+  const persistSceneGroupOrder = useCallback((orderedSceneGroups: SceneGroupUi[]) => {
+    void Promise.all(
+      orderedSceneGroups.map((sceneGroup, index) =>
+        updateSceneGroup(sceneGroup.id, {
+          title: sceneGroup.title,
+          prompt: sceneGroup.prompt,
+          tocOrder: index + 1,
+        })
+      )
+    ).catch((error) => {
+      console.error('Failed to reorder scenes', error);
+      toast.error(getErrorMessage(error, 'Failed to reorder scenes.'));
+    });
+  }, []);
+
+  const handleReorderSceneGroups = useCallback(
+    (draggedSceneGroupId: string, targetSceneGroupId: string) => {
+      if (draggedSceneGroupId === targetSceneGroupId) {
+        return;
+      }
+
+      setSceneGroups((current) => {
+        const draggedIndex = current.findIndex((sceneGroup) => sceneGroup.id === draggedSceneGroupId);
+        const targetIndex = current.findIndex((sceneGroup) => sceneGroup.id === targetSceneGroupId);
+        if (draggedIndex < 0 || targetIndex < 0) {
+          return current;
+        }
+
+        const next = [...current];
+        const [draggedSceneGroup] = next.splice(draggedIndex, 1);
+        next.splice(targetIndex, 0, draggedSceneGroup);
+        const reordered = next.map((sceneGroup, index) => ({ ...sceneGroup, tocOrder: index + 1 }));
+        persistSceneGroupOrder(reordered);
+        return reordered;
+      });
+    },
+    [persistSceneGroupOrder]
+  );
+
+  const handleDeleteSceneGroup = useCallback(
+    async (sceneGroupId: string) => {
+      const sceneGroup = sceneGroups.find((entry) => entry.id === sceneGroupId);
+      if (!sceneGroup || !selectedThreadId) {
+        return;
+      }
+
+      const nextLocalSceneGroups = sceneGroups.filter((entry) => entry.id !== sceneGroupId);
+      const nextActiveSceneGroup =
+        activeSceneGroup?.id === sceneGroupId ? nextLocalSceneGroups[0] ?? null : activeSceneGroup;
+
+      setSceneGroups(nextLocalSceneGroups);
+      setActiveSceneGroupId(nextActiveSceneGroup?.id ?? null);
+      setSceneFrames(nextActiveSceneGroup?.frames ?? INITIAL_SCENE_FRAMES);
+
+      try {
+        const updatedSceneGroups = (await deleteSceneGroup(sceneGroupId)).map(toSceneGroupUi);
+        const nextSceneGroup =
+          updatedSceneGroups.find((entry) => entry.id === nextActiveSceneGroup?.id) ?? updatedSceneGroups[0] ?? null;
+        setSceneGroups(updatedSceneGroups);
+        setActiveSceneGroupId(nextSceneGroup?.id ?? null);
+        setSceneFrames(nextSceneGroup?.frames ?? INITIAL_SCENE_FRAMES);
+      } catch (error) {
+        console.error('Failed to delete scene', error);
+        toast.error(getErrorMessage(error, 'Failed to delete scene.'));
+        void loadSceneGroups(selectedThreadId);
+      }
+    },
+    [activeSceneGroup, loadSceneGroups, sceneGroups, selectedThreadId]
+  );
+
   const handleRenameSceneFrame = useCallback(
     async (frameId: string, title: string) => {
       setSceneFrames((current) => current.map((frame) => (frame.id === frameId ? { ...frame, title } : frame)));
@@ -2206,6 +2738,60 @@ export function App() {
         }
       } catch (error) {
         console.error('Failed to rename scene frame', error);
+      }
+    },
+    [activeSceneGroup, sceneFrames]
+  );
+
+  const handleDeleteSceneFrame = useCallback(
+    async (frameId: string) => {
+      if (!activeSceneGroup) {
+        return;
+      }
+
+      const frame = sceneFrames.find((entry) => entry.id === frameId);
+      if (!frame) {
+        return;
+      }
+
+      setSceneFrames((current) => current.filter((entry) => entry.id !== frameId));
+      setSceneGroups((current) =>
+        current.map((sceneGroup) =>
+          sceneGroup.id === activeSceneGroup.id
+            ? { ...sceneGroup, frames: sceneGroup.frames.filter((entry) => entry.id !== frameId) }
+            : sceneGroup
+        )
+      );
+
+      try {
+        const updatedSceneGroup = await deleteSceneFrame(frameId);
+        if (updatedSceneGroup) {
+          const nextSceneGroup = toSceneGroupUi(updatedSceneGroup);
+          setSceneGroups((current) =>
+            current.map((sceneGroup) => (sceneGroup.id === nextSceneGroup.id ? nextSceneGroup : sceneGroup))
+          );
+          setSceneFrames(nextSceneGroup.frames);
+        }
+      } catch (error) {
+        console.error('Failed to delete scene frame', error);
+        setSceneFrames((current) => {
+          if (current.some((entry) => entry.id === frame.id)) {
+            return current;
+          }
+          return [...current, frame].sort((left, right) => {
+            const leftIndex = activeSceneGroup.frames.findIndex((entry) => entry.id === left.id);
+            const rightIndex = activeSceneGroup.frames.findIndex((entry) => entry.id === right.id);
+            return leftIndex - rightIndex;
+          });
+        });
+        setSceneGroups((current) =>
+          current.map((sceneGroup) =>
+            sceneGroup.id === activeSceneGroup.id
+              ? { ...sceneGroup, frames: activeSceneGroup.frames }
+              : sceneGroup
+          )
+        );
+        toast.error(getErrorMessage(error, 'Failed to delete frame.'));
       }
     },
     [activeSceneGroup, sceneFrames]
@@ -2505,13 +3091,13 @@ export function App() {
 
   const handlePrepareThreadDraft = useCallback((projectId: string) => {
     setSelectedProjectId(projectId);
-    setSelectedThreadId(null);
+    setSelectedThreadIdImmediately(null);
     setGeneratedImages([]);
     setOpenProjects((current) => ({
       ...current,
       [projectId]: true,
     }));
-  }, []);
+  }, [setSelectedThreadIdImmediately]);
 
   const openProjectProperties = useCallback((projectId: string) => {
     const project = projects.find((entry) => entry.id === projectId);
@@ -2608,21 +3194,21 @@ export function App() {
         const syncedProjects = await refreshProjects();
         setProjects(syncedProjects);
         setSelectedProjectId(workspace.project.id);
-        setSelectedThreadId(workspace.thread.id);
+        setSelectedThreadIdImmediately(workspace.thread.id);
         await loadThreadImages(workspace.thread.id);
         return;
       }
 
       if (selectedProjectId === projectId) {
         setSelectedProjectId(nextProjects[0]?.id ?? null);
-        setSelectedThreadId(null);
+        setSelectedThreadIdImmediately(null);
         setGeneratedImages([]);
       }
     } catch (error) {
       console.error('Failed to delete project', error);
       toast.error('Failed to delete project');
     }
-  }, [loadThreadImages, refreshProjects, selectedProjectId]);
+  }, [loadThreadImages, refreshProjects, selectedProjectId, setSelectedThreadIdImmediately]);
 
   const handleDeleteThread = useCallback(async (threadId: string, projectId: string) => {
     try {
@@ -2632,14 +3218,14 @@ export function App() {
 
       if (selectedThreadId === threadId) {
         setSelectedProjectId(projectId);
-        setSelectedThreadId(null);
+        setSelectedThreadIdImmediately(null);
         setGeneratedImages([]);
       }
     } catch (error) {
       console.error('Failed to delete thread', error);
       toast.error('Failed to delete thread');
     }
-  }, [refreshProjects, selectedThreadId]);
+  }, [refreshProjects, selectedThreadId, setSelectedThreadIdImmediately]);
 
   const openSidebarEntityDialog = useCallback((action: Exclude<SidebarEntityAction, null>) => {
     setSidebarEntityAction(action);
@@ -2659,7 +3245,7 @@ export function App() {
         activeProjectId = workspace.project.id;
         activeThreadId = workspace.thread.id;
         setSelectedProjectId(workspace.project.id);
-        setSelectedThreadId(workspace.thread.id);
+        setSelectedThreadIdImmediately(workspace.thread.id);
         await refreshProjects();
       } catch (error) {
         console.error('Failed to prepare workspace', error);
@@ -2671,7 +3257,7 @@ export function App() {
       try {
         const thread = await createThread(activeProjectId);
         activeThreadId = thread.id;
-        setSelectedThreadId(thread.id);
+        setSelectedThreadIdImmediately(thread.id);
         await refreshProjects();
       } catch (error) {
         console.error('Failed to create thread before generation', error);
@@ -2834,9 +3420,10 @@ export function App() {
         return nextState;
       });
       if (selectedThreadIdRef.current === activeThreadId) {
+        const resultAssetIds = new Set(result.assets.map((asset) => asset.id));
         setGeneratedImages((current) => [
           ...result.assets,
-          ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId)),
+          ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId) && !resultAssetIds.has(image.id)),
         ]);
       }
       toast.success(result.assets.length > 0 ? `Generated ${result.assets.length} images` : 'Generation complete');
@@ -2875,6 +3462,7 @@ export function App() {
     selectedAngle,
     selectedProjectId,
     selectedAspectRatio,
+    setSelectedThreadIdImmediately,
     selectedModel,
     selectedProviderId,
     selectedPromptReferenceIds,
@@ -2952,7 +3540,7 @@ export function App() {
         activeProjectId = workspace.project.id;
         activeThreadId = workspace.thread.id;
         setSelectedProjectId(workspace.project.id);
-        setSelectedThreadId(workspace.thread.id);
+        setSelectedThreadIdImmediately(workspace.thread.id);
         await refreshProjects();
       } catch (error) {
         console.error('Failed to prepare workspace', error);
@@ -2964,7 +3552,7 @@ export function App() {
       try {
         const thread = await createThread(activeProjectId);
         activeThreadId = thread.id;
-        setSelectedThreadId(thread.id);
+        setSelectedThreadIdImmediately(thread.id);
         await refreshProjects();
       } catch (error) {
         console.error('Failed to create thread before generation', error);
@@ -3063,9 +3651,10 @@ export function App() {
         return nextState;
       });
       if (selectedThreadIdRef.current === activeThreadId) {
+        const resultAssetIds = new Set(result.assets.map((asset) => asset.id));
         setGeneratedImages((current) => [
           ...result.assets,
-          ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId)),
+          ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId) && !resultAssetIds.has(image.id)),
         ]);
       }
       toast.success(result.assets.length > 0 ? 'Generated 1 image' : 'Generation complete');
@@ -3100,6 +3689,7 @@ export function App() {
     selectedModel,
     selectedProviderId,
     selectedProjectId,
+    setSelectedThreadIdImmediately,
     selectedThreadId,
   ]);
 
@@ -3118,7 +3708,7 @@ export function App() {
         activeProjectId = workspace.project.id;
         activeThreadId = workspace.thread.id;
         setSelectedProjectId(workspace.project.id);
-        setSelectedThreadId(workspace.thread.id);
+        setSelectedThreadIdImmediately(workspace.thread.id);
         await refreshProjects();
       } catch (error) {
         console.error('Failed to prepare workspace', error);
@@ -3130,7 +3720,7 @@ export function App() {
       try {
         const thread = await createThread(activeProjectId);
         activeThreadId = thread.id;
-        setSelectedThreadId(thread.id);
+        setSelectedThreadIdImmediately(thread.id);
         await refreshProjects();
       } catch (error) {
         console.error('Failed to create thread before generation', error);
@@ -3215,9 +3805,10 @@ export function App() {
         return nextState;
       });
       if (selectedThreadIdRef.current === activeThreadId) {
+        const resultAssetIds = new Set(result.assets.map((asset) => asset.id));
         setGeneratedImages((current) => [
           ...result.assets,
-          ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId)),
+          ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId) && !resultAssetIds.has(image.id)),
         ]);
       }
       toast.success(
@@ -3257,6 +3848,7 @@ export function App() {
     selectedModel,
     selectedProviderId,
     selectedProjectId,
+    setSelectedThreadIdImmediately,
     selectedThreadId,
   ]);
 
@@ -3294,7 +3886,7 @@ export function App() {
             return nextState;
           });
           setSelectedProjectId(workspace.project.id);
-          setSelectedThreadId(workspace.thread.id);
+          setSelectedThreadIdImmediately(workspace.thread.id);
           syncVisibleThreadImages(workspace.thread.id, images);
           setSavedReferences((current) => {
             for (const reference of current) {
@@ -3313,7 +3905,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [syncVisibleThreadImages]);
+  }, [setSelectedThreadIdImmediately, syncVisibleThreadImages]);
 
   useEffect(() => {
     if (!selectedThreadId) {
@@ -3329,13 +3921,23 @@ export function App() {
     if (!activeDirectorChatId) {
       return;
     }
-    if (directorMessagesByChatId[activeDirectorChatId]) {
+    if (directorMessagesByChatIdRef.current[activeDirectorChatId]) {
+      return;
+    }
+    const cachedMessages = directorMessagesCacheRef.current[activeDirectorChatId];
+    if (cachedMessages) {
+      setDirectorMessagesByChatId((current) =>
+        limitDirectorMessagesByChatId({
+          ...current,
+          [activeDirectorChatId]: cachedMessages,
+        }, activeDirectorChatId)
+      );
       return;
     }
     void loadDirectorMessagesForChat(activeDirectorChatId).catch((error) => {
       console.error('Failed to load Director messages', error);
     });
-  }, [activeDirectorChatId, directorMessagesByChatId, loadDirectorMessagesForChat]);
+  }, [activeDirectorChatId, limitDirectorMessagesByChatId, loadDirectorMessagesForChat]);
 
   useEffect(() => {
     return subscribeToScenePlan((event) => {
@@ -3393,6 +3995,48 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    return subscribeToImageReady((event) => {
+      const runId = event.clientRunId ?? null;
+      if (runId) {
+        setActiveRunsById((current) => {
+          const activeRun = current[runId];
+          if (!activeRun) {
+            return current;
+          }
+
+          const remainingLoadingEntries = activeRun.loadingEntries.slice(1);
+          const nextState = {
+            ...current,
+            [runId]: {
+              ...activeRun,
+              loadingEntries: remainingLoadingEntries,
+            },
+          };
+          activeRunsRef.current = nextState;
+          return nextState;
+        });
+      }
+
+      if (selectedThreadIdRef.current === event.threadId) {
+        setGeneratedImages((current) => {
+          const withoutDuplicate = current.filter((image) => image.id !== event.asset.id);
+          if (runId) {
+            const loadingIndex = withoutDuplicate.findIndex((image) => isLoadingEntryForRun(image, runId));
+            if (loadingIndex >= 0) {
+              return [
+                ...withoutDuplicate.slice(0, loadingIndex),
+                event.asset,
+                ...withoutDuplicate.slice(loadingIndex + 1),
+              ];
+            }
+          }
+          return [event.asset, ...withoutDuplicate];
+        });
+      }
+    });
+  }, []);
+
+  useEffect(() => {
     return subscribeToSceneFrameReady((event) => {
       void listSceneGroups(event.threadId)
         .then((nextSceneGroups) => {
@@ -3423,6 +4067,29 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    return subscribeToDirectorSceneReady((event) => {
+      if (selectedThreadIdRef.current !== event.threadId) {
+        return;
+      }
+
+      void listSceneGroups(event.threadId)
+        .then((nextSceneGroups) => {
+          const nextSceneGroupUi = nextSceneGroups.map(toSceneGroupUi);
+          const targetSceneGroup = nextSceneGroupUi.find((sceneGroup) => sceneGroup.id === event.sceneGroupId);
+
+          setSceneGroups(nextSceneGroupUi);
+          setActiveSceneGroupId(targetSceneGroup?.id ?? nextSceneGroupUi[0]?.id ?? null);
+          setSceneFrames(targetSceneGroup?.frames ?? nextSceneGroupUi[0]?.frames ?? INITIAL_SCENE_FRAMES);
+          toast.message('Scene generation started');
+        })
+        .catch((error) => {
+          console.error('Failed to refresh Director scene plan', error);
+          toast.error(getErrorMessage(error, 'Failed to refresh Director scene plan.'));
+        });
+    });
+  }, []);
+
+  useEffect(() => {
     return subscribeToDirectorMessageStart((event) => {
       setActiveDirectorRunsByChatId((current) => ({
         ...current,
@@ -3437,65 +4104,101 @@ export function App() {
         },
       }));
       setDirectorMessagesByChatId((current) => {
-        return {
+        return limitDirectorMessagesByChatId({
           ...current,
           [event.chatId]: mergeDirectorMessages(current[event.chatId] ?? [], [event.userMessage, event.assistantMessage]),
-        };
+        }, event.chatId);
       });
     });
-  }, []);
+  }, [limitDirectorMessagesByChatId]);
 
   useEffect(() => {
     return subscribeToDirectorMessageDelta((event) => {
-      setDirectorMessagesByChatId((current) => ({
-        ...current,
-        [event.chatId]: (current[event.chatId] ?? []).map((message) =>
-          message.id === event.messageId
-            ? { ...message, contentMarkdown: event.content, status: 'streaming', updatedAt: new Date().toISOString() }
-            : message
-        ),
-      }));
+      pendingDirectorDeltaByMessageIdRef.current[event.messageId] = {
+        chatId: event.chatId,
+        content: event.content,
+      };
+
+      if (directorDeltaFlushTimerRef.current !== null) {
+        return;
+      }
+
+      directorDeltaFlushTimerRef.current = window.setTimeout(() => {
+        const pendingDeltas = pendingDirectorDeltaByMessageIdRef.current;
+        pendingDirectorDeltaByMessageIdRef.current = {};
+        directorDeltaFlushTimerRef.current = null;
+
+        setDirectorMessagesByChatId((current) => {
+          const next = { ...current };
+          let touchedChatId: string | undefined;
+          for (const [messageId, pendingDelta] of Object.entries(pendingDeltas)) {
+            touchedChatId = pendingDelta.chatId;
+            next[pendingDelta.chatId] = (next[pendingDelta.chatId] ?? []).map((message) =>
+              message.id === messageId
+                ? { ...message, contentMarkdown: pendingDelta.content, status: 'streaming' }
+                : message
+            );
+          }
+          return limitDirectorMessagesByChatId(next, touchedChatId);
+        });
+      }, 48);
     });
+  }, [limitDirectorMessagesByChatId]);
+
+  useEffect(() => {
+    return () => {
+      if (directorDeltaFlushTimerRef.current !== null) {
+        window.clearTimeout(directorDeltaFlushTimerRef.current);
+      }
+      directorDeltaFlushTimerRef.current = null;
+      pendingDirectorDeltaByMessageIdRef.current = {};
+    };
   }, []);
 
   useEffect(() => {
     return subscribeToDirectorMessageComplete((event) => {
+      delete pendingDirectorDeltaByMessageIdRef.current[event.messageId];
       setActiveDirectorRunsByChatId((current) => {
         const next = { ...current };
         delete next[event.chatId];
         return next;
       });
-      setDirectorMessagesByChatId((current) => ({
-        ...current,
-        [event.chatId]: (current[event.chatId] ?? []).map((message) =>
-          message.id === event.messageId
-            ? { ...message, contentMarkdown: event.content, status: 'completed', updatedAt: new Date().toISOString() }
-            : message
-        ),
-      }));
+      setDirectorMessagesByChatId((current) =>
+        limitDirectorMessagesByChatId({
+          ...current,
+          [event.chatId]: (current[event.chatId] ?? []).map((message) =>
+            message.id === event.messageId
+              ? { ...message, contentMarkdown: event.content, status: 'completed', updatedAt: new Date().toISOString() }
+              : message
+          ),
+        }, event.chatId)
+      );
       void loadDirectorChatsForThread(event.threadId).catch(() => {});
     });
-  }, [loadDirectorChatsForThread]);
+  }, [limitDirectorMessagesByChatId, loadDirectorChatsForThread]);
 
   useEffect(() => {
     return subscribeToDirectorMessageError((event) => {
+      delete pendingDirectorDeltaByMessageIdRef.current[event.messageId];
       setActiveDirectorRunsByChatId((current) => {
         const next = { ...current };
         delete next[event.chatId];
         return next;
       });
-      setDirectorMessagesByChatId((current) => ({
-        ...current,
-        [event.chatId]: (current[event.chatId] ?? []).map((message) =>
-          message.id === event.messageId
-            ? { ...message, contentMarkdown: event.content, status: 'failed', updatedAt: new Date().toISOString() }
-            : message
-        ),
-      }));
+      setDirectorMessagesByChatId((current) =>
+        limitDirectorMessagesByChatId({
+          ...current,
+          [event.chatId]: (current[event.chatId] ?? []).map((message) =>
+            message.id === event.messageId
+              ? { ...message, contentMarkdown: event.content, status: 'failed', updatedAt: new Date().toISOString() }
+              : message
+          ),
+        }, event.chatId)
+      );
       toast.error(event.canceled ? 'Director chat canceled' : event.errorMessage);
       void loadDirectorChatsForThread(event.threadId).catch(() => {});
     });
-  }, [loadDirectorChatsForThread]);
+  }, [limitDirectorMessagesByChatId, loadDirectorChatsForThread]);
 
   useEffect(() => {
     return () => {
@@ -3516,6 +4219,7 @@ export function App() {
   useLayoutEffect(() => {
     const measureNode = headerMeasureRef.current;
     const titleMeasureNode = headerTitleMeasureRef.current;
+    const tabsNode = workspaceTabsRef.current;
     if (!measureNode || !activeThreadTitle) {
       setHeaderTitleWidth(null);
       setHeaderTextWidth(null);
@@ -3528,13 +4232,26 @@ export function App() {
         titleMeasureNode?.getBoundingClientRect().width || titleMeasureNode?.scrollWidth || 0
       );
       const estimatedTitle = buildHeaderTitleText(activeThreadTitle, activeHeaderChatTitle);
-
-      setHeaderTitleWidth(
+      const headerLeft = measureNode.getBoundingClientRect().left;
+      const tabsLeft = tabsNode?.getBoundingClientRect().left ?? window.innerWidth / 2;
+      const availableWidth = Math.max(96, Math.floor(tabsLeft - headerLeft - 16));
+      const nextHeaderWidth =
         measuredWidth > 0
-          ? measuredWidth
-          : estimateHeaderTitleWidth(estimatedTitle, isSidebarCollapsed)
-      );
-      setHeaderTextWidth(measuredTextWidth > 0 ? measuredTextWidth + 1 : null);
+          ? Math.min(measuredWidth, availableWidth)
+          : Math.min(estimateHeaderTitleWidth(estimatedTitle, isSidebarCollapsed), availableWidth);
+      const isHeaderClamped =
+        measuredWidth > 0
+          ? measuredWidth > nextHeaderWidth
+          : estimateHeaderTitleWidth(estimatedTitle, isSidebarCollapsed) > nextHeaderWidth;
+      const shellChromeWidth = (isSidebarCollapsed ? 36 + 8 : 0) + 24 + 24 + 2;
+      const nextTextWidth = isHeaderClamped
+        ? Math.max(64, nextHeaderWidth - shellChromeWidth)
+        : measuredTextWidth > 0
+          ? measuredTextWidth + 1
+          : null;
+
+      setHeaderTitleWidth(nextHeaderWidth);
+      setHeaderTextWidth(nextTextWidth);
     };
 
     syncHeaderWidth();
@@ -3548,6 +4265,9 @@ export function App() {
 
     const resizeObserver = new ResizeObserver(syncHeaderWidth);
     resizeObserver.observe(measureNode);
+    if (tabsNode) {
+      resizeObserver.observe(tabsNode);
+    }
 
     return () => {
       resizeObserver.disconnect();
@@ -3855,8 +4575,13 @@ export function App() {
                     className="min-h-full w-full"
                   >
                   <ScenesWorkspace
+                    sceneGroups={sceneGroups}
+                    activeSceneGroupId={activeSceneGroup?.id ?? null}
                     frameCards={activeSceneWorkspaceFrameCards}
-                    latestRun={activeSceneWorkspaceRun}
+                    onSelectSceneGroup={handleSelectSceneGroup}
+                    onRenameSceneGroup={handleRenameSceneGroup}
+                    onReorderSceneGroups={handleReorderSceneGroups}
+                    onDeleteSceneGroup={handleDeleteSceneGroup}
                     onOpenImage={openGeneratedImagePlayer}
                   />
                   </motion.section>
@@ -3872,7 +4597,10 @@ export function App() {
                     className="min-h-full w-full"
                   >
                     <DirectorWorkspace
+                      chatId={activeDirectorChatId}
                       messages={activeDirectorMessages}
+                      onApproveDirectorAction={handleApproveDirectorAction}
+                      onDeclineDirectorAction={handleDeclineDirectorAction}
                     />
                   </motion.section>
                 ) : null}
@@ -3981,7 +4709,7 @@ export function App() {
                 className={[
                   't-resize flex h-12 items-center overflow-hidden px-3',
                   isScenesWorkspace
-                    ? 'rounded-none border-transparent bg-transparent shadow-none backdrop-blur-none'
+                    ? 'rounded-full border border-[var(--border-soft)] bg-[var(--surface)] shadow-none backdrop-blur-none'
                     : 'rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] shadow-[0_10px_30px_rgba(0,0,0,0.3)] backdrop-blur-2xl',
                 ].join(' ')}
                 style={headerTitleWidth ? { width: `${headerTitleWidth}px` } : undefined}
@@ -4006,10 +4734,10 @@ export function App() {
                     </button>
                   </motion.div>
                   <h1
-                    className="flex h-full shrink-0 items-center justify-center text-center leading-none"
+                    className="flex h-full min-w-0 shrink items-center justify-start overflow-hidden text-left leading-none"
                     style={headerTextWidth ? { width: `${headerTextWidth}px` } : undefined}
                   >
-                    <div className="inline-flex items-center whitespace-nowrap align-middle text-center text-[18px] font-medium leading-none tracking-[0] text-[var(--foreground)]">
+                    <div className="flex min-w-0 max-w-full items-center overflow-hidden whitespace-nowrap align-middle text-left text-[18px] font-medium leading-none tracking-[0] text-[var(--foreground)]">
                       <AnimatePresence mode="wait" initial={false}>
                         <motion.span
                           key={activeThreadTitle}
@@ -4017,7 +4745,8 @@ export function App() {
                           animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
                           exit={{ opacity: 0, y: -3, filter: 'blur(6px)' }}
                           transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                          className="inline-block"
+                          className="block min-w-0 shrink truncate"
+                          title={activeThreadTitle}
                         >
                           {activeThreadTitle}
                         </motion.span>
@@ -4030,10 +4759,12 @@ export function App() {
                             animate={{ width: 'auto', opacity: 1, filter: 'blur(0px)' }}
                             exit={{ width: 0, opacity: 0, filter: 'blur(8px)' }}
                             transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
-                            className="inline-flex items-center overflow-hidden"
+                            className="inline-flex min-w-0 flex-1 items-center overflow-hidden"
                           >
-                            <span className="mx-2.5 text-[var(--muted-foreground)]">{'>'}</span>
-                            <span className="inline-block">{activeHeaderChatTitle}</span>
+                            <span className="mx-2.5 shrink-0 text-[var(--muted-foreground)]">{'>'}</span>
+                            <span className="block min-w-0 truncate" title={activeHeaderChatTitle}>
+                              {activeHeaderChatTitle}
+                            </span>
                           </motion.span>
                         ) : null}
                       </AnimatePresence>
@@ -4047,7 +4778,7 @@ export function App() {
         </div>
       </header>
 
-      <div className="fixed left-1/2 top-[8px] z-40 -translate-x-1/2">
+      <div ref={workspaceTabsRef} className="fixed left-1/2 top-[8px] z-40 -translate-x-1/2">
         <GenerationWorkspaceTabs
           selectedMode={generationWorkspaceMode}
           onSelectMode={setGenerationWorkspaceMode}
@@ -4446,6 +5177,7 @@ export function App() {
                   );
                 }}
                 onRenameFrame={handleRenameSceneFrame}
+                onDeleteFrame={handleDeleteSceneFrame}
                 onUpdateFramePrompt={(frameId, prompt) => {
                   setSceneFrames((current) =>
                     current.map((frame) =>
@@ -4509,12 +5241,7 @@ export function App() {
                     toast.error(getErrorMessage(error, 'Failed to create Director chat.'));
                   });
                 }}
-                onSelectChat={(chatId) => {
-                  setSelectedDirectorChatIdByThreadId((current) => ({
-                    ...current,
-                    [selectedThreadId ?? '']: chatId,
-                  }));
-                }}
+                onSelectChat={handleSelectDirectorChat}
                 onRenameChat={(chatId, title) => {
                   void handleRenameDirectorChat(chatId, title).catch((error) => {
                     console.error('Failed to rename Director chat', error);
@@ -4537,10 +5264,7 @@ export function App() {
       {isClassicWorkspace ? (
       <motion.div
         key="classic-composer"
-        initial={{ opacity: 0, y: 18, filter: 'blur(10px)' }}
-        animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-        exit={{ opacity: 0, y: 22, filter: 'blur(10px)' }}
-        transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+        {...COMPOSER_SHELL_MOTION}
         data-testid="classic-composer"
         className="fixed inset-x-0 bottom-0 z-10 px-4 pb-5 sm:px-6 sm:pb-6"
       >
@@ -4747,7 +5471,7 @@ export function App() {
                 hasReferenceImages={hasReferenceImages}
                 mentionCandidates={referenceMentionCandidates}
                 onTextChange={setPrompt}
-                onMentionMatch={() => {}}
+                onMentionMatch={setPromptMentionMatch}
                 onMentionIdsChange={setSelectedPromptReferenceIds}
                 onCursorIndexChange={setCursorIndex}
                 onScrollTopChange={handleScrollTop}
@@ -5043,6 +5767,7 @@ export function App() {
         plusButtonRef={plusButtonRef}
         sendButtonRef={sendFxRef}
         onPromptChange={setPrompt}
+        onMentionMatch={setPromptMentionMatch}
         onMentionIdsChange={setSelectedPromptReferenceIds}
         onCursorIndexChange={setCursorIndex}
         onScrollTopChange={handleScrollTop}
@@ -5162,6 +5887,13 @@ const COMPOSER_GLASS_STYLE = {
   WebkitBackdropFilter: 'blur(28px)',
 } as const;
 
+export const COMPOSER_SHELL_MOTION = {
+  initial: { opacity: 0, y: 18 },
+  animate: { opacity: 1, y: 0 },
+  exit: { opacity: 0, y: 22 },
+  transition: { duration: 0.24, ease: [0.22, 1, 0.36, 1] },
+};
+
 function SceneGenerateButton({
   onClick,
   onStop,
@@ -5248,20 +5980,25 @@ function GenerationWorkspaceTabs({
 }
 
 function ScenesWorkspace({
+  sceneGroups,
+  activeSceneGroupId,
   frameCards,
-  latestRun,
+  onSelectSceneGroup,
+  onRenameSceneGroup,
+  onReorderSceneGroups,
+  onDeleteSceneGroup,
   onOpenImage,
 }: {
+  sceneGroups: SceneGroupUi[];
+  activeSceneGroupId: string | null;
   frameCards: SceneWorkspaceFrameCard[];
-  latestRun: SceneGroupRecord['runs'][number] | null;
+  onSelectSceneGroup: (sceneGroupId: string) => void;
+  onRenameSceneGroup: (sceneGroupId: string, title: string) => void;
+  onReorderSceneGroups: (draggedSceneGroupId: string, targetSceneGroupId: string) => void;
+  onDeleteSceneGroup: (sceneGroupId: string) => void;
   onOpenImage: (image: GeneratedImageRecord) => void;
 }) {
   if (frameCards.length > 0) {
-    const outputCount = frameCards.reduce(
-      (total, card) => total + card.images.filter((image) => !image.isLoading).length,
-      0
-    );
-
     return (
       <motion.div
         data-testid="scenes-workspace"
@@ -5272,19 +6009,14 @@ function ScenesWorkspace({
         className="min-h-[calc(100vh-60px)] w-full px-8 pb-10 pt-8"
       >
         <div className="mx-auto flex w-full max-w-[1240px] flex-col gap-4">
-          <div className="flex items-center justify-between rounded-[24px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.82)] px-5 py-4 backdrop-blur-xl">
-            <div className="flex items-center gap-3">
-              <div className="rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-3 py-1 text-[12px] font-medium text-[var(--foreground)]">
-                <NumberFlow value={outputCount} />
-                <span className="ml-1 text-[var(--muted-foreground)]">outputs</span>
-              </div>
-            </div>
-            {latestRun?.modelLabel ? (
-              <div className="rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-3 py-1 text-[12px] font-medium text-[var(--muted-foreground)]">
-                {latestRun.modelLabel}
-              </div>
-            ) : null}
-          </div>
+          <SceneWorkspaceRail
+            sceneGroups={sceneGroups}
+            activeSceneGroupId={activeSceneGroupId}
+            onSelectSceneGroup={onSelectSceneGroup}
+            onRenameSceneGroup={onRenameSceneGroup}
+            onReorderSceneGroups={onReorderSceneGroups}
+            onDeleteSceneGroup={onDeleteSceneGroup}
+          />
           {frameCards.map((card) => (
             <div
               key={card.frameId}
@@ -5326,27 +6058,297 @@ function ScenesWorkspace({
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-      className="flex min-h-[calc(100vh-60px)] w-full items-center justify-center px-8 pb-10 pt-8"
+      className="min-h-[calc(100vh-60px)] w-full px-8 pb-10 pt-8"
     >
-      <div className="text-center">
-        <h2 className="m-0 text-[24px] font-medium leading-none tracking-[0] text-[var(--foreground)]">
-          No scenes generated yet
-        </h2>
+      <div className="mx-auto flex w-full max-w-[1240px] flex-col gap-4">
+        <SceneWorkspaceRail
+          sceneGroups={sceneGroups}
+          activeSceneGroupId={activeSceneGroupId}
+          onSelectSceneGroup={onSelectSceneGroup}
+          onRenameSceneGroup={onRenameSceneGroup}
+          onReorderSceneGroups={onReorderSceneGroups}
+          onDeleteSceneGroup={onDeleteSceneGroup}
+        />
+        <div className="flex min-h-[360px] items-center justify-center rounded-[26px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.62)]">
+          <h2 className="m-0 text-[24px] font-medium leading-none tracking-[0] text-[var(--foreground)]">
+            No scenes generated yet
+          </h2>
+        </div>
       </div>
     </motion.div>
   );
 }
 
-function DirectorWorkspace({
-  messages,
+function SceneWorkspaceRail({
+  sceneGroups,
+  activeSceneGroupId,
+  onSelectSceneGroup,
+  onRenameSceneGroup,
+  onReorderSceneGroups,
+  onDeleteSceneGroup,
 }: {
+  sceneGroups: SceneGroupUi[];
+  activeSceneGroupId: string | null;
+  onSelectSceneGroup: (sceneGroupId: string) => void;
+  onRenameSceneGroup: (sceneGroupId: string, title: string) => void;
+  onReorderSceneGroups: (draggedSceneGroupId: string, targetSceneGroupId: string) => void;
+  onDeleteSceneGroup: (sceneGroupId: string) => void;
+}) {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [draggedSceneGroupId, setDraggedSceneGroupId] = useState<string | null>(null);
+  const [renamingSceneGroupId, setRenamingSceneGroupId] = useState<string | null>(null);
+  const [sceneTitleDraft, setSceneTitleDraft] = useState('');
+  const sensors = useSensors(
+    useSensor(MouseSensor, {
+      activationConstraint: {
+        distance: 4,
+      },
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: {
+        delay: 120,
+        tolerance: 6,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const visibleSceneGroups = normalizedSearchQuery
+    ? sceneGroups.filter((sceneGroup) => sceneGroup.title.toLowerCase().includes(normalizedSearchQuery))
+    : sceneGroups;
+  const visibleSceneGroupIds = visibleSceneGroups.map((sceneGroup) => sceneGroup.id);
+
+  const startRenamingScene = (sceneGroup: SceneGroupUi) => {
+    setRenamingSceneGroupId(sceneGroup.id);
+    setSceneTitleDraft(sceneGroup.title);
+  };
+
+  const commitSceneRename = () => {
+    if (!renamingSceneGroupId) {
+      return;
+    }
+    const nextTitle = sceneTitleDraft.trim();
+    const sceneGroup = sceneGroups.find((entry) => entry.id === renamingSceneGroupId);
+    setRenamingSceneGroupId(null);
+    if (!sceneGroup || !nextTitle || sceneGroup.title === nextTitle) {
+      return;
+    }
+    onRenameSceneGroup(sceneGroup.id, nextTitle);
+  };
+
+  const handleSortableDragStart = (event: DragStartEvent) => {
+    setDraggedSceneGroupId(String(event.active.id));
+  };
+
+  const handleSortableDragEnd = (event: DragEndEvent) => {
+    const activeId = String(event.active.id);
+    const overId = event.over?.id ? String(event.over.id) : null;
+    setDraggedSceneGroupId(null);
+    if (!overId || activeId === overId) {
+      return;
+    }
+    onReorderSceneGroups(activeId, overId);
+  };
+
+  return (
+    <div
+      data-testid="scene-workspace-rail"
+      className="rounded-[24px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.82)] px-5 py-4 backdrop-blur-xl"
+    >
+      <div className="flex items-center gap-3">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-[var(--muted-foreground)]" />
+          <input
+            type="search"
+            aria-label="Search scenes"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search scenes"
+            className="h-10 w-full rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] pl-9 pr-4 text-[13px] font-medium text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[color-mix(in_srgb,var(--accent)_58%,transparent)]"
+          />
+        </div>
+        <div className="rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-3 py-1 text-[12px] font-medium text-[var(--muted-foreground)]">
+          <NumberFlow value={sceneGroups.length} />
+          <span className="ml-1">scene{sceneGroups.length === 1 ? '' : 's'}</span>
+        </div>
+      </div>
+
+      <div className="mt-4 flex max-h-[280px] flex-col gap-2 overflow-y-auto pr-1">
+        {visibleSceneGroups.length > 0 ? (
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragStart={handleSortableDragStart}
+            onDragEnd={handleSortableDragEnd}
+            onDragCancel={() => setDraggedSceneGroupId(null)}
+          >
+            <SortableContext items={visibleSceneGroupIds} strategy={verticalListSortingStrategy}>
+              {visibleSceneGroups.map((sceneGroup) => (
+                <SortableSceneRailItem
+                  key={sceneGroup.id}
+                  sceneGroup={sceneGroup}
+                  isActive={sceneGroup.id === activeSceneGroupId}
+                  isDragging={draggedSceneGroupId === sceneGroup.id}
+                  isRenaming={renamingSceneGroupId === sceneGroup.id}
+                  sceneTitleDraft={sceneTitleDraft}
+                  onSceneTitleDraftChange={setSceneTitleDraft}
+                  onCommitSceneRename={commitSceneRename}
+                  onCancelSceneRename={() => setRenamingSceneGroupId(null)}
+                  onSelectSceneGroup={onSelectSceneGroup}
+                  onStartRenamingScene={startRenamingScene}
+                  onDeleteSceneGroup={onDeleteSceneGroup}
+                />
+              ))}
+            </SortableContext>
+          </DndContext>
+        ) : (
+          <div className="rounded-[18px] border border-dashed border-[var(--border-soft)] px-4 py-5 text-center text-[13px] text-[var(--muted-foreground)]">
+            No scenes match this search.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SortableSceneRailItem({
+  sceneGroup,
+  isActive,
+  isDragging,
+  isRenaming,
+  sceneTitleDraft,
+  onSceneTitleDraftChange,
+  onCommitSceneRename,
+  onCancelSceneRename,
+  onSelectSceneGroup,
+  onStartRenamingScene,
+  onDeleteSceneGroup,
+}: {
+  sceneGroup: SceneGroupUi;
+  isActive: boolean;
+  isDragging: boolean;
+  isRenaming: boolean;
+  sceneTitleDraft: string;
+  onSceneTitleDraftChange: (title: string) => void;
+  onCommitSceneRename: () => void;
+  onCancelSceneRename: () => void;
+  onSelectSceneGroup: (sceneGroupId: string) => void;
+  onStartRenamingScene: (sceneGroup: SceneGroupUi) => void;
+  onDeleteSceneGroup: (sceneGroupId: string) => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging: isSortableDragging,
+  } = useSortable({ id: sceneGroup.id, disabled: isRenaming });
+  const itemStyle: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isSortableDragging ? 20 : undefined,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={itemStyle}
+      data-testid={`scene-rail-item-${sceneGroup.id}`}
+      data-dragging={isDragging || isSortableDragging}
+      className={[
+        'group flex min-h-12 items-center gap-2 rounded-[18px] border px-2.5 py-2 transition-[background-color,border-color,box-shadow,opacity]',
+        isDragging || isSortableDragging
+          ? 'border-[color-mix(in_srgb,var(--accent)_68%,transparent)] bg-[color-mix(in_srgb,var(--accent)_18%,rgba(32,32,33,0.76))] opacity-80 shadow-[0_0_0_1px_color-mix(in_srgb,var(--accent)_26%,transparent)]'
+          : isActive
+            ? 'border-[var(--border-soft)] bg-[var(--surface2)]'
+            : 'border-[var(--border-soft)] bg-[rgba(32,32,33,0.52)] hover:bg-[rgba(39,39,40,0.72)]',
+      ].join(' ')}
+    >
+      <button
+        ref={setActivatorNodeRef}
+        type="button"
+        aria-label={`Drag scene ${sceneGroup.title}`}
+        className={[
+          'inline-flex size-8 shrink-0 touch-none items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]',
+          isDragging || isSortableDragging ? 'cursor-grabbing text-[var(--foreground)]' : 'cursor-grab',
+        ].join(' ')}
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="size-4" />
+      </button>
+      {isRenaming ? (
+        <input
+          value={sceneTitleDraft}
+          aria-label={`Rename ${sceneGroup.title}`}
+          autoFocus
+          onChange={(event) => onSceneTitleDraftChange(event.target.value)}
+          onBlur={onCommitSceneRename}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              onCommitSceneRename();
+            }
+            if (event.key === 'Escape') {
+              onCancelSceneRename();
+            }
+          }}
+          className="h-9 min-w-0 flex-1 rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.68)] px-3 text-[13px] font-medium text-[var(--foreground)] outline-none"
+        />
+      ) : (
+        <button
+          type="button"
+          aria-pressed={isActive}
+          onClick={() => onSelectSceneGroup(sceneGroup.id)}
+          className="h-9 min-w-0 flex-1 truncate rounded-full px-2 text-left text-[13px] font-medium text-[var(--foreground)]"
+        >
+          {sceneGroup.title}
+        </button>
+      )}
+      <button
+        type="button"
+        aria-label={`Rename scene ${sceneGroup.title}`}
+        onClick={() => onStartRenamingScene(sceneGroup)}
+        className="inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
+      >
+        <Pencil className="size-3.5" />
+      </button>
+      <button
+        type="button"
+        aria-label={`Delete scene ${sceneGroup.title}`}
+        onClick={() => onDeleteSceneGroup(sceneGroup.id)}
+        className="inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-[rgba(122,44,44,0.26)] hover:text-[rgb(244,208,208)]"
+      >
+        <Trash2 className="size-3.5" />
+      </button>
+    </div>
+  );
+}
+
+function DirectorWorkspace({
+  chatId,
+  messages,
+  onApproveDirectorAction,
+  onDeclineDirectorAction,
+}: {
+  chatId: string | null;
   messages: DirectorMessageRecord[];
+  onApproveDirectorAction: (messageId: string, actionIndex: number) => void;
+  onDeclineDirectorAction: (messageId: string, actionIndex: number) => void;
 }) {
   return (
-    <div data-testid="director-workspace" className="min-h-[calc(100vh-60px)] w-full px-6 pb-10 pt-8">
-      <div className="mx-auto w-full max-w-[1400px]">
-        <div className="min-w-0">
-          <DirectorMessageList messages={messages} />
+    <div data-testid="director-workspace" className="h-[calc(100vh-60px)] w-full overflow-hidden">
+      <div className="mx-auto h-full w-full max-w-[1400px]">
+        <div className="h-full min-w-0">
+          <DirectorMessageList
+            chatId={chatId}
+            messages={messages}
+            onApproveDirectorAction={onApproveDirectorAction}
+            onDeclineDirectorAction={onDeclineDirectorAction}
+          />
         </div>
       </div>
     </div>
@@ -5511,23 +6513,40 @@ function DirectorChatThreadRow({
 }
 
 function DirectorMessageRow({
-  index,
-  style,
-  messages,
-}: RowComponentProps<{
-  messages: DirectorMessageRecord[];
-}>) {
+  message,
+  onApproveDirectorAction,
+  onDeclineDirectorAction,
+}: {
+  message: DirectorMessageRecord;
+  onApproveDirectorAction: (messageId: string, actionIndex: number) => void;
+  onDeclineDirectorAction: (messageId: string, actionIndex: number) => void;
+}) {
   const [hasCopied, setHasCopied] = useState(false);
-  const message = messages[index];
-  if (!message) {
-    return null;
-  }
-
   const isUser = message.role === 'user';
-  const isThinking = message.role === 'assistant' && message.status === 'streaming' && !message.contentMarkdown.trim();
   const isAssistant = message.role === 'assistant';
+  const isStreamingAssistant = isAssistant && message.status === 'streaming';
+  const hasAssistantContent = message.contentMarkdown.trim().length > 0;
+  const isThinking = isStreamingAssistant && !hasAssistantContent;
   const isCompleteAssistant = isAssistant && message.status === 'completed' && message.contentMarkdown.trim().length > 0;
   const durationLabel = isCompleteAssistant ? formatDurationBetween(message.createdAt, message.updatedAt) : null;
+  const renderedBlocks = useMemo(
+    () => (isAssistant ? parseDirectorRenderedBlocks(message.contentMarkdown) : []),
+    [isAssistant, message.contentMarkdown]
+  );
+  const statusByActionIndex = useMemo(() => {
+    const nextStatusByActionIndex = new Map<number, Record<string, unknown>>();
+    for (const block of renderedBlocks) {
+      if (block.type !== 'status' || !block.data) {
+        continue;
+      }
+      const actionIndex = Number(block.data.actionIndex);
+      if (Number.isInteger(actionIndex)) {
+        nextStatusByActionIndex.set(actionIndex, block.data);
+      }
+    }
+    return nextStatusByActionIndex;
+  }, [renderedBlocks]);
+  let actionBlockIndex = -1;
 
   async function copyMessage() {
     if (!message.contentMarkdown.trim()) {
@@ -5545,7 +6564,7 @@ function DirectorMessageRow({
   }
 
   return (
-    <div style={style} className="px-6 py-3">
+    <div className="px-6 py-3">
       <Message
         from={isUser ? 'user' : 'assistant'}
         className={[
@@ -5568,12 +6587,46 @@ function DirectorMessageRow({
           ) : isUser ? (
             message.contentMarkdown
           ) : (
-            <MessageResponse
-              isAnimating={message.status === 'streaming'}
-              className="director-markdown text-[14px] leading-6 text-[var(--foreground)] [&_*]:tracking-[0] [&_a]:text-[var(--accent)] [&_a]:underline-offset-4 [&_code]:rounded-[6px] [&_code]:bg-white/8 [&_code]:px-1 [&_code]:py-0.5 [&_li]:my-1 [&_ol]:my-3 [&_p]:my-0 [&_p+p]:mt-3 [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:border [&_pre]:border-[var(--border-soft)] [&_pre]:bg-[rgba(15,16,16,0.72)] [&_pre]:p-3 [&_strong]:font-semibold [&_ul]:my-3"
-            >
-              {message.contentMarkdown}
-            </MessageResponse>
+            <div className="space-y-3">
+              {renderedBlocks.map((block, blockIndex) => {
+                if (block.type === 'action') {
+                  actionBlockIndex += 1;
+                  const actionIndex = actionBlockIndex;
+                  return (
+                    <DirectorActionBlock
+                      key={`${message.id}-action-${blockIndex}`}
+                      messageId={message.id}
+                      actionIndex={actionIndex}
+                      data={block.data}
+                      status={statusByActionIndex.get(actionIndex) ?? null}
+                      onApprove={onApproveDirectorAction}
+                      onDecline={onDeclineDirectorAction}
+                    />
+                  );
+                }
+                if (block.type === 'status') {
+                  const actionIndex = Number(block.data?.actionIndex);
+                  if (Number.isInteger(actionIndex)) {
+                    return null;
+                  }
+                  return <DirectorStatusBlock key={`${message.id}-status-${blockIndex}`} data={block.data} />;
+                }
+                return (
+                  <MessageResponse
+                    key={`${message.id}-markdown-${blockIndex}`}
+                    isAnimating={message.status === 'streaming'}
+                    className="director-markdown text-[14px] leading-6 text-[var(--foreground)] [&_*]:tracking-[0] [&_a]:text-[var(--accent)] [&_a]:underline-offset-4 [&_code]:rounded-[6px] [&_code]:bg-white/8 [&_code]:px-1 [&_code]:py-0.5 [&_li]:my-1 [&_ol]:my-3 [&_p]:my-0 [&_p+p]:mt-3 [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:border [&_pre]:border-[var(--border-soft)] [&_pre]:bg-[rgba(15,16,16,0.72)] [&_pre]:p-3 [&_strong]:font-semibold [&_ul]:my-3"
+                  >
+                  {block.content}
+                </MessageResponse>
+              );
+              })}
+              {isStreamingAssistant && hasAssistantContent ? (
+                <Shimmer className="text-[14px] leading-6 text-[var(--muted-foreground)]" duration={1.6}>
+                  Thinking...
+                </Shimmer>
+              ) : null}
+            </div>
           )}
           {message.status === 'failed' ? (
             <div className="mt-3 text-[12px] text-[rgb(245,178,178)]">This response ended with an error.</div>
@@ -5610,26 +6663,277 @@ function DirectorMessageRow({
   );
 }
 
-function DirectorMessageList({ messages }: { messages: DirectorMessageRecord[] }) {
-  const listRef = useListRef();
-  const rowHeight = useDynamicRowHeight({
-    defaultRowHeight: 112,
-    key: messages.map((message) => `${message.id}:${message.contentMarkdown.length}:${message.status}`).join('|'),
-  });
+interface DirectorMessageVirtualRowProps {
+  messages: DirectorMessageRecord[];
+  onApproveDirectorAction: (messageId: string, actionIndex: number) => void;
+  onDeclineDirectorAction: (messageId: string, actionIndex: number) => void;
+}
 
-  useEffect(() => {
+function DirectorMessageVirtualRow({
+  ariaAttributes,
+  index,
+  style,
+  messages,
+  onApproveDirectorAction,
+  onDeclineDirectorAction,
+}: RowComponentProps<DirectorMessageVirtualRowProps>) {
+  const message = messages[index];
+
+  if (!message) {
+    return null;
+  }
+
+  return (
+    <div
+      {...ariaAttributes}
+      className={[index === 0 ? 'pt-8' : '', index === messages.length - 1 ? 'pb-[320px]' : ''].join(' ')}
+      style={style as CSSProperties}
+    >
+      <DirectorMessageRow
+        message={message}
+        onApproveDirectorAction={onApproveDirectorAction}
+        onDeclineDirectorAction={onDeclineDirectorAction}
+      />
+    </div>
+  );
+}
+
+function DirectorActionBlock({
+  messageId,
+  actionIndex,
+  data,
+  status,
+  onApprove,
+  onDecline,
+}: {
+  messageId: string;
+  actionIndex: number;
+  data: Record<string, unknown> | null;
+  status: Record<string, unknown> | null;
+  onApprove: (messageId: string, actionIndex: number) => void;
+  onDecline: (messageId: string, actionIndex: number) => void;
+}) {
+  const action = getDirectorBlockText(data, 'action', 'unknown');
+  const summary = getDirectorBlockText(data, 'summary', 'Director prepared an app action.');
+  const statusValue = getDirectorBlockText(status, 'status', 'pending');
+  const payload = data?.payload && typeof data.payload === 'object' && !Array.isArray(data.payload)
+    ? data.payload as Record<string, unknown>
+    : null;
+  const progress = status?.progress && typeof status.progress === 'object' && !Array.isArray(status.progress)
+    ? status.progress as Record<string, unknown>
+    : null;
+  const generatedProgress = typeof progress?.generated === 'number' ? progress.generated : 0;
+  const totalProgress =
+    typeof progress?.total === 'number'
+      ? progress.total
+      : action === 'create_scene' && Array.isArray(payload?.frames)
+        ? payload.frames.length
+        : typeof payload?.count === 'number'
+          ? payload.count
+          : 0;
+  const sceneTitle = typeof payload?.title === 'string' ? payload.title : '';
+  const scenePrompt = typeof payload?.scenePrompt === 'string' ? payload.scenePrompt : '';
+  const frames = Array.isArray(payload?.frames)
+    ? payload.frames.filter((frame): frame is Record<string, unknown> => Boolean(frame) && typeof frame === 'object' && !Array.isArray(frame))
+    : [];
+  const targetLabel = action === 'create_scene' ? 'Scenes' : action === 'generate_classic' ? 'Classic' : 'Action';
+  const isPending = statusValue === 'pending';
+  const isRunning = statusValue === 'running';
+  const statusLabel = statusValue === 'failed' ? 'failed' : statusValue === 'declined' ? 'declined' : 'needs approval';
+  const statusTitle = status ? getDirectorBlockText(status, 'title') : '';
+  const statusDetail = status ? getDirectorBlockText(status, 'detail') : '';
+  const count =
+    action === 'create_scene' && Array.isArray(payload?.frames)
+      ? `${payload.frames.length} frame${payload.frames.length === 1 ? '' : 's'}`
+      : typeof payload?.count === 'number'
+        ? `${payload.count} image${payload.count === 1 ? '' : 's'}`
+        : null;
+
+  return (
+    <div className="rounded-[16px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] p-4 backdrop-blur-xl">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-[12px] font-medium text-[var(--muted-foreground)]">
+            <WandSparkles className="size-3.5 text-[var(--accent)]" />
+            Director action · {targetLabel}
+          </div>
+          <div className="mt-2 text-[14px] font-medium leading-5 text-[var(--foreground)]">{summary}</div>
+          {count ? <div className="mt-1 text-[12px] text-[var(--muted-foreground)]">{count}</div> : null}
+          {statusTitle ? <div className="mt-2 text-[12px] font-medium text-[var(--foreground)]">{statusTitle}</div> : null}
+          {statusDetail ? <div className="mt-1 text-[12px] leading-5 text-[var(--muted-foreground)]">{statusDetail}</div> : null}
+        </div>
+        <div
+          data-testid="director-action-status"
+          className="shrink-0 rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] px-3 py-1 text-[12px] text-[var(--foreground)]"
+        >
+          {isRunning || statusValue === 'succeeded' ? (
+            <span className="inline-flex items-center gap-1 [font-variant-numeric:tabular-nums]">
+              <span>{isRunning ? 'Gerando' : 'Gerado'}</span>
+              {' '}
+              <NumberFlow value={Math.max(0, generatedProgress)} className="inline-block" />
+              {' '}
+              <span className="text-[var(--muted-foreground)]">/ {Math.max(0, totalProgress)}</span>
+            </span>
+          ) : (
+            statusLabel
+          )}
+        </div>
+      </div>
+      {action === 'create_scene' && payload ? (
+        <div className="mt-4 space-y-3 rounded-[14px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.36)] p-3">
+          {sceneTitle ? (
+            <div>
+              <div className="text-[12px] text-[var(--muted-foreground)]">Scene</div>
+              <div className="mt-1 text-[13px] font-medium leading-5 text-[var(--foreground)]">{sceneTitle}</div>
+            </div>
+          ) : null}
+          {scenePrompt ? (
+            <div>
+              <div className="text-[12px] text-[var(--muted-foreground)]">Continuity brief</div>
+              <div className="mt-1 text-[13px] leading-5 text-[var(--foreground)]">{scenePrompt}</div>
+            </div>
+          ) : null}
+          {frames.length > 0 ? (
+            <div className="space-y-2">
+              {frames.map((frame, frameIndex) => {
+                const title = typeof frame.title === 'string' && frame.title.trim() ? frame.title.trim() : `Frame ${frameIndex + 1}`;
+                const prompt = typeof frame.prompt === 'string' ? frame.prompt.trim() : '';
+                const references = Array.isArray(frame.references)
+                  ? frame.references.filter((reference): reference is string => typeof reference === 'string' && reference.trim().length > 0)
+                  : [];
+                return (
+                  <details
+                    key={`${title}-${frameIndex}`}
+                    className="group rounded-[12px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.46)]"
+                  >
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-[13px] font-medium text-[var(--foreground)] marker:hidden">
+                      <span className="truncate">{title}</span>
+                      <ChevronDown className="size-3.5 shrink-0 text-[var(--muted-foreground)] transition-transform group-open:rotate-180" />
+                    </summary>
+                    <div className="border-t border-[var(--border-soft)] px-3 py-2 text-[12px] leading-5 text-[var(--muted-foreground)]">
+                      {prompt ? <div className="text-[var(--foreground)]">{prompt}</div> : null}
+                      {references.length > 0 ? (
+                        <div className="mt-2">References: {references.join(', ')}</div>
+                      ) : null}
+                    </div>
+                  </details>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {isPending ? (
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onApprove(messageId, actionIndex)}
+            className="inline-flex h-9 items-center gap-2 rounded-full border border-[color-mix(in_srgb,var(--accent)_46%,transparent)] bg-[color-mix(in_srgb,var(--accent)_20%,rgba(32,32,33,0.82))] px-4 text-[13px] font-medium text-[var(--foreground)] transition-colors hover:border-[color-mix(in_srgb,var(--accent)_62%,transparent)] hover:bg-[color-mix(in_srgb,var(--accent)_28%,rgba(32,32,33,0.88))]"
+          >
+            <Check className="size-3.5" />
+            Approve
+          </button>
+          <button
+            type="button"
+            onClick={() => onDecline(messageId, actionIndex)}
+            className="inline-flex h-9 items-center gap-2 rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-4 text-[13px] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[rgba(39,39,40,0.78)] hover:text-[var(--foreground)]"
+          >
+            <X className="size-3.5" />
+            Decline
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function DirectorStatusBlock({ data }: { data: Record<string, unknown> | null }) {
+  const status = getDirectorBlockText(data, 'status', 'running');
+  const title = getDirectorBlockText(data, 'title', 'Director orchestration');
+  const detail = getDirectorBlockText(data, 'detail');
+  const isRunning = status === 'running';
+  const isSucceeded = status === 'succeeded';
+  const isDeclined = status === 'declined';
+  const Icon = isRunning ? LoaderCircle : isSucceeded ? Check : isDeclined ? X : X;
+
+  return (
+    <div
+      className={[
+        'rounded-[16px] border p-4 backdrop-blur-xl',
+        isSucceeded
+          ? 'border-[rgba(90,180,125,0.32)] bg-[rgba(28,80,48,0.16)]'
+          : status === 'failed'
+            ? 'border-[rgba(190,58,58,0.38)] bg-[rgba(90,22,22,0.18)]'
+            : isDeclined
+              ? 'border-[var(--border-soft)] bg-[rgba(32,32,33,0.32)]'
+              : 'border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)]',
+      ].join(' ')}
+    >
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-[var(--surface2)] text-[var(--foreground)]">
+          <Icon className={['size-4', isRunning ? 'animate-spin text-[var(--accent)]' : ''].join(' ')} />
+        </span>
+        <span className="min-w-0">
+          <span className="block text-[14px] font-medium leading-5 text-[var(--foreground)]">{title}</span>
+          {detail ? <span className="mt-1 block text-[12px] leading-5 text-[var(--muted-foreground)]">{detail}</span> : null}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function DirectorMessageList({
+  chatId,
+  messages,
+  onApproveDirectorAction,
+  onDeclineDirectorAction,
+}: {
+  chatId: string | null;
+  messages: DirectorMessageRecord[];
+  onApproveDirectorAction: (messageId: string, actionIndex: number) => void;
+  onDeclineDirectorAction: (messageId: string, actionIndex: number) => void;
+}) {
+  const listRef = useListRef(null);
+  const isPinnedToBottomRef = useRef(true);
+  const rowHeight = useDynamicRowHeight({
+    defaultRowHeight: 180,
+    key: chatId ?? 'director-empty-chat',
+  });
+  const lastMessage = messages[messages.length - 1] ?? null;
+  const contentSignature = lastMessage
+    ? `${messages.length}:${lastMessage.id}:${lastMessage.contentMarkdown.length}:${lastMessage.status}`
+    : '0';
+  const rowProps = useMemo(
+    () => ({
+      messages,
+      onApproveDirectorAction,
+      onDeclineDirectorAction,
+    }),
+    [messages, onApproveDirectorAction, onDeclineDirectorAction]
+  );
+
+  const handleScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
+    const node = event.currentTarget;
+    isPinnedToBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 96;
+  }, []);
+
+  useLayoutEffect(() => {
     if (messages.length === 0) {
       return;
     }
+    if (!isPinnedToBottomRef.current) {
+      return;
+    }
     listRef.current?.scrollToRow({
-      index: messages.length - 1,
       align: 'end',
+      behavior: 'instant',
+      index: messages.length - 1,
     });
-  }, [listRef, messages]);
+  }, [contentSignature, messages.length]);
 
   if (messages.length === 0) {
     return (
-      <div className="flex min-h-[calc(100vh-220px)] items-center justify-center px-6">
+      <div className="flex h-full items-center justify-center px-6 pb-[260px] pt-8">
         <div className="max-w-[420px] text-center">
           <div className="text-[18px] font-medium text-[var(--foreground)]">Start directing this thread</div>
           <div className="mt-3 text-[14px] leading-6 text-[var(--muted-foreground)]">
@@ -5641,18 +6945,18 @@ function DirectorMessageList({ messages }: { messages: DirectorMessageRecord[] }
   }
 
   return (
-    <div className="h-[max(420px,calc(100vh-220px))]">
-      <List
-        listRef={listRef}
-        defaultHeight={720}
-        rowCount={messages.length}
-        rowHeight={rowHeight}
-        rowComponent={DirectorMessageRow}
-        rowProps={{ messages }}
-        overscanCount={4}
-        className="h-full"
-      />
-    </div>
+    <List<DirectorMessageVirtualRowProps>
+      listRef={listRef}
+      rowComponent={DirectorMessageVirtualRow}
+      rowCount={messages.length}
+      rowHeight={rowHeight}
+      rowProps={rowProps}
+      overscanCount={4}
+      defaultHeight={720}
+      className="h-full overscroll-contain"
+      onScroll={handleScroll}
+      style={{ height: '100%' }}
+    />
   );
 }
 
@@ -5674,6 +6978,7 @@ function ScenesSidebar({
   onSceneReferencesChange,
   onToggleFrame,
   onRenameFrame,
+  onDeleteFrame,
   onUpdateFramePrompt,
   onUpdateFrameReferences,
   onToggleRenameFrame,
@@ -5696,6 +7001,7 @@ function ScenesSidebar({
   onSceneReferencesChange: (references: SceneReferenceAttachment[]) => void;
   onToggleFrame: (frameId: string) => void;
   onRenameFrame: (frameId: string, title: string) => void;
+  onDeleteFrame: (frameId: string) => void;
   onUpdateFramePrompt: (frameId: string, prompt: string) => void;
   onUpdateFrameReferences: (frameId: string, references: SceneReferenceAttachment[]) => void;
   onToggleRenameFrame: (frameId: string) => void;
@@ -5768,6 +7074,7 @@ function ScenesSidebar({
             isLast={index === frames.length - 1}
             savedReferences={savedReferences}
             onRename={(title) => onRenameFrame(frame.id, title)}
+            onDelete={() => onDeleteFrame(frame.id)}
             onToggleRename={() => onToggleRenameFrame(frame.id)}
             onPromptChange={(prompt) => onUpdateFramePrompt(frame.id, prompt)}
             onReferencesChange={(references) => onUpdateFrameReferences(frame.id, references)}
@@ -5816,6 +7123,7 @@ function DirectorComposerBar({
   plusButtonRef,
   sendButtonRef,
   onPromptChange,
+  onMentionMatch,
   onMentionIdsChange,
   onCursorIndexChange,
   onScrollTopChange,
@@ -5869,6 +7177,7 @@ function DirectorComposerBar({
   plusButtonRef: RefObject<HTMLButtonElement | null>;
   sendButtonRef: RefObject<HTMLDivElement | null>;
   onPromptChange: (value: string) => void;
+  onMentionMatch: (match: { query: string; start: number } | null) => void;
   onMentionIdsChange: (ids: string[]) => void;
   onCursorIndexChange: (index: number) => void;
   onScrollTopChange: (value: number) => void;
@@ -5901,10 +7210,7 @@ function DirectorComposerBar({
   return (
     <motion.div
       key="director-composer"
-      initial={{ opacity: 0, y: 18, filter: 'blur(10px)' }}
-      animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-      exit={{ opacity: 0, y: 22, filter: 'blur(10px)' }}
-      transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+      {...COMPOSER_SHELL_MOTION}
       data-testid="director-composer"
       className="fixed bottom-0 z-10 pb-5 pl-4 pr-4 sm:pb-6 sm:pl-6 sm:pr-6"
       style={{ left: leftInset, right: rightInset }}
@@ -6012,7 +7318,7 @@ function DirectorComposerBar({
               hasReferenceImages={hasReferenceImages}
               mentionCandidates={referenceMentionCandidates}
               onTextChange={onPromptChange}
-              onMentionMatch={() => {}}
+              onMentionMatch={onMentionMatch}
               onMentionIdsChange={onMentionIdsChange}
               onCursorIndexChange={onCursorIndexChange}
               onScrollTopChange={onScrollTopChange}
@@ -6566,6 +7872,7 @@ function SceneFrameAccordion({
   isLast,
   savedReferences,
   onRename,
+  onDelete,
   onToggleRename,
   onPromptChange,
   onReferencesChange,
@@ -6579,6 +7886,7 @@ function SceneFrameAccordion({
   isLast: boolean;
   savedReferences: SavedReferenceImage[];
   onRename: (title: string) => void;
+  onDelete: () => void;
   onToggleRename: () => void;
   onPromptChange: (prompt: string) => void;
   onReferencesChange: (references: SceneReferenceAttachment[]) => void;
@@ -6642,6 +7950,18 @@ function SceneFrameAccordion({
           className="inline-flex h-9 w-9 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
         >
           <Pencil className="size-4" />
+        </button>
+        <button
+          type="button"
+          aria-label={`Delete ${frame.title}`}
+          disabled={isGenerationDisabled}
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete();
+          }}
+          className="inline-flex h-9 w-9 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-[rgba(190,58,58,0.18)] hover:text-[rgb(245,178,178)] disabled:cursor-default disabled:opacity-40"
+        >
+          <Trash2 className="size-4" />
         </button>
         <div className="inline-flex h-9 w-9 items-center justify-center rounded-full text-[var(--muted-foreground)]">
           {frame.isCollapsed ? (
@@ -8149,7 +9469,7 @@ function AddReferenceDialog({
                       <Plus className="size-4" />
                     </button>
                   </div>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  <div className="grid max-h-[min(44vh,420px)] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
                     {selectedFilePreviews.map((file) => (
                       <div
                         key={file.key}
@@ -8441,13 +9761,18 @@ function EditReferenceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className={isCollection ? 'max-w-[860px]' : 'max-w-[560px]'}>
-        <DialogHeader>
+      <DialogContent
+        className={[
+          'flex max-h-[calc(100vh-32px)] flex-col overflow-hidden p-0',
+          isCollection ? 'max-w-[860px]' : 'max-w-[560px]',
+        ].join(' ')}
+      >
+        <DialogHeader className="shrink-0 px-5 pt-5">
           <DialogTitle>Edit {categoryLabel}</DialogTitle>
           <DialogDescription>Update the reference metadata.</DialogDescription>
         </DialogHeader>
         <form
-          className="space-y-4 pt-2"
+          className="mt-5 flex min-h-0 flex-1 flex-col overflow-hidden"
           onSubmit={async (event) => {
             event.preventDefault();
             if (!reference || !trimmedTitle) return;
@@ -8471,100 +9796,102 @@ function EditReferenceDialog({
             onOpenChange(false);
           }}
         >
-          {isCollection ? (
-            <div className="space-y-2">
-              <div className="text-[13px] font-medium text-[var(--foreground)]">Images</div>
-              <div className="rounded-[20px] border border-[var(--border-soft)] bg-[var(--surface2)] p-3">
-                <Input
-                  ref={inputRef}
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  className="sr-only"
-                  onChange={(event) => {
-                    void appendFiles(event.target.files ?? []);
-                  }}
-                />
-                <div className="mb-3 flex items-center justify-end">
-                  <button
-                    type="button"
-                    onClick={() => inputRef.current?.click()}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[var(--surface)] text-[var(--foreground)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface3)]"
-                    aria-label="Add images"
-                  >
-                    <Plus className="size-4" />
-                  </button>
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 pb-4">
+            {isCollection ? (
+              <div className="space-y-2">
+                <div className="text-[13px] font-medium text-[var(--foreground)]">Images</div>
+                <div className="rounded-[20px] border border-[var(--border-soft)] bg-[var(--surface2)] p-3">
+                  <Input
+                    ref={inputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="sr-only"
+                    onChange={(event) => {
+                      void appendFiles(event.target.files ?? []);
+                    }}
+                  />
+                  <div className="mb-3 flex items-center justify-end">
+                    <button
+                      type="button"
+                      onClick={() => inputRef.current?.click()}
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[var(--surface)] text-[var(--foreground)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface3)]"
+                      aria-label="Add images"
+                    >
+                      <Plus className="size-4" />
+                    </button>
+                  </div>
+                  {attachments.length > 0 ? (
+                    <div className="grid max-h-[min(44vh,420px)] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
+                      {attachments.map((attachment) => (
+                        <div
+                          key={attachment.localKey}
+                          className="group relative overflow-hidden rounded-[16px] border border-[var(--border-soft)] bg-[var(--surface)]"
+                        >
+                          <div className="relative aspect-square overflow-hidden">
+                            <img src={attachment.previewUrl} alt={attachment.name} className="h-full w-full object-cover" />
+                            <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1.5 pt-4">
+                              <div className="line-clamp-1 text-[11px] text-white/92">{attachment.name}</div>
+                            </div>
+                            <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                              <button
+                                type="button"
+                                onClick={() => openAttachmentDescriptionDialog(attachment.localKey)}
+                                className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
+                                aria-label={`Edit description for ${attachment.name}`}
+                              >
+                                <Pencil className="size-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => removeAttachment(attachment.localKey)}
+                                className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-[rgba(190,58,58,0.65)]"
+                                aria-label={`Remove ${attachment.name}`}
+                              >
+                                <X className="size-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                          <div className="border-t border-[var(--border-soft)] px-2 py-1.5 text-[11px] text-[var(--muted-foreground)]">
+                            {attachment.description?.trim() ? 'Description added' : 'No description yet'}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-[14px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)] px-4 py-6 text-center text-[12px] text-[var(--muted-foreground)]">
+                      No images selected
+                    </div>
+                  )}
                 </div>
-                {attachments.length > 0 ? (
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    {attachments.map((attachment) => (
-                      <div
-                        key={attachment.localKey}
-                        className="group relative overflow-hidden rounded-[16px] border border-[var(--border-soft)] bg-[var(--surface)]"
-                      >
-                        <div className="relative aspect-square overflow-hidden">
-                          <img src={attachment.previewUrl} alt={attachment.name} className="h-full w-full object-cover" />
-                          <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1.5 pt-4">
-                            <div className="line-clamp-1 text-[11px] text-white/92">{attachment.name}</div>
-                          </div>
-                          <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                            <button
-                              type="button"
-                              onClick={() => openAttachmentDescriptionDialog(attachment.localKey)}
-                              className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
-                              aria-label={`Edit description for ${attachment.name}`}
-                            >
-                              <Pencil className="size-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => removeAttachment(attachment.localKey)}
-                              className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-[rgba(190,58,58,0.65)]"
-                              aria-label={`Remove ${attachment.name}`}
-                            >
-                              <X className="size-3.5" />
-                            </button>
-                          </div>
-                        </div>
-                        <div className="border-t border-[var(--border-soft)] px-2 py-1.5 text-[11px] text-[var(--muted-foreground)]">
-                          {attachment.description?.trim() ? 'Description added' : 'No description yet'}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="rounded-[14px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)] px-4 py-6 text-center text-[12px] text-[var(--muted-foreground)]">
-                    No images selected
-                  </div>
-                )}
               </div>
+            ) : null}
+            <div className="space-y-2">
+              <label htmlFor="edit-reference-title" className="text-[13px] font-medium text-[var(--foreground)]">
+                Reference title
+              </label>
+              <Input
+                id="edit-reference-title"
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="Reference title"
+                autoFocus
+              />
             </div>
-          ) : null}
-          <div className="space-y-2">
-            <label htmlFor="edit-reference-title" className="text-[13px] font-medium text-[var(--foreground)]">
-              Reference title
-            </label>
-            <Input
-              id="edit-reference-title"
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder="Reference title"
-              autoFocus
-            />
+            <div className="space-y-2">
+              <label htmlFor="edit-reference-description" className="text-[13px] font-medium text-[var(--foreground)]">
+                Reference description
+              </label>
+              <textarea
+                id="edit-reference-description"
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                placeholder="Optional description"
+                className="min-h-[120px] w-full resize-none rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] px-4 py-3 text-[14px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[var(--border-strong)]"
+              />
+            </div>
           </div>
-          <div className="space-y-2">
-            <label htmlFor="edit-reference-description" className="text-[13px] font-medium text-[var(--foreground)]">
-              Reference description
-            </label>
-            <textarea
-              id="edit-reference-description"
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-              placeholder="Optional description"
-              className="min-h-[120px] w-full resize-none rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] px-4 py-3 text-[14px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[var(--border-strong)]"
-            />
-          </div>
-          <div className="flex items-center justify-end gap-2 pt-1">
+          <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--border-soft)] bg-[color-mix(in_srgb,var(--surface)_96%,transparent)] px-5 py-4 backdrop-blur-xl">
             <Button
               type="button"
               variant="surface"

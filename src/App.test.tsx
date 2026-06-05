@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import type { CSSProperties, ComponentType } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { App } from './App';
+import { App, COMPOSER_SHELL_MOTION, getReferenceMentionReplacementRange } from './App';
 import * as electronApi from './lib/electron-api';
 import * as errors from './lib/errors';
 import { toast } from 'sonner';
@@ -12,6 +12,12 @@ let scenePlanListener:
   | null = null;
 let sceneFrameReadyListener:
   | ((event: { threadId: string; sceneGroupId: string; frameId: string }) => void)
+  | null = null;
+let directorSceneReadyListener:
+  | ((event: { threadId: string; sceneGroupId: string }) => void)
+  | null = null;
+let imageReadyListener:
+  | ((event: { jobId: string; clientRunId?: string; threadId: string; asset: Record<string, unknown> }) => void)
   | null = null;
 let directorMessageStartListener:
   | ((event: {
@@ -254,6 +260,10 @@ vi.mock('./lib/electron-api', () => ({
     );
     return sceneGroupsFixture.find((sceneGroup) => sceneGroup.id === sceneGroupId);
   }),
+  deleteSceneGroup: vi.fn(async (sceneGroupId: string) => {
+    sceneGroupsFixture = sceneGroupsFixture.filter((sceneGroup) => sceneGroup.id !== sceneGroupId);
+    return sceneGroupsFixture;
+  }),
   createSceneFrame: vi.fn(async (sceneGroupId: string, input: { title: string; prompt: string; frameOrder: number }) => {
     sceneGroupsFixture = sceneGroupsFixture.map((sceneGroup) =>
       sceneGroup.id === sceneGroupId
@@ -286,6 +296,19 @@ vi.mock('./lib/electron-api', () => ({
       updatedGroup = {
         ...sceneGroup,
         frames: sceneGroup.frames.map((frame) => (frame.id === sceneFrameId ? { ...frame, ...input } : frame)),
+      };
+      return updatedGroup;
+    });
+    return updatedGroup;
+  }),
+  deleteSceneFrame: vi.fn(async (sceneFrameId: string) => {
+    let updatedGroup = null;
+    sceneGroupsFixture = sceneGroupsFixture.map((sceneGroup) => {
+      const hasFrame = sceneGroup.frames.some((frame) => frame.id === sceneFrameId);
+      if (!hasFrame) return sceneGroup;
+      updatedGroup = {
+        ...sceneGroup,
+        frames: sceneGroup.frames.filter((frame) => frame.id !== sceneFrameId),
       };
       return updatedGroup;
     });
@@ -398,6 +421,46 @@ vi.mock('./lib/electron-api', () => ({
       assistantMessage,
     };
   }),
+  approveDirectorAction: vi.fn(async ({ messageId, actionIndex }: { messageId: string; actionIndex: number }) => {
+    const message = Object.values(directorMessagesFixtureByChat).flat().find((entry) => entry.id === messageId);
+    if (!message) return null;
+    const updated = {
+      ...message,
+      contentMarkdown: `${message.contentMarkdown}\n\n\`\`\`imagen-status\n${JSON.stringify({
+        version: 1,
+        kind: 'orchestration',
+        status: 'running',
+        title: 'Calling Classic generation',
+        action: 'generate_classic',
+        actionIndex,
+      })}\n\`\`\``,
+      updatedAt: '2026-06-01T12:16:00.000Z',
+    };
+    directorMessagesFixtureByChat[message.chatId] = (directorMessagesFixtureByChat[message.chatId] ?? []).map((entry) =>
+      entry.id === messageId ? updated : entry
+    );
+    return updated;
+  }),
+  declineDirectorAction: vi.fn(async ({ messageId, actionIndex }: { messageId: string; actionIndex: number }) => {
+    const message = Object.values(directorMessagesFixtureByChat).flat().find((entry) => entry.id === messageId);
+    if (!message) return null;
+    const updated = {
+      ...message,
+      contentMarkdown: `${message.contentMarkdown}\n\n\`\`\`imagen-status\n${JSON.stringify({
+        version: 1,
+        kind: 'orchestration',
+        status: 'declined',
+        title: 'Director request declined',
+        action: 'generate_classic',
+        actionIndex,
+      })}\n\`\`\``,
+      updatedAt: '2026-06-01T12:16:00.000Z',
+    };
+    directorMessagesFixtureByChat[message.chatId] = (directorMessagesFixtureByChat[message.chatId] ?? []).map((entry) =>
+      entry.id === messageId ? updated : entry
+    );
+    return updated;
+  }),
   cancelDirectorChat: vi.fn(async () => true),
   subscribeToDirectorMessageStart: vi.fn((listener) => {
     directorMessageStartListener = listener;
@@ -455,6 +518,22 @@ vi.mock('./lib/electron-api', () => ({
     return () => {
       if (sceneFrameReadyListener === listener) {
         sceneFrameReadyListener = null;
+      }
+    };
+  }),
+  subscribeToDirectorSceneReady: vi.fn((listener) => {
+    directorSceneReadyListener = listener;
+    return () => {
+      if (directorSceneReadyListener === listener) {
+        directorSceneReadyListener = null;
+      }
+    };
+  }),
+  subscribeToImageReady: vi.fn((listener) => {
+    imageReadyListener = listener;
+    return () => {
+      if (imageReadyListener === listener) {
+        imageReadyListener = null;
       }
     };
   }),
@@ -630,18 +709,23 @@ vi.mock('./components/project-row', () => ({
   ProjectRow: ({
     id,
     name,
+    onPrepareThreadDraft,
     onOpenProperties,
     onRename,
     onDelete,
   }: {
     id: string;
     name: string;
+    onPrepareThreadDraft: (projectId: string) => void;
     onOpenProperties: (projectId: string) => void;
     onRename: () => void;
     onDelete: () => void;
   }) => (
     <div>
       <div>{name}</div>
+      <button type="button" aria-label={`Start a new thread in ${name}`} onClick={() => onPrepareThreadDraft(id)}>
+        New thread {name}
+      </button>
       <button type="button" onClick={() => onOpenProperties(id)}>
         Properties {name}
       </button>
@@ -691,6 +775,8 @@ describe('App header thread title', () => {
     vi.restoreAllMocks();
     scenePlanListener = null;
     sceneFrameReadyListener = null;
+    directorSceneReadyListener = null;
+    imageReadyListener = null;
     directorMessageStartListener = null;
     directorMessageDeltaListener = null;
     directorMessageCompleteListener = null;
@@ -769,6 +855,26 @@ describe('App header thread title', () => {
     });
 
     expect(screen.getByRole('heading', { name: 'Thread Two' })).toBeInTheDocument();
+  });
+
+  it('does not load scene groups while switching threads in Classic mode', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Classic' })).toHaveAttribute('aria-pressed', 'true');
+    expect(electronApi.listSceneGroups).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Thread Two' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('heading', { name: 'Thread Two' })).toBeInTheDocument();
+    expect(electronApi.listSceneGroups).not.toHaveBeenCalled();
   });
 
   it('renames a thread when the rename dialog is confirmed', async () => {
@@ -1044,6 +1150,122 @@ describe('App header thread title', () => {
 
     expect(vi.mocked(toast.message)).toHaveBeenCalledWith('Generating 6 images');
     expect(screen.getAllByLabelText(/loading$/i)).toHaveLength(6);
+
+    await act(async () => {
+      resolveGeneration?.({ jobId: 'job-1', assets: [] });
+      await vi.runAllTimersAsync();
+    });
+  });
+
+  it('replaces a generation shimmer as soon as an image ready event arrives', async () => {
+    let resolveGeneration: ((value: { jobId: string; assets: [] }) => void) | null = null;
+    vi.mocked(electronApi.generateImages).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        })
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByRole('textbox'), {
+        target: { value: 'A compact studio render' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const request = vi.mocked(electronApi.generateImages).mock.calls[0]?.[0];
+    expect(request?.clientRunId).toBeTruthy();
+
+    await act(async () => {
+      imageReadyListener?.({
+        jobId: 'job-1',
+        clientRunId: request?.clientRunId,
+        threadId: 'thread-1',
+        asset: {
+          id: 'asset-ready-1',
+          fileName: 'ready-frame.png',
+          fileUrl: 'crenv-asset://generated-images/ready-frame.png',
+          createdAt: '2026-06-01T12:20:00.000Z',
+          provider: 'codex',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Select ready-frame.png' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveGeneration?.({ jobId: 'job-1', assets: [] });
+      await vi.runAllTimersAsync();
+    });
+  });
+
+  it('shows generation loading immediately when submitting from a new draft thread', async () => {
+    let resolveGeneration: ((value: { jobId: string; assets: [] }) => void) | null = null;
+
+    vi.mocked(electronApi.createThread).mockResolvedValueOnce({
+      id: 'thread-created-for-generation',
+      projectId: 'project-1',
+      name: 'Thread Three',
+      createdAt: '2026-06-01T12:20:00.000Z',
+      updatedAt: '2026-06-01T12:20:00.000Z',
+      hasRunningJob: false,
+    });
+    vi.mocked(electronApi.generateImages).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        })
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Expand sidebar'));
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByLabelText('Start a new thread in Project One'));
+
+    await act(async () => {
+      fireEvent.change(screen.getByRole('textbox'), {
+        target: { value: 'Generate the first image in a brand new thread.' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.createThread).toHaveBeenCalledWith('project-1');
+    expect(electronApi.generateImages).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: 'thread-created-for-generation',
+        prompt: expect.stringContaining('Generate the first image in a brand new thread.'),
+      })
+    );
+    expect(screen.getAllByLabelText(/loading$/i)).toHaveLength(1);
 
     await act(async () => {
       resolveGeneration?.({ jobId: 'job-1', assets: [] });
@@ -2134,6 +2356,7 @@ describe('App header thread title', () => {
     expect(screen.getByRole('button', { name: 'Classic' })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByTestId('scenes-workspace')).toBeInTheDocument();
     expect(screen.getByTestId('scenes-sidebar')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Scene 1' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'Frame 1' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Frame 2' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Generate frames' })).toBeInTheDocument();
@@ -2156,6 +2379,219 @@ describe('App header thread title', () => {
     fireEvent.click(screen.getByRole('button', { name: 'New frame' }));
 
     expect(screen.getByRole('button', { name: 'Frame 3' })).toBeInTheDocument();
+  });
+
+  it('keeps composer shell motion from creating a backdrop-filter root', () => {
+    expect(COMPOSER_SHELL_MOTION.initial).not.toHaveProperty('filter');
+    expect(COMPOSER_SHELL_MOTION.animate).not.toHaveProperty('filter');
+    expect(COMPOSER_SHELL_MOTION.exit).not.toHaveProperty('filter');
+  });
+
+  it('does not create default frames for a new empty Scenes group', async () => {
+    sceneGroupsFixture = [];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.createSceneGroup).toHaveBeenCalledWith('thread-1', {
+      title: 'Scene 1',
+      prompt: '',
+      tocOrder: 1,
+    });
+    expect(electronApi.createSceneFrame).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Frame 1' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Frame 2' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New frame' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.createSceneFrame).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Frame 1' })).toBeInTheDocument();
+  });
+
+  it('switches between generated scenes and renames the active scene', async () => {
+    sceneGroupsFixture = [
+      {
+        ...makeSceneGroupsFixture()[0],
+        id: 'scene-group-2',
+        title: 'Reveal scene',
+        tocOrder: 2,
+        frames: [
+          {
+            ...makeSceneGroupsFixture()[0].frames[0],
+            id: 'scene-frame-3',
+            sceneGroupId: 'scene-group-2',
+            title: 'Reveal frame',
+            prompt: 'Reveal prompt.',
+          },
+        ],
+      },
+      makeSceneGroupsFixture()[0],
+    ];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Reveal scene' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Reveal frame' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scene 1' }));
+
+    expect(screen.getByRole('button', { name: 'Scene 1' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Frame 1' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename scene Scene 1' }));
+    fireEvent.change(screen.getByDisplayValue('Scene 1'), {
+      target: { value: 'Garage entry' },
+    });
+    fireEvent.blur(screen.getByDisplayValue('Garage entry'));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.updateSceneGroup).toHaveBeenCalledWith('scene-group-1', {
+      title: 'Garage entry',
+      prompt: '',
+      tocOrder: 1,
+    });
+    expect(screen.getByRole('button', { name: 'Garage entry' })).toBeInTheDocument();
+  });
+
+  it('manages scenes from the workspace rail with search, drag reorder, and delete', async () => {
+    sceneGroupsFixture = [
+      {
+        ...makeSceneGroupsFixture()[0],
+        id: 'scene-group-2',
+        title: 'Reveal scene',
+        tocOrder: 2,
+        frames: [
+          {
+            ...makeSceneGroupsFixture()[0].frames[0],
+            id: 'scene-frame-3',
+            sceneGroupId: 'scene-group-2',
+            title: 'Reveal frame',
+            prompt: 'Reveal prompt.',
+          },
+        ],
+      },
+      makeSceneGroupsFixture()[0],
+    ];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const rail = screen.getByTestId('scene-workspace-rail');
+    expect(within(rail).getByRole('button', { name: 'Reveal scene' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(rail).getByRole('button', { name: 'Scene 1' })).toBeInTheDocument();
+
+    fireEvent.change(within(rail).getByRole('searchbox', { name: 'Search scenes' }), {
+      target: { value: 'reveal' },
+    });
+
+    expect(within(rail).getByRole('button', { name: 'Reveal scene' })).toBeInTheDocument();
+    expect(within(rail).queryByRole('button', { name: 'Scene 1' })).not.toBeInTheDocument();
+
+    fireEvent.change(within(rail).getByRole('searchbox', { name: 'Search scenes' }), {
+      target: { value: '' },
+    });
+
+    const sceneOneDragHandle = within(rail).getByRole('button', { name: 'Drag scene Scene 1' });
+    const sceneOneItem = within(rail).getByTestId('scene-rail-item-scene-group-1');
+    const revealSceneItem = within(rail).getByTestId('scene-rail-item-scene-group-2');
+
+    fireEvent.mouseDown(sceneOneDragHandle, { button: 0, clientX: 20, clientY: 80 });
+    fireEvent.mouseMove(document, { button: 0, clientX: 20, clientY: 88 });
+    expect(sceneOneItem).toHaveAttribute('data-dragging', 'true');
+
+    fireEvent.mouseMove(document, { button: 0, clientX: 20, clientY: 20 });
+    fireEvent.mouseOver(revealSceneItem, { button: 0, clientX: 20, clientY: 20 });
+    fireEvent.mouseUp(document, { button: 0, clientX: 20, clientY: 20 });
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(sceneOneItem).toHaveAttribute('data-dragging', 'false');
+    expect(electronApi.updateSceneGroup).toHaveBeenCalledWith('scene-group-1', {
+      title: 'Scene 1',
+      prompt: '',
+      tocOrder: 1,
+    });
+    expect(electronApi.updateSceneGroup).toHaveBeenCalledWith('scene-group-2', {
+      title: 'Reveal scene',
+      prompt: '',
+      tocOrder: 2,
+    });
+
+    fireEvent.click(within(rail).getByRole('button', { name: 'Delete scene Reveal scene' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.deleteSceneGroup).toHaveBeenCalledWith('scene-group-2');
+    expect(within(rail).queryByRole('button', { name: 'Reveal scene' })).not.toBeInTheDocument();
+    expect(within(rail).getByRole('button', { name: 'Scene 1' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('deletes a frame from the active scene without deleting the scene', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Scene 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Frame 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Frame 2' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Frame 2' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.deleteSceneFrame).toHaveBeenCalledWith('scene-frame-2');
+    expect(screen.getByRole('button', { name: 'Scene 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Frame 1' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Frame 2' })).not.toBeInTheDocument();
   });
 
   it('converts pasted scene mentions using saved references case-insensitively', async () => {
@@ -2406,8 +2842,9 @@ describe('App header thread title', () => {
     expect(screen.getByRole('button', { name: 'Generate frames' })).not.toBeDisabled();
     expect(screen.queryByLabelText('Frame 1 · 1 loading')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Frame 2 · 1 loading')).not.toBeInTheDocument();
-    expect(screen.getByText(/outputs/i)).toBeInTheDocument();
-    expect(screen.getByText('Codex / GPT-5.4 Mini')).toBeInTheDocument();
+    expect(screen.getByTestId('scene-workspace-rail')).toBeInTheDocument();
+    expect(screen.queryByText(/outputs/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('Codex / GPT-5.4 Mini')).not.toBeInTheDocument();
     expect(screen.getByText('Frame 1 · 1')).toBeInTheDocument();
     expect(screen.getByText('Frame 2 · 1')).toBeInTheDocument();
   });
@@ -3865,6 +4302,356 @@ describe('App header thread title', () => {
     expect(screen.getByRole('button', { name: /Model GPT-5\.4 Mini/i })).toBeInTheDocument();
   });
 
+  it('virtualizes Director chat messages during streaming', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        userMessage: {
+          id: 'director-user-message',
+          chatId: 'director-chat-1',
+          role: 'user',
+          contentMarkdown: 'Generate a shot plan.',
+          status: 'completed',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+        assistantMessage: {
+          id: 'director-assistant-message',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: '',
+          status: 'streaming',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:01.000Z',
+          updatedAt: '2026-06-01T12:15:01.000Z',
+        },
+      });
+      directorMessageDeltaListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        messageId: 'director-assistant-message',
+        delta: 'First beat.',
+        content: 'First beat.',
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    const directorWorkspace = screen.getByTestId('director-workspace');
+    expect(within(directorWorkspace).getByTestId('virtualized-list')).toBeInTheDocument();
+    expect(within(directorWorkspace).getByText('First beat.')).toBeInTheDocument();
+  });
+
+  it('evicts old inactive Director chat histories from the renderer cache', async () => {
+    directorChatsFixtureByThread['thread-1'] = Array.from({ length: 4 }, (_, index) => ({
+      id: `director-chat-${index + 1}`,
+      threadId: 'thread-1',
+      title: `Director chat ${index + 1}`,
+      createdAt: `2026-06-01T09:0${index}:00.000Z`,
+      updatedAt: `2026-06-01T09:0${index}:00.000Z`,
+    }));
+    directorMessagesFixtureByChat = Object.fromEntries(
+      directorChatsFixtureByThread['thread-1'].map((chat, index) => [
+        chat.id,
+        [
+          {
+            id: `director-msg-${index + 1}`,
+            chatId: chat.id,
+            role: 'assistant' as const,
+            contentMarkdown: `Cached notes ${index + 1}.`,
+            status: 'completed' as const,
+            modelId: 'codex-gpt-5-4-mini',
+            modelLabel: 'Codex / GPT-5.4 Mini',
+            fastMode: true,
+            references: [],
+            createdAt: `2026-06-01T09:1${index}:00.000Z`,
+            updatedAt: `2026-06-01T09:1${index}:00.000Z`,
+          },
+        ],
+      ])
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    for (const title of ['Director chat 2', 'Director chat 3', 'Director chat 4']) {
+      fireEvent.click(screen.getByText(title).closest('button')!);
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+
+    vi.mocked(electronApi.listDirectorMessages).mockClear();
+
+    fireEvent.click(screen.getByText('Director chat 1').closest('button')!);
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.listDirectorMessages).toHaveBeenCalledWith('director-chat-1');
+    expect(within(screen.getByTestId('director-workspace')).getByText('Cached notes 1.')).toBeInTheDocument();
+  });
+
+  it('keeps Director open when a Director scene action starts building', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    sceneGroupsFixture = [
+      {
+        id: 'director-scene-group',
+        threadId: 'thread-1',
+        title: 'Garagem - Entrada',
+        prompt: 'Locked garage entrance continuity.',
+        tocOrder: 2,
+        createdAt: '2026-06-01T12:30:00.000Z',
+        updatedAt: '2026-06-01T12:30:00.000Z',
+        frames: [
+          {
+            id: 'director-scene-frame-4',
+            sceneGroupId: 'director-scene-group',
+            title: 'Frame 4',
+            prompt: 'Medium close shot of the activation reveal.',
+            frameOrder: 4,
+            createdAt: '2026-06-01T12:30:00.000Z',
+            updatedAt: '2026-06-01T12:30:00.000Z',
+            references: [],
+            assets: [],
+          },
+        ],
+        runs: [],
+      },
+      ...makeSceneGroupsFixture(),
+    ];
+
+    await act(async () => {
+      directorSceneReadyListener?.({
+        threadId: 'thread-1',
+        sceneGroupId: 'director-scene-group',
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Director' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('director-workspace')).toBeInTheDocument();
+  });
+
+  it('shows Director scene action frame details before approval', async () => {
+    directorMessagesFixtureByChat['director-chat-1'] = [
+      {
+        id: 'director-scene-action-message',
+        chatId: 'director-chat-1',
+        role: 'assistant',
+        contentMarkdown: [
+          'Ready to build this scene.',
+          '```imagen-action',
+          JSON.stringify({
+            version: 1,
+            action: 'create_scene',
+            summary: 'Build the garage reveal.',
+            payload: {
+              title: 'Garage reveal',
+              scenePrompt: 'Keep the garage layout locked.',
+              frames: [
+                { title: 'Frame 1', prompt: 'Wide establishing view.', references: ['@Garagem'] },
+                { title: 'Frame 2', prompt: 'Closer reveal on Tito.', references: ['@Tito'] },
+              ],
+            },
+          }),
+          '```',
+        ].join('\n'),
+        status: 'completed',
+        modelId: 'codex-gpt-5-4-mini',
+        modelLabel: 'Codex / GPT-5.4 Mini',
+        fastMode: true,
+        references: [],
+        createdAt: '2026-06-01T09:05:00.000Z',
+        updatedAt: '2026-06-01T09:05:00.000Z',
+      },
+    ];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByText('Garage reveal')).toBeInTheDocument();
+    expect(screen.getByText('Frame 1')).toBeInTheDocument();
+    expect(screen.getByText('Frame 2')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Frame 1'));
+    expect(screen.getByText('Wide establishing view.')).toBeInTheDocument();
+  });
+
+  it('shows Director scene generation progress in the action card', async () => {
+    directorMessagesFixtureByChat['director-chat-1'] = [
+      {
+        id: 'director-scene-action-message',
+        chatId: 'director-chat-1',
+        role: 'assistant',
+        contentMarkdown: [
+          'Building this scene.',
+          '```imagen-action',
+          JSON.stringify({
+            version: 1,
+            action: 'create_scene',
+            summary: 'Build the garage reveal.',
+            payload: {
+              title: 'Garage reveal',
+              scenePrompt: 'Keep the garage layout locked.',
+              frames: [
+                { title: 'Frame 1', prompt: 'Wide establishing view.' },
+                { title: 'Frame 2', prompt: 'Closer reveal on Tito.' },
+              ],
+            },
+          }),
+          '```',
+          '```imagen-status',
+          JSON.stringify({
+            version: 1,
+            kind: 'orchestration',
+            status: 'running',
+            title: 'Generating scene',
+            action: 'create_scene',
+            actionIndex: 0,
+            progress: { generated: 1, total: 2 },
+            result: { sceneGroupId: 'director-scene-group' },
+          }),
+          '```',
+        ].join('\n'),
+        status: 'completed',
+        modelId: 'codex-gpt-5-4-mini',
+        modelLabel: 'Codex / GPT-5.4 Mini',
+        fastMode: true,
+        references: [],
+        createdAt: '2026-06-01T09:05:00.000Z',
+        updatedAt: '2026-06-01T09:05:00.000Z',
+      },
+    ];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('director-action-status')).toHaveTextContent('Gerando 1 / 2');
+  });
+
+  it('renders only the latest Director orchestration status for a scene action', async () => {
+    directorMessagesFixtureByChat['director-chat-1'] = [
+      {
+        id: 'director-scene-action-message',
+        chatId: 'director-chat-1',
+        role: 'assistant',
+        contentMarkdown: [
+          'Building this scene.',
+          '```imagen-action',
+          JSON.stringify({
+            version: 1,
+            action: 'create_scene',
+            summary: 'Build the garage reveal.',
+            payload: {
+              title: 'Garage reveal',
+              scenePrompt: 'Keep the garage layout locked.',
+              frames: [
+                { title: 'Frame 1', prompt: 'Wide establishing view.' },
+                { title: 'Frame 2', prompt: 'Closer reveal on Tito.' },
+              ],
+            },
+          }),
+          '```',
+          '```imagen-status',
+          JSON.stringify({
+            version: 1,
+            kind: 'orchestration',
+            status: 'running',
+            title: 'Generating scene',
+            detail: 'Generated 1 of 2 frames.',
+            action: 'create_scene',
+            actionIndex: 0,
+            progress: { generated: 1, total: 2 },
+            result: { sceneGroupId: 'director-scene-group' },
+          }),
+          '```',
+          '```imagen-status',
+          JSON.stringify({
+            version: 1,
+            kind: 'orchestration',
+            status: 'succeeded',
+            title: 'Scene generation finished',
+            detail: 'Generated 2 of 2 frames.',
+            action: 'create_scene',
+            actionIndex: 0,
+            progress: { generated: 2, total: 2 },
+            result: { sceneGroupId: 'director-scene-group' },
+          }),
+          '```',
+        ].join('\n'),
+        status: 'completed',
+        modelId: 'codex-gpt-5-4-mini',
+        modelLabel: 'Codex / GPT-5.4 Mini',
+        fastMode: true,
+        references: [],
+        createdAt: '2026-06-01T09:05:00.000Z',
+        updatedAt: '2026-06-01T09:05:00.000Z',
+      },
+    ];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('director-action-status')).toHaveTextContent('Gerado 2 / 2');
+    expect(screen.queryByText('Generated 1 of 2 frames.')).not.toBeInTheDocument();
+    expect(screen.getByText('Scene generation finished')).toBeInTheDocument();
+    expect(screen.getByText('Generated 2 of 2 frames.')).toBeInTheDocument();
+  });
+
   it('creates Director chats from the thread rail and keeps them in the current thread', async () => {
     render(<App />);
 
@@ -3925,6 +4712,128 @@ describe('App header thread title', () => {
         prompt: 'Block out a clean six-shot sequence.',
       })
     );
+  });
+
+  it('approves a pending Director action from the chat message', async () => {
+    directorMessagesFixtureByChat['director-chat-1'] = [
+      {
+        id: 'director-action-message',
+        chatId: 'director-chat-1',
+        role: 'assistant',
+        contentMarkdown: [
+          'Ready to generate the selected frame.',
+          '```imagen-action',
+          JSON.stringify({
+            version: 1,
+            action: 'generate_classic',
+            summary: 'Generate one garage frame.',
+            payload: {
+              prompt: 'Medium close shot in the garage.',
+              count: 1,
+              aspectRatio: '16:9',
+              references: ['@Garagem'],
+            },
+          }),
+          '```',
+        ].join('\n'),
+        status: 'completed',
+        modelId: 'codex-gpt-5-4-mini',
+        modelLabel: 'Codex / GPT-5.4 Mini',
+        fastMode: true,
+        references: [],
+        createdAt: '2026-06-01T09:05:00.000Z',
+        updatedAt: '2026-06-01T09:05:00.000Z',
+      },
+    ];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByText('Generate one garage frame.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(vi.mocked(electronApi.approveDirectorAction)).toHaveBeenCalledWith({
+      messageId: 'director-action-message',
+      actionIndex: 0,
+    });
+    expect(screen.getByText('Calling Classic generation')).toBeInTheDocument();
+  });
+
+  it('declines a pending Director action from the chat message', async () => {
+    directorMessagesFixtureByChat['director-chat-1'] = [
+      {
+        id: 'director-action-message',
+        chatId: 'director-chat-1',
+        role: 'assistant',
+        contentMarkdown: [
+          'Ready to generate the selected frame.',
+          '```imagen-action',
+          JSON.stringify({
+            version: 1,
+            action: 'generate_classic',
+            summary: 'Generate one garage frame.',
+            payload: {
+              prompt: 'Medium close shot in the garage.',
+              count: 1,
+              aspectRatio: '16:9',
+              references: ['@Garagem'],
+            },
+          }),
+          '```',
+        ].join('\n'),
+        status: 'completed',
+        modelId: 'codex-gpt-5-4-mini',
+        modelLabel: 'Codex / GPT-5.4 Mini',
+        fastMode: true,
+        references: [],
+        createdAt: '2026-06-01T09:05:00.000Z',
+        updatedAt: '2026-06-01T09:05:00.000Z',
+      },
+    ];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Decline' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(vi.mocked(electronApi.declineDirectorAction)).toHaveBeenCalledWith({
+      messageId: 'director-action-message',
+      actionIndex: 0,
+    });
+    expect(screen.getByText('Director request declined')).toBeInTheDocument();
+  });
+
+  it('limits Director @ reference replacement to the active tag instead of trailing pasted text', () => {
+    expect(
+      getReferenceMentionReplacementRange(
+        { query: 'gar', start: 'Use '.length },
+        'Use @gar'.length
+      )
+    ).toEqual({ start: 4, end: 8 });
   });
 
   it('inserts grouped @ references from the Director composer', async () => {
@@ -4252,6 +5161,99 @@ describe('App header thread title', () => {
     expect(within(directorWorkspace).queryByText('Director')).not.toBeInTheDocument();
   });
 
+  it('creates a real thread before sending Director text from an empty draft thread', async () => {
+    vi.mocked(electronApi.createThread).mockResolvedValueOnce({
+      id: 'thread-created-for-director',
+      projectId: 'project-1',
+      name: 'Thread Three',
+      createdAt: '2026-06-01T12:20:00.000Z',
+      updatedAt: '2026-06-01T12:20:00.000Z',
+      hasRunningJob: false,
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Expand sidebar'));
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByLabelText('Start a new thread in Project One'));
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getAllByRole('textbox').at(-1)!;
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Plan the first shot in this empty thread.' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.createThread).toHaveBeenCalledWith('project-1');
+    expect(electronApi.createDirectorChat).toHaveBeenCalledWith('thread-created-for-director');
+    expect(electronApi.sendDirectorMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: 'thread-created-for-director',
+        prompt: 'Plan the first shot in this empty thread.',
+      })
+    );
+  });
+
+  it('shows a Director Thinking placeholder while waiting for the backend to start streaming', async () => {
+    let resolveSend:
+      | ((value: Awaited<ReturnType<typeof electronApi.sendDirectorMessage>>) => void)
+      | null = null;
+    vi.mocked(electronApi.sendDirectorMessage).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getAllByRole('textbox').at(-1)!;
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Draft a compact beat board.' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const directorWorkspace = screen.getByTestId('director-workspace');
+    expect(within(directorWorkspace).getByText('Draft a compact beat board.')).toBeInTheDocument();
+    expect(within(directorWorkspace).getByText('Thinking...')).toBeInTheDocument();
+    expect(resolveSend).toBeTypeOf('function');
+  });
+
   it('streams Director responses into the active chat and swaps Send into Stop', async () => {
     render(<App />);
 
@@ -4321,6 +5323,72 @@ describe('App header thread title', () => {
 
     expect(screen.getByText((content) => content.includes('Shot 1'))).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Enviar' })).toBeInTheDocument();
+  });
+
+  it('keeps showing Director Thinking while a streamed response waits between deltas', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        userMessage: {
+          id: 'director-user-message',
+          chatId: 'director-chat-1',
+          role: 'user',
+          contentMarkdown: 'Generate and review options.',
+          status: 'completed',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+        assistantMessage: {
+          id: 'director-assistant-message',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: '',
+          status: 'streaming',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+      });
+      directorMessageDeltaListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        messageId: 'director-assistant-message',
+        delta: 'I will start with a compact set.',
+        content: 'I will start with a compact set.',
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    const directorWorkspace = screen.getByTestId('director-workspace');
+    expect(within(directorWorkspace).getByText('I will start with a compact set.')).toBeInTheDocument();
+    expect(within(directorWorkspace).getByText('Thinking...')).toBeInTheDocument();
+
+    await act(async () => {
+      directorMessageCompleteListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        messageId: 'director-assistant-message',
+        content: 'I will start with a compact set.',
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(within(directorWorkspace).queryByText('Thinking...')).not.toBeInTheDocument();
   });
 
   it('shows Director completion metadata and copies the streamed markdown', async () => {

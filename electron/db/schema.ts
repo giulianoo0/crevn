@@ -35,6 +35,10 @@ export const generationJobsTable = sqliteTable('generation_jobs', {
   modelLabel: text('model_label'),
   referenceImagesJson: text('reference_images_json'),
   durationMs: integer('duration_ms'),
+  providerThreadId: text('provider_thread_id'),
+  providerTurnId: text('provider_turn_id'),
+  runtime: text('runtime').notNull().default('codex-app-server'),
+  importedCount: integer('imported_count').notNull().default(0),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -50,6 +54,9 @@ export const generatedAssetsTable = sqliteTable('generated_assets', {
   mimeType: text('mime_type').notNull(),
   width: integer('width'),
   height: integer('height'),
+  providerImageId: text('provider_image_id'),
+  outputIndex: integer('output_index'),
+  reviewStatus: text('review_status'),
   createdAt: text('created_at').notNull(),
 });
 
@@ -174,6 +181,10 @@ export const CREATE_GENERATION_JOBS_TABLE_SQL = `
     model_label TEXT,
     reference_images_json TEXT,
     duration_ms INTEGER,
+    provider_thread_id TEXT,
+    provider_turn_id TEXT,
+    runtime TEXT NOT NULL DEFAULT 'codex-app-server',
+    imported_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (thread_id) REFERENCES threads(id)
@@ -190,6 +201,9 @@ export const CREATE_GENERATED_ASSETS_TABLE_SQL = `
     mime_type TEXT NOT NULL,
     width INTEGER,
     height INTEGER,
+    provider_image_id TEXT,
+    output_index INTEGER,
+    review_status TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (job_id) REFERENCES generation_jobs(id)
   )

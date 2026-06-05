@@ -170,6 +170,7 @@ export interface GenerateImagesPayload {
 
 export interface GeneratedImageRecord extends GeneratedImageGridImage {
   createdAt: string;
+  outputIndex?: number | null;
   provider?: 'codex' | 'antigravity' | null;
   modelId?: string | null;
   modelLabel?: string | null;
@@ -198,10 +199,28 @@ export interface SceneFrameReadyEvent {
   frameId: string;
 }
 
+export interface DirectorSceneReadyEvent {
+  threadId: string;
+  chatId: string;
+  messageId: string;
+  sceneGroupId: string;
+}
+
+export interface ImageReadyEvent {
+  jobId: string;
+  clientRunId?: string | null;
+  threadId: string;
+  asset: GeneratedImageRecord;
+  providerThreadId?: string | null;
+  providerTurnId?: string | null;
+}
+
 export interface DirectorChatRecord {
   id: string;
   threadId: string;
   title: string;
+  providerThreadId?: string | null;
+  providerRuntime?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -215,6 +234,9 @@ export interface DirectorMessageRecord {
   modelId?: string | null;
   modelLabel?: string | null;
   fastMode: boolean;
+  messageOrder?: number | null;
+  providerTurnId?: string | null;
+  providerItemId?: string | null;
   references?: Array<{
     name: string;
     title?: string | null;
@@ -238,6 +260,11 @@ export interface SendDirectorMessagePayload {
     mimeType: string;
     bytesBase64: string;
   }>;
+}
+
+export interface DirectorActionDecisionPayload {
+  messageId: string;
+  actionIndex: number;
 }
 
 export interface DirectorMessageStartEvent {
@@ -362,6 +389,12 @@ function getElectronApi() {
       sendDirectorMessage: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
+      approveDirectorAction: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      declineDirectorAction: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
       cancelDirectorChat: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
@@ -424,10 +457,16 @@ function getElectronApi() {
       updateSceneGroup: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
+      deleteSceneGroup: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
       createSceneFrame: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
       updateSceneFrame: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      deleteSceneFrame: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
       saveSceneFrameReferences: async () => {
@@ -444,6 +483,8 @@ function getElectronApi() {
       },
       subscribeToScenePlan: () => () => {},
       subscribeToSceneFrameReady: () => () => {},
+      subscribeToDirectorSceneReady: () => () => {},
+      subscribeToImageReady: () => () => {},
       subscribeToDirectorMessageStart: () => () => {},
       subscribeToDirectorMessageDelta: () => () => {},
       subscribeToDirectorMessageComplete: () => () => {},
@@ -492,6 +533,14 @@ export function sendDirectorMessage(payload: SendDirectorMessagePayload) {
     userMessage: DirectorMessageRecord;
     assistantMessage: DirectorMessageRecord;
   }>;
+}
+
+export function approveDirectorAction(payload: DirectorActionDecisionPayload) {
+  return getElectronApi().approveDirectorAction(payload) as Promise<DirectorMessageRecord | null>;
+}
+
+export function declineDirectorAction(payload: DirectorActionDecisionPayload) {
+  return getElectronApi().declineDirectorAction(payload) as Promise<DirectorMessageRecord | null>;
 }
 
 export function cancelDirectorChat(chatId: string) {
@@ -584,6 +633,10 @@ export function updateSceneGroup(
   return getElectronApi().updateSceneGroup(sceneGroupId, input) as Promise<SceneGroupRecord>;
 }
 
+export function deleteSceneGroup(sceneGroupId: string) {
+  return getElectronApi().deleteSceneGroup(sceneGroupId) as Promise<SceneGroupRecord[]>;
+}
+
 export function createSceneFrame(
   sceneGroupId: string,
   input: { title: string; prompt: string; frameOrder: number }
@@ -596,6 +649,10 @@ export function updateSceneFrame(
   input: { title: string; prompt: string; frameOrder: number }
 ) {
   return getElectronApi().updateSceneFrame(sceneFrameId, input) as Promise<SceneGroupRecord>;
+}
+
+export function deleteSceneFrame(sceneFrameId: string) {
+  return getElectronApi().deleteSceneFrame(sceneFrameId) as Promise<SceneGroupRecord>;
 }
 
 export function saveSceneFrameReferences(
@@ -657,6 +714,14 @@ export function subscribeToScenePlan(listener: (event: ScenePlanEvent) => void) 
 
 export function subscribeToSceneFrameReady(listener: (event: SceneFrameReadyEvent) => void) {
   return getElectronApi().subscribeToSceneFrameReady(listener) as () => void;
+}
+
+export function subscribeToDirectorSceneReady(listener: (event: DirectorSceneReadyEvent) => void) {
+  return getElectronApi().subscribeToDirectorSceneReady(listener) as () => void;
+}
+
+export function subscribeToImageReady(listener: (event: ImageReadyEvent) => void) {
+  return getElectronApi().subscribeToImageReady(listener) as () => void;
 }
 
 export function subscribeToDirectorMessageStart(listener: (event: DirectorMessageStartEvent) => void) {

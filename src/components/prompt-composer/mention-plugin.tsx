@@ -66,32 +66,7 @@ export function MentionPlugin({
         let matchStart: number | null = null;
         let matchEnd: number | null = null;
 
-        if ($isRangeSelection(selection)) {
-          const anchor = selection.anchor;
-          const anchorNode = anchor.getNode();
-
-          if (anchorNode instanceof TextNode && !$isMentionNode(anchorNode)) {
-            const textUpToCursor = anchorNode.getTextContent().slice(0, anchor.offset);
-            const matchResult = textUpToCursor.match(/@([^\s@]*)$/);
-            if (matchResult?.index !== undefined) {
-              targetNode = anchorNode;
-              matchStart = matchResult.index;
-              matchEnd = anchor.offset;
-            }
-          }
-        }
-
-        if (!targetNode && latestMentionMatchRef.current) {
-          const latestMatch = latestMentionMatchRef.current;
-          const latestNode = $getNodeByKey(latestMatch.nodeKey);
-          if (latestNode instanceof TextNode && !$isMentionNode(latestNode)) {
-            targetNode = latestNode;
-            matchStart = latestMatch.start;
-            matchEnd = latestMatch.offset;
-          }
-        }
-
-        if (!targetNode && range) {
+        if (range) {
           let textOffset = 0;
           const allNodes = root.getAllTextNodes();
 
@@ -113,6 +88,31 @@ export function MentionPlugin({
             }
 
             textOffset = nodeEnd;
+          }
+        }
+
+        if (!targetNode && $isRangeSelection(selection)) {
+          const anchor = selection.anchor;
+          const anchorNode = anchor.getNode();
+
+          if (anchorNode instanceof TextNode && !$isMentionNode(anchorNode)) {
+            const textUpToCursor = anchorNode.getTextContent().slice(0, anchor.offset);
+            const matchResult = textUpToCursor.match(/@([^\s@]*)$/);
+            if (matchResult?.index !== undefined) {
+              targetNode = anchorNode;
+              matchStart = matchResult.index;
+              matchEnd = anchor.offset;
+            }
+          }
+        }
+
+        if (!targetNode && latestMentionMatchRef.current) {
+          const latestMatch = latestMentionMatchRef.current;
+          const latestNode = $getNodeByKey(latestMatch.nodeKey);
+          if (latestNode instanceof TextNode && !$isMentionNode(latestNode)) {
+            targetNode = latestNode;
+            matchStart = latestMatch.start;
+            matchEnd = latestMatch.offset;
           }
         }
 
@@ -189,6 +189,14 @@ export function MentionPlugin({
           return;
         }
 
+        let globalNodeOffset = 0;
+        for (const node of root.getAllTextNodes()) {
+          if (node.getKey() === anchorNode.getKey()) {
+            break;
+          }
+          globalNodeOffset += node.getTextContentSize();
+        }
+
         // Get text up to cursor within this text node
         const textUpToCursor = anchorNode
           .getTextContent()
@@ -203,7 +211,7 @@ export function MentionPlugin({
           };
           onMentionMatch({
             query: matchResult[1].toLowerCase(),
-            start: matchResult.index,
+            start: globalNodeOffset + matchResult.index,
           });
         } else {
           latestMentionMatchRef.current = null;

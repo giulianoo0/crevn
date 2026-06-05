@@ -3,6 +3,7 @@ interface ElectronGeneratedImageRecord {
   fileName: string;
   fileUrl: string;
   createdAt: string;
+  outputIndex?: number | null;
   provider?: 'codex' | 'antigravity' | null;
   modelId?: string | null;
   modelLabel?: string | null;
@@ -193,10 +194,28 @@ interface ElectronSceneFrameReadyEvent {
   frameId: string;
 }
 
+interface ElectronDirectorSceneReadyEvent {
+  threadId: string;
+  chatId: string;
+  messageId: string;
+  sceneGroupId: string;
+}
+
+interface ElectronImageReadyEvent {
+  jobId: string;
+  clientRunId?: string | null;
+  threadId: string;
+  asset: ElectronGeneratedImageRecord;
+  providerThreadId?: string | null;
+  providerTurnId?: string | null;
+}
+
 interface ElectronDirectorChatRecord {
   id: string;
   threadId: string;
   title: string;
+  providerThreadId?: string | null;
+  providerRuntime?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -210,6 +229,9 @@ interface ElectronDirectorMessageRecord {
   modelId?: string | null;
   modelLabel?: string | null;
   fastMode: boolean;
+  messageOrder?: number | null;
+  providerTurnId?: string | null;
+  providerItemId?: string | null;
   references?: Array<{
     name: string;
     title?: string | null;
@@ -233,6 +255,11 @@ interface ElectronSendDirectorMessagePayload {
     mimeType: string;
     bytesBase64: string;
   }>;
+}
+
+interface ElectronDirectorActionDecisionPayload {
+  messageId: string;
+  actionIndex: number;
 }
 
 interface ElectronDirectorMessageStartEvent {
@@ -353,6 +380,12 @@ interface Window {
       userMessage: ElectronDirectorMessageRecord;
       assistantMessage: ElectronDirectorMessageRecord;
     }>;
+    approveDirectorAction: (
+      payload: ElectronDirectorActionDecisionPayload
+    ) => Promise<ElectronDirectorMessageRecord | null>;
+    declineDirectorAction: (
+      payload: ElectronDirectorActionDecisionPayload
+    ) => Promise<ElectronDirectorMessageRecord | null>;
     cancelDirectorChat: (chatId: string) => Promise<boolean>;
     createReference: (payload: ElectronCreateReferencePayload) => Promise<ElectronReferenceImageRecord>;
     createEnvironmentReference: (
@@ -401,6 +434,7 @@ interface Window {
       sceneGroupId: string,
       input: { title: string; prompt: string; tocOrder: number }
     ) => Promise<ElectronSceneGroupRecord>;
+    deleteSceneGroup: (sceneGroupId: string) => Promise<ElectronSceneGroupRecord[]>;
     createSceneFrame: (
       sceneGroupId: string,
       input: { title: string; prompt: string; frameOrder: number }
@@ -409,6 +443,7 @@ interface Window {
       sceneFrameId: string,
       input: { title: string; prompt: string; frameOrder: number }
     ) => Promise<ElectronSceneGroupRecord>;
+    deleteSceneFrame: (sceneFrameId: string) => Promise<ElectronSceneGroupRecord>;
     saveSceneFrameReferences: (
       sceneFrameId: string,
       references: Array<{
@@ -458,6 +493,8 @@ interface Window {
     deleteGeneratedImage: (imageId: string) => Promise<void>;
     subscribeToScenePlan: (listener: (event: ElectronScenePlanEvent) => void) => () => void;
     subscribeToSceneFrameReady: (listener: (event: ElectronSceneFrameReadyEvent) => void) => () => void;
+    subscribeToDirectorSceneReady: (listener: (event: ElectronDirectorSceneReadyEvent) => void) => () => void;
+    subscribeToImageReady: (listener: (event: ElectronImageReadyEvent) => void) => () => void;
     subscribeToDirectorMessageStart: (listener: (event: ElectronDirectorMessageStartEvent) => void) => () => void;
     subscribeToDirectorMessageDelta: (listener: (event: ElectronDirectorMessageDeltaEvent) => void) => () => void;
     subscribeToDirectorMessageComplete: (

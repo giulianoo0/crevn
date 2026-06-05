@@ -2,11 +2,25 @@ const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protoc
 const fs = require('node:fs/promises');
 const path = require('path');
 const { pathToFileURL } = require('node:url');
+const { createAppLogger, installConsoleFileLogger } = require('./appLogger.cjs');
 const { createGenerationStore, getAppDataPaths } = require('./generation.cjs');
 
 let mainWindow = null;
 let generationStore = null;
 const ASSET_PROTOCOL = 'crenv-asset';
+const appLogger = createAppLogger();
+
+installConsoleFileLogger(appLogger);
+console.info(`[crenv:app] logFile: ${appLogger.logFilePath}`);
+
+process.on('uncaughtException', (error) => {
+  console.error('[crenv:app] uncaughtException', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[crenv:app] unhandledRejection', reason);
+});
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -76,6 +90,7 @@ function registerAssetProtocol() {
 }
 
 app.whenReady().then(async () => {
+  console.info(`[crenv:app] ready userDataDir=${app.getPath('userData')}`);
   registerAssetProtocol();
   generationStore = await createGenerationStore(app.getPath('userData'), {
     onScenePlan: (payload) => {
@@ -86,6 +101,14 @@ app.whenReady().then(async () => {
     onSceneFrameReady: (payload) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('generation:sceneFrameReady', payload);
+      }
+    },
+    onImageReady: (payload) => {
+      console.info(
+        `[crenv:renderer] generation:imageReady jobId=${payload.jobId} assetId=${payload.asset?.id ?? 'unknown'} clientRunId=${payload.clientRunId ?? 'none'}`
+      );
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('generation:imageReady', payload);
       }
     },
     onDirectorMessageStart: (payload) => {
@@ -106,6 +129,11 @@ app.whenReady().then(async () => {
     onDirectorMessageError: (payload) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('generation:directorMessageError', payload);
+      }
+    },
+    onDirectorSceneReady: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('generation:directorSceneReady', payload);
       }
     },
   });
@@ -144,6 +172,14 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('generation:sendDirectorMessage', async (_event, payload) => {
     return generationStore.sendDirectorMessage(payload);
+  });
+
+  ipcMain.handle('generation:approveDirectorAction', async (_event, payload) => {
+    return generationStore.approveDirectorAction(payload);
+  });
+
+  ipcMain.handle('generation:declineDirectorAction', async (_event, payload) => {
+    return generationStore.declineDirectorAction(payload);
   });
 
   ipcMain.handle('generation:cancelDirectorChat', async (_event, chatId) => {
@@ -230,12 +266,20 @@ app.whenReady().then(async () => {
     return generationStore.updateSceneGroup(sceneGroupId, input);
   });
 
+  ipcMain.handle('generation:deleteSceneGroup', async (_event, sceneGroupId) => {
+    return generationStore.deleteSceneGroup(sceneGroupId);
+  });
+
   ipcMain.handle('generation:createSceneFrame', async (_event, sceneGroupId, input) => {
     return generationStore.createSceneFrame(sceneGroupId, input);
   });
 
   ipcMain.handle('generation:updateSceneFrame', async (_event, sceneFrameId, input) => {
     return generationStore.updateSceneFrame(sceneFrameId, input);
+  });
+
+  ipcMain.handle('generation:deleteSceneFrame', async (_event, sceneFrameId) => {
+    return generationStore.deleteSceneFrame(sceneFrameId);
   });
 
   ipcMain.handle('generation:saveSceneFrameReferences', async (_event, sceneFrameId, references) => {
@@ -291,16 +335,20 @@ app.whenReady().then(async () => {
   });
 
   createWindow();
+  console.info('[crenv:app] main window created');
 
   app.on('activate', () => {
+    console.info('[crenv:app] activate');
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
 app.on('window-all-closed', () => {
+  console.info('[crenv:app] window-all-closed');
   if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('before-quit', () => {
+  console.info('[crenv:app] before-quit');
   generationStore?.close();
 });

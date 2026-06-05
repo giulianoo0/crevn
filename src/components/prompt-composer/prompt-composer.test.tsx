@@ -90,6 +90,42 @@ describe('PromptComposer', () => {
     expect(onMentionIdsChange).toHaveBeenLastCalledWith(['reference-tito']);
   });
 
+  it('keeps @ mention detection working after pasting a converted mention', async () => {
+    const onMentionMatch = vi.fn();
+
+    render(
+      <PromptComposer
+        ariaLabel="Prompt"
+        placeholder="Write something"
+        isExpanded
+        hasReferenceImages={false}
+        mentionCandidates={[
+          { id: 'reference-tito', title: 'Tito' },
+          { id: 'reference-garage', title: 'Garagem' },
+        ]}
+        onTextChange={() => {}}
+        onMentionMatch={onMentionMatch}
+        onMentionIdsChange={() => {}}
+      />,
+    );
+
+    const input = screen.getByRole('textbox', { name: 'Prompt' });
+
+    await act(async () => {
+      fireEvent.paste(input, {
+        clipboardData: {
+          files: [],
+          getData: (type: string) => {
+            if (type === 'text/plain') return 'Frame with @tito @gar';
+            return '';
+          },
+        },
+      });
+    });
+
+    expect(onMentionMatch).toHaveBeenLastCalledWith({ query: 'gar', start: 16 });
+  });
+
   it('inserts an imperative mention from an explicit text range when editor selection is unavailable', async () => {
     const onTextChange = vi.fn();
     const onMentionIdsChange = vi.fn();

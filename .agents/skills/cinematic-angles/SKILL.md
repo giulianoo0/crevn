@@ -1,6 +1,6 @@
 ---
 name: cinematic-angles
-description: Cinematographic vocabulary for the crevn Codex generation engine. Use when working on camera angles, shot framing, the angle picker, or any prompt text sent to image/video generation. Explains how the app turns an angle selection into an AI directive, defines all 33 angles/shots/coverage patterns in standard film language, and gives the prompt formula the model was trained on. Triggers on "camera angle", "add an angle", "shot type", "framing", "angle prompt", "make the AI understand the shot", "cinematic prompt", "buildAngleDirective", "angleOptions".
+description: Use when working on camera angles, shot framing, character performance, angle picker entries, cinematic prompts, or image/video generation prompts where environment or character consistency must survive camera changes.
 ---
 
 # Cinematic Angles
@@ -63,6 +63,72 @@ Rules that matter for this engine:
   `fisheye`; `backlit`, `rim light`, `golden hour`, `soft side light`.
 
 Example: `Low-angle medium shot of a lone firefighter, smoke-filled stairwell, backlit by embers, cinematic, shallow depth of field`.
+
+## Environment-locked angle workflow
+
+Use this whenever a shot changes angle inside an existing location or with saved
+character sheets. The goal is to rotate/reframe the camera, not rebuild the scene.
+
+1. Start with the required anchor references only:
+   - The full environment reference set when location continuity matters: base/coverage plates plus the relevant close/detail plate for the area visible in this frame.
+   - Character sheet(s) only for characters visible in the frame.
+   - Prop/object references only when the prop is visible or identity-critical.
+2. Read the whole environment set before writing a frame:
+   - Coverage/base plates define room geometry, wall/floor materials, door/window placement, large furniture, and lighting direction.
+   - Close/detail plates define the exact local area: bed corner, door, window, desk, shelf, prop cluster, texture, and trim.
+   - Use the closest matching detail plate for the shot area; do not hallucinate a new version of that corner.
+3. Write the environment as a locked layout, not a mood board:
+   `Preserve @Bedroom Base exactly: same wall/floor materials, bed position, window placement, door location, desk orientation, lighting direction, and room scale.`
+4. Write the angle as camera movement inside that layout:
+   `Low-angle medium shot from near the foot of the bed, looking toward the window side of the same room.`
+5. Write visible character identity constraints:
+   `Keep @Tito face shape, costume, hair silhouette, palette, and proportions matching the character sheet.`
+6. Add only the frame-specific action, expression, body language, and interaction with the set.
+
+Template:
+
+```markdown
+Angle: <Name> - <standard angle directive>.
+Preserve @Environment exactly: same layout, materials, fixed object positions, door/window placement, lighting direction, and scale.
+Use @Environment Detail for the visible area: preserve local textures, nearby props, trim, and object placement.
+Keep @Character identity locked to the sheet: face, proportions, costume, hair, palette, and distinctive details.
+Frame-specific performance: <natural expression, posture, gesture, walk/weight shift, eye line, and interaction with the set>.
+```
+
+If the requested angle cannot see a referenced object, do not force that object into
+frame. Keep it spatially consistent off-camera instead. Do not list every asset in the
+project; excess references make the model blend locations and identities.
+
+## Character performance without robot poses
+
+Character sheets lock identity, but they do not provide acting. Every character prompt
+needs a readable human performance beat so the result does not become stiff.
+
+Use this order:
+
+1. **Emotion** — specific, not generic: wary curiosity, embarrassed smile, focused concern, playful confidence.
+2. **Face** — eyes, brows, mouth, head tilt: `brows slightly raised`, `eyes tracking the door`, `small uneven smile`.
+3. **Body line** — posture and weight: `weight on one foot`, `shoulders turned toward the window`, `torso leaning forward`.
+4. **Hands** — natural occupation: touching the doorframe, holding a sketchbook, adjusting a sleeve, resting on the desk.
+5. **Walk/action mechanics** — if moving, describe phase and balance: `mid-step with one foot planted and the trailing heel lifted`, `arms swinging naturally`, `coat following the motion`.
+6. **Interaction with environment** — ground the body in the set: hand on the bedpost, shadow falling on the floor, foot partly under the desk light.
+
+Good:
+`Keep @Tito identity locked. Tito pauses mid-step beside the bed, weight on his front foot, shoulders slightly hunched with cautious curiosity, eyes aimed toward the open door, one hand hovering near the bedpost.`
+
+Bad:
+`Tito standing, happy.` This produces mannequin poses and generic expression.
+
+## Director scene planning rules
+
+For Director-generated Scene plans:
+
+- Every frame prompt must carry the relevant environment reference by name, including the closest/detail plate for the visible area when available.
+- Every visible character must carry its character sheet reference by name.
+- The scene prompt should define the locked environment once; frame prompts should say what changes: camera position, shot size, action, expression, posture, gesture, walk mechanics, and interaction with the set.
+- The agent should inspect/read all character sheets and all environment references for the current scene to understand the full context, then attach/use only the references needed for each frame.
+- Do not generate frames before the user reviews/edits the plan.
+- Avoid contradictions like `close-up` plus `show the entire room`; use an establishing frame for layout, then tighter frames that preserve the same space.
 
 ## Angle reference
 

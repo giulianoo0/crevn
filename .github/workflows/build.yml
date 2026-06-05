@@ -2,15 +2,16 @@ name: Build
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
 
 jobs:
   build:
-    # Lets the built-in GITHUB_TOKEN create/upload GitHub Releases.
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -34,10 +35,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # electron-builder auto-detects the runner OS and builds that platform's target.
-      # `--publish always` uploads the installers to a GitHub Release (draft) for this repo.
-      - run: pnpm build -- --publish always
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Publishing is handled by the single release job below to avoid matrix jobs
+      # racing to mutate the same GitHub Release.
+      - run: pnpm build -- --publish never
 
       - uses: actions/upload-artifact@v4
         with:
@@ -49,3 +49,42 @@ jobs:
             release/*.zip
             release/*.exe
           if-no-files-found: ignore
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Publish GitHub Release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find release-artifacts -type f \( \
+            -name '*.AppImage' -o \
+            -name '*.deb' -o \
+            -name '*.dmg' -o \
+            -name '*.zip' -o \
+            -name '*.exe' \
+          \) | sort)
+
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No release assets found." >&2
+            exit 1
+          fi
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG_NAME" "${assets[@]}" \
+              --title "$TAG_NAME" \
+              --notes "Automated release for $TAG_NAME." \
+              --verify-tag
+          fi

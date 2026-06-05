@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteDirectorChat: (chatId) => ipcRenderer.invoke('generation:deleteDirectorChat', chatId),
   listDirectorMessages: (chatId) => ipcRenderer.invoke('generation:listDirectorMessages', chatId),
   sendDirectorMessage: (payload) => ipcRenderer.invoke('generation:sendDirectorMessage', payload),
+  approveDirectorAction: (payload) => ipcRenderer.invoke('generation:approveDirectorAction', payload),
+  declineDirectorAction: (payload) => ipcRenderer.invoke('generation:declineDirectorAction', payload),
   cancelDirectorChat: (chatId) => ipcRenderer.invoke('generation:cancelDirectorChat', chatId),
   createReference: (payload) => ipcRenderer.invoke('generation:createReference', payload),
   createEnvironmentReference: (payload) => ipcRenderer.invoke('generation:createEnvironmentReference', payload),
@@ -33,8 +35,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listSceneGroups: (threadId) => ipcRenderer.invoke('generation:listSceneGroups', threadId),
   createSceneGroup: (threadId, input) => ipcRenderer.invoke('generation:createSceneGroup', threadId, input),
   updateSceneGroup: (sceneGroupId, input) => ipcRenderer.invoke('generation:updateSceneGroup', sceneGroupId, input),
+  deleteSceneGroup: (sceneGroupId) => ipcRenderer.invoke('generation:deleteSceneGroup', sceneGroupId),
   createSceneFrame: (sceneGroupId, input) => ipcRenderer.invoke('generation:createSceneFrame', sceneGroupId, input),
   updateSceneFrame: (sceneFrameId, input) => ipcRenderer.invoke('generation:updateSceneFrame', sceneFrameId, input),
+  deleteSceneFrame: (sceneFrameId) => ipcRenderer.invoke('generation:deleteSceneFrame', sceneFrameId),
   saveSceneFrameReferences: (sceneFrameId, references) =>
     ipcRenderer.invoke('generation:saveSceneFrameReferences', sceneFrameId, references),
   generateSceneGroup: (input) => ipcRenderer.invoke('generation:generateSceneGroup', input),
@@ -56,6 +60,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('generation:sceneFrameReady', wrappedListener);
     return () => {
       ipcRenderer.removeListener('generation:sceneFrameReady', wrappedListener);
+    };
+  },
+  subscribeToDirectorSceneReady: (listener) => {
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on('generation:directorSceneReady', wrappedListener);
+    return () => {
+      ipcRenderer.removeListener('generation:directorSceneReady', wrappedListener);
+    };
+  },
+  subscribeToImageReady: (listener) => {
+    const wrappedListener = (_event, payload) => listener(payload);
+    ipcRenderer.on('generation:imageReady', wrappedListener);
+    return () => {
+      ipcRenderer.removeListener('generation:imageReady', wrappedListener);
     };
   },
   subscribeToDirectorMessageStart: (listener) => {

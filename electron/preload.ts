@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteDirectorChat: (chatId: unknown) => ipcRenderer.invoke('generation:deleteDirectorChat', chatId),
   listDirectorMessages: (chatId: unknown) => ipcRenderer.invoke('generation:listDirectorMessages', chatId),
   sendDirectorMessage: (payload: unknown) => ipcRenderer.invoke('generation:sendDirectorMessage', payload),
+  approveDirectorAction: (payload: unknown) => ipcRenderer.invoke('generation:approveDirectorAction', payload),
+  declineDirectorAction: (payload: unknown) => ipcRenderer.invoke('generation:declineDirectorAction', payload),
   cancelDirectorChat: (chatId: unknown) => ipcRenderer.invoke('generation:cancelDirectorChat', chatId),
   createReference: (payload: unknown) => ipcRenderer.invoke('generation:createReference', payload),
   createEnvironmentReference: (payload: unknown) => ipcRenderer.invoke('generation:createEnvironmentReference', payload),
@@ -36,10 +38,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('generation:createSceneGroup', threadId, input),
   updateSceneGroup: (sceneGroupId: string, input: unknown) =>
     ipcRenderer.invoke('generation:updateSceneGroup', sceneGroupId, input),
+  deleteSceneGroup: (sceneGroupId: string) => ipcRenderer.invoke('generation:deleteSceneGroup', sceneGroupId),
   createSceneFrame: (sceneGroupId: string, input: unknown) =>
     ipcRenderer.invoke('generation:createSceneFrame', sceneGroupId, input),
   updateSceneFrame: (sceneFrameId: string, input: unknown) =>
     ipcRenderer.invoke('generation:updateSceneFrame', sceneFrameId, input),
+  deleteSceneFrame: (sceneFrameId: string) => ipcRenderer.invoke('generation:deleteSceneFrame', sceneFrameId),
   saveSceneFrameReferences: (sceneFrameId: string, references: unknown) =>
     ipcRenderer.invoke('generation:saveSceneFrameReferences', sceneFrameId, references),
   generateSceneGroup: (input: unknown) => ipcRenderer.invoke('generation:generateSceneGroup', input),
@@ -61,6 +65,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('generation:sceneFrameReady', wrappedListener);
     return () => {
       ipcRenderer.removeListener('generation:sceneFrameReady', wrappedListener);
+    };
+  },
+  subscribeToDirectorSceneReady: (listener: (payload: unknown) => void) => {
+    const wrappedListener = (_event: unknown, payload: unknown) => listener(payload);
+    ipcRenderer.on('generation:directorSceneReady', wrappedListener);
+    return () => {
+      ipcRenderer.removeListener('generation:directorSceneReady', wrappedListener);
+    };
+  },
+  subscribeToImageReady: (listener: (payload: unknown) => void) => {
+    const wrappedListener = (_event: unknown, payload: unknown) => listener(payload);
+    ipcRenderer.on('generation:imageReady', wrappedListener);
+    return () => {
+      ipcRenderer.removeListener('generation:imageReady', wrappedListener);
     };
   },
   subscribeToDirectorMessageStart: (listener: (payload: unknown) => void) => {

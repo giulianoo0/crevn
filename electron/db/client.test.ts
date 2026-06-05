@@ -58,6 +58,10 @@ describe('createGenerationDatabase', () => {
       modelLabel: null,
       referenceImagesJson: null,
       durationMs: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      runtime: 'codex-app-server',
+      importedCount: 0,
       createdAt: '2026-05-26T11:00:00.000Z',
       updatedAt: '2026-05-26T11:00:05.000Z',
     };
