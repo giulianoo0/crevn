@@ -23,6 +23,52 @@ async function makeTempUserDataDir() {
 }
 
 describe('generation codex runner environment', () => {
+  it('resolves the target Codex home from CODEX_HOME or the user home', () => {
+    expect(generationModule.__test__.resolveCodexHomeDirectory({
+      env: { CODEX_HOME: '/custom/codex' },
+      homeDirectory: '/home/alex',
+    })).toBe('/custom/codex');
+
+    expect(generationModule.__test__.resolveCodexHomeDirectory({
+      env: {},
+      homeDirectory: '/home/alex',
+    })).toBe(path.join('/home/alex', '.codex'));
+  });
+
+  it('seeds bundled Codex skills into the user Codex home without overwriting local edits', async () => {
+    const rootDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'crenv-codex-skills-'));
+    tempDirs.push(rootDir);
+    const bundledSkillsDir = path.join(rootDir, 'bundled-skills');
+    const codexHomeDir = path.join(rootDir, 'codex-home');
+
+    await fsp.mkdir(path.join(bundledSkillsDir, 'seedance-cartoon'), { recursive: true });
+    await fsp.writeFile(path.join(bundledSkillsDir, 'seedance-cartoon', 'SKILL.md'), 'bundled skill');
+    await fsp.mkdir(path.join(codexHomeDir, 'skills', 'seedance-cartoon'), { recursive: true });
+    await fsp.writeFile(path.join(codexHomeDir, 'skills', 'seedance-cartoon', 'SKILL.md'), 'local edit');
+
+    await generationModule.__test__.seedBundledCodexSkills({
+      bundledSkillsDir,
+      codexHomeDir,
+    });
+
+    await expect(fsp.readFile(path.join(codexHomeDir, 'skills', 'seedance-cartoon', 'SKILL.md'), 'utf8')).resolves.toBe(
+      'local edit'
+    );
+  });
+
+  it('falls back to the repo skills resource when packaged resources are unavailable', async () => {
+    const rootDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'crenv-codex-skill-paths-'));
+    tempDirs.push(rootDir);
+    const appRoot = path.join(rootDir, 'app');
+    const repoSkillsDir = path.join(appRoot, 'resources', 'codex', 'skills');
+    await fsp.mkdir(repoSkillsDir, { recursive: true });
+
+    expect(generationModule.__test__.resolveBundledCodexSkillsDirectory({
+      resourcesPath: path.join(rootDir, 'missing-resources'),
+      appRoot,
+    })).toBe(repoSkillsDir);
+  });
+
   it('builds a writable codex environment inside the job workspace', () => {
     expect(generationModule.__test__).toBeDefined();
 
@@ -714,6 +760,7 @@ describe('generation codex runner environment', () => {
 
   it('returns the created scene group instead of the first scene in the thread', async () => {
     const store = await generationModule.createGenerationStore(await makeTempUserDataDir(), {
+      seedCodexSkills: false,
       warmCodexAppServer: false,
     });
 
@@ -754,6 +801,7 @@ describe('generation codex runner environment', () => {
   it('lists Director messages without parsing stored reference snapshots', async () => {
     const userDataDir = await makeTempUserDataDir();
     const store = await generationModule.createGenerationStore(userDataDir, {
+      seedCodexSkills: false,
       warmCodexAppServer: false,
     });
     const client = createClient({ url: `file:${path.join(userDataDir, 'crenv.sqlite')}` });

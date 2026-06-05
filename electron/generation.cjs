@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
@@ -1191,6 +1192,72 @@ function getAppDataPaths(userDataDir) {
   };
 }
 
+function resolveCodexHomeDirectory({ env = process.env, homeDirectory = os.homedir() } = {}) {
+  const codexHome = typeof env.CODEX_HOME === 'string' ? env.CODEX_HOME.trim() : '';
+  return codexHome || path.join(homeDirectory, '.codex');
+}
+
+function resolveBundledCodexSkillsDirectory({
+  resourcesPath = process.resourcesPath,
+  appRoot = path.join(__dirname, '..'),
+} = {}) {
+  if (resourcesPath) {
+    const packagedSkillsDir = path.join(resourcesPath, 'codex-skills');
+    if (fs.existsSync(packagedSkillsDir)) {
+      return packagedSkillsDir;
+    }
+  }
+
+  return path.join(appRoot, 'resources', 'codex', 'skills');
+}
+
+async function pathExists(filePath) {
+  try {
+    await fsp.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function copyDirectoryWithoutOverwrite(sourceDirectory, targetDirectory) {
+  const entries = await fsp.readdir(sourceDirectory, { withFileTypes: true });
+  await fsp.mkdir(targetDirectory, { recursive: true });
+
+  for (const entry of entries) {
+    const sourcePath = path.join(sourceDirectory, entry.name);
+    const targetPath = path.join(targetDirectory, entry.name);
+
+    if (entry.isDirectory()) {
+      await copyDirectoryWithoutOverwrite(sourcePath, targetPath);
+      continue;
+    }
+
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    await fsp.copyFile(sourcePath, targetPath, fs.constants.COPYFILE_EXCL).catch((error) => {
+      if (error.code !== 'EEXIST') {
+        throw error;
+      }
+    });
+  }
+}
+
+async function seedBundledCodexSkills({
+  bundledSkillsDir = resolveBundledCodexSkillsDirectory(),
+  codexHomeDir = resolveCodexHomeDirectory(),
+} = {}) {
+  if (!(await pathExists(bundledSkillsDir))) {
+    return { seeded: false, reason: 'missing-bundled-skills', bundledSkillsDir, codexHomeDir };
+  }
+
+  const targetSkillsDir = path.join(codexHomeDir, 'skills');
+  await copyDirectoryWithoutOverwrite(bundledSkillsDir, targetSkillsDir);
+  return { seeded: true, bundledSkillsDir, codexHomeDir, targetSkillsDir };
+}
+
 async function resetCodexJobsDirectory(codexJobsTempDir) {
   await fsp.rm(codexJobsTempDir, { recursive: true, force: true });
   await fsp.mkdir(codexJobsTempDir, { recursive: true });
@@ -1253,12 +1320,27 @@ async function createGenerationStore(userDataDir, options = {}) {
   const codexAppServerClient = options.codexAppServerClient ?? createCodexAppServerClient();
   fs.mkdirSync(path.dirname(paths.databasePath), { recursive: true });
   await resetCodexJobsDirectory(paths.codexJobsTempDir);
+  const codexSkillsSeed =
+    options.seedCodexSkills === false
+      ? null
+      : await seedBundledCodexSkills({
+          bundledSkillsDir: options.bundledCodexSkillsDir,
+          codexHomeDir: options.codexHomeDir,
+        }).catch((error) => {
+          console.warn(`[crenv:codex] failed to seed bundled skills: ${error.message}`);
+          return null;
+        });
 
   console.info('[crenv:codex] initialized store');
   console.info('[crenv:codex] userDataDir:', paths.userDataDir);
   console.info('[crenv:codex] databasePath:', paths.databasePath);
   console.info('[crenv:codex] generatedImagesDir:', paths.generatedImagesDir);
   console.info('[crenv:codex] cleared codexJobsTempDir:', paths.codexJobsTempDir);
+  if (codexSkillsSeed?.seeded) {
+    console.info('[crenv:codex] seeded bundled skills:', codexSkillsSeed.targetSkillsDir);
+  } else if (codexSkillsSeed) {
+    console.info('[crenv:codex] bundled skills unavailable:', codexSkillsSeed.bundledSkillsDir);
+  }
 
   const client = createClient({
     url: pathToFileURL(paths.databasePath).toString(),
@@ -5757,6 +5839,8 @@ module.exports = {
     buildDirectorChatPrompt,
     buildDirectorStatusBlock,
     prepareAntigravityHomeDirectory,
+    resolveBundledCodexSkillsDirectory,
+    resolveCodexHomeDirectory,
     parseDirectorActionBlocks,
     parseImageManifestLine,
     parseScenePlanLine,
@@ -5766,6 +5850,7 @@ module.exports = {
     resolveGenerationSelection,
     resolveSceneFrameConcurrencyLimit,
     runWithConcurrencyLimit,
+    seedBundledCodexSkills,
     sortDirectorMessageRecords,
     truncateDirectorChatTitle,
     toGenerationReferenceMetadata,
