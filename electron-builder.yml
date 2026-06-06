@@ -34,6 +34,7 @@ mac:
     - zip
   category: public.app-category.graphics-design
 win:
+  artifactName: ${productName}-Setup-${version}.${ext}
   target:
     - nsis
 nsis:
