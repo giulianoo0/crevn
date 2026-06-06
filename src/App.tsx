@@ -487,7 +487,6 @@ function buildAngleDirective(name: (typeof angleOptions)[number]['name']) {
   const angle = angleOptions.find((option) => option.name === name);
   return angle ? `Angle: ${angle.name} \u2014 ${angle.prompt}` : `Angle: ${name}`;
 }
-const APP_VERSION = '0.1.0';
 const APP_CHANNEL = 'ALPHA';
 
 function escapeRegExp(value: string) {
@@ -3314,15 +3313,15 @@ export function App() {
     }
   }, []);
 
-  const handleImportCrenv = useCallback(async () => {
+  const handleImportCrenv = useCallback(async (targetProjectId: string | null = selectedProjectId) => {
     try {
-      const result = await importCrenv(selectedProjectId);
+      const result = await importCrenv(targetProjectId);
       if (result.status === 'canceled') {
         return;
       }
 
       const nextProjects = await refreshProjects();
-      const nextProjectId = result.projectId ?? selectedProjectId ?? nextProjects[0]?.id ?? null;
+      const nextProjectId = result.projectId ?? targetProjectId ?? nextProjects[0]?.id ?? null;
       const nextThreadId =
         result.threadIds?.[0] ?? nextProjects.find((project) => project.id === nextProjectId)?.threads[0]?.id ?? null;
 
@@ -5102,7 +5101,7 @@ export function App() {
           <span className="rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] px-2 py-0.5 text-[10px] font-semibold tracking-[0] text-[var(--muted-foreground)]">
             {APP_CHANNEL}
           </span>
-          <span className="text-[11px] text-[var(--muted-foreground)]">v{APP_VERSION}</span>
+          <span className="text-[11px] text-[var(--muted-foreground)]">v{appInfo?.version ?? '...'}</span>
         </div>
 
         <div className="relative min-h-0 flex-1 overflow-hidden">
@@ -5161,6 +5160,7 @@ export function App() {
                             name: project.name,
                           })
                         }
+                        onImport={(projectId) => void handleImportCrenv(projectId)}
                         onExport={handleExportProject}
                         onDelete={(projectId) =>
                           openSidebarEntityDialog({
@@ -5357,9 +5357,6 @@ export function App() {
               </AnimatePresence>
             </span>
           </button>
-          <div className="mt-2 px-3 text-[11px] leading-4 tracking-[0] text-[var(--muted-foreground)]">
-            {appInfo ? `${appInfo.name} v${appInfo.version}` : 'crevn'}
-          </div>
         </div>
         </div>
       </aside>

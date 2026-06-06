@@ -17,6 +17,7 @@ export function ProjectRow({
   onPrepareThreadDraft,
   onOpenProperties,
   onRename,
+  onImport,
   onExport,
   onDelete,
 }: {
@@ -27,6 +28,7 @@ export function ProjectRow({
   onPrepareThreadDraft: (projectId: string) => void;
   onOpenProperties: (projectId: string) => void;
   onRename: (projectId: string) => void;
+  onImport?: (projectId: string) => void;
   onExport?: (projectId: string) => void;
   onDelete: (projectId: string) => void;
 }) {
@@ -65,6 +67,7 @@ export function ProjectRow({
         <ContextMenuItem onClick={() => onOpenProperties(id)}>Propriedades</ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onClick={() => onRename(id)}>Rename project</ContextMenuItem>
+        {onImport ? <ContextMenuItem onClick={() => onImport(id)}>Import into project...</ContextMenuItem> : null}
         {onExport ? <ContextMenuItem onClick={() => onExport(id)}>Export project...</ContextMenuItem> : null}
         <ContextMenuSeparator />
         <ContextMenuItem

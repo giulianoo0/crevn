@@ -29,4 +29,30 @@ describe('ProjectRow', () => {
 
     expect(handleExport).toHaveBeenCalledWith('project_1');
   });
+
+  it('shows an import context-menu action for projects', () => {
+    const handleImport = vi.fn();
+
+    render(
+      <ProjectRow
+        id="project_1"
+        name="Project One"
+        isOpen
+        onToggle={() => {}}
+        onPrepareThreadDraft={() => {}}
+        onOpenProperties={() => {}}
+        onRename={() => {}}
+        onImport={handleImport}
+        onDelete={() => {}}
+      />
+    );
+
+    const projectButton = screen.getByText('Project One').closest('button');
+    expect(projectButton).not.toBeNull();
+
+    fireEvent.contextMenu(projectButton!);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Import into project...' }));
+
+    expect(handleImport).toHaveBeenCalledWith('project_1');
+  });
 });

@@ -1382,6 +1382,7 @@ async function writeExportArchive({ filePath, format, snapshot, exportedAt, sour
     output.on('close', resolve);
     output.on('error', reject);
     zipFile.outputStream.on('error', reject);
+    zipFile.outputStream.pipe(output);
 
     zipFile.addBuffer(Buffer.from(JSON.stringify(manifest, null, 2)), 'data/manifest.json');
     for (const entry of fileEntries) {
@@ -1391,7 +1392,6 @@ async function writeExportArchive({ filePath, format, snapshot, exportedAt, sour
       zipFile.addBuffer(entry.buffer, entry.archivePath);
     }
     zipFile.end();
-    zipFile.outputStream.pipe(output);
   });
 
   return {
@@ -1443,8 +1443,13 @@ async function readZipArchiveEntries(filePath) {
   });
 }
 
-async function readExportManifestFromArchive(filePath) {
-  const entries = await readZipArchiveEntries(filePath);
+async function readExportManifestFromArchive(filePath, extensionLabel = 'export') {
+  let entries;
+  try {
+    entries = await readZipArchiveEntries(filePath);
+  } catch {
+    throw new Error(`Selected file is not a valid ${extensionLabel} export archive.`);
+  }
   const manifestBuffer = entries.get('data/manifest.json');
   if (!manifestBuffer) {
     throw new Error('Archive is missing data/manifest.json.');
@@ -2076,7 +2081,7 @@ async function createGenerationStore(userDataDir, options = {}) {
   }
 
   async function importCrenvArchive(filePath, importOptions = {}) {
-    const { manifest, entries } = await readExportManifestFromArchive(filePath);
+    const { manifest, entries } = await readExportManifestFromArchive(filePath, '.crenv');
     if (manifest.format !== 'crenv' || manifest.version !== 1) {
       throw new Error('Unsupported .crenv archive.');
     }
@@ -2348,7 +2353,7 @@ async function createGenerationStore(userDataDir, options = {}) {
   }
 
   async function importReferenceArchive(filePath) {
-    const { manifest } = await readExportManifestFromArchive(filePath);
+    const { manifest } = await readExportManifestFromArchive(filePath, '.refc');
     if (manifest.format !== 'refc' || manifest.version !== 1) {
       throw new Error('Unsupported .refc archive.');
     }

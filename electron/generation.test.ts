@@ -1376,6 +1376,25 @@ describe('generation codex runner environment', () => {
     }
   }, 15_000);
 
+  it('rejects invalid .crenv files with a product-level import error', async () => {
+    const userDataDir = await makeTempUserDataDir();
+    const archivePath = path.join(userDataDir, 'invalid.crenv');
+    await fsp.writeFile(archivePath, 'not a zip archive');
+
+    const store = await generationModule.createGenerationStore(path.join(userDataDir, 'target'), {
+      seedCodexSkills: false,
+      warmCodexAppServer: false,
+    });
+
+    try {
+      await expect(store.importCrenvArchive(archivePath)).rejects.toThrow(
+        'Selected file is not a valid .crenv export archive.'
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it('imports a thread export archive into a target project', async () => {
     const userDataDir = await makeTempUserDataDir();
     const archivePath = path.join(userDataDir, 'thread-import.crenv');

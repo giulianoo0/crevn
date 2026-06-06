@@ -2380,7 +2380,7 @@ describe('App header thread title', () => {
     expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
   });
 
-  it('shows the real app version in the sidebar', async () => {
+  it('shows the real app version in the sidebar header only', async () => {
     render(<App />);
 
     await act(async () => {
@@ -2388,7 +2388,8 @@ describe('App header thread title', () => {
     });
 
     expect(electronApi.getAppInfo).toHaveBeenCalled();
-    expect(screen.getByText('crevn v9.8.7')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Collapse sidebar' })).toHaveTextContent('v9.8.7');
+    expect(screen.queryByText('crevn v9.8.7')).not.toBeInTheDocument();
   });
 
   it('slides to the settings view when settings is clicked', async () => {
