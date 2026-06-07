@@ -1,0 +1,10 @@
+# Keep GitHub's language bar aligned with the repo's authored language.
+# These JavaScript-family runtime/helper files stay in the repo, but they
+# should not count toward Linguist language statistics.
+*.cjs linguist-vendored
+*.js linguist-vendored
+*.mjs linguist-vendored
+
+# Exclude support docs and bundled Codex skill assets from GitHub language stats.
+docs/** linguist-documentation
+resources/codex/** linguist-vendored
