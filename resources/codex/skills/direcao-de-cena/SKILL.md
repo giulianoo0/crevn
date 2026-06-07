@@ -9,6 +9,16 @@ Cria o pré-plano profissional de uma cena — a etapa de découpage onde o dire
 
 Esta skill é o topo do pipeline. Produz o planejamento criativo que alimenta as skills de ambientes, keyframes e animação.
 
+All user-facing responses from this skill must be in English, regardless of the input language.
+
+## Language rule for Imagen
+
+- All text sent to the Imagen app for generation must be written in natural production English.
+- This includes `summary`, `scene_name`, `shot`, `angle`, `movement`, `prompt`, continuity notes, frame names, and any other textual label inside `imagen-action`.
+- Technical IDs, UUIDs, asset names, paths, and references (`amb-quarto-01`, `tito-refsheet`, `<<<uuid>>>`) must remain exactly as provided.
+- Never emit a generation prompt in Portuguese or in the user's original language; translate the intent into English before attaching the JSON.
+- The explanatory Markdown must also stay in English, but the critical rule is this: any payload the app uses to generate imagery must be in English.
+
 ## Mensagem central
 
 Cada clipe é uma unidade dramática completa, não uma coleção de shots bonitos. Antes de pensar em lente, movimento ou cobertura, a skill precisa responder internamente:
@@ -18,6 +28,17 @@ Cada clipe é uma unidade dramática completa, não uma coleção de shots bonit
 - **O que muda?** (`turn`)
 
 Se a resposta não existe, o clipe pode renderizar bem e continuar sem motor dramático. A função desta skill é impedir isso.
+
+## Diagnostic hierarchy
+
+When a scene looks weak or broken, diagnose it in this order and stop as soon as you find the highest-impact problem:
+
+1. **Story problem** -> broken want, no obstacle, no turn, flat arc
+2. **Structure problem** -> wrong clip count, overloaded beat, weak tension curve
+3. **Execution problem** -> wrong preset, bad camera, render risk
+4. **Cosmetic problem** -> word choice, description density, phrasing
+
+If there is a story problem, camera and lens do not matter yet.
 
 ## O que faz e NÃO faz
 
@@ -29,6 +50,7 @@ Se a resposta não existe, o clipe pode renderizar bem e continuar sem motor dra
 - Planeja multishot, continuidade entre shots e transições de câmera para Seedance
 - Mantém a geração sem música
 - Dispara a execução emitindo o bloco `imagen-action` (create_scene) pro app
+- Delivers analysis and plans without reflexive confirmation prompts; pauses only when the phase flow genuinely requires user review
 
 **NÃO FAZ:**
 - Não gera imagens diretamente (emite imagen-action; o app executa)
@@ -90,7 +112,7 @@ Se o usuário pedir apenas "a cena", a skill decide se aquilo cabe em 1 clipe ou
 - Use o toolkit Imagen para gerar as imagens de referência que vão tornar o plano de Seedance possível; não tente gerar o Seedance em si nesta etapa.
 - Se a cena pedir duas ações fortes no mesmo instante, separar em frames ou shots diferentes.
 
-## Regra de saída
+## Output rule
 
 - Para o usuário, mostre o plano de planos, não o diagnóstico inteiro.
 - Se a pergunta não pede análise detalhada, não despeje toda a leitura dramática.
@@ -109,9 +131,9 @@ Antes de qualquer câmera, defina:
 
 Câmera sem motor é câmera aleatória. Se não houver `want + obstacle + turn`, a skill deve dizer que a cena ainda não está pronta para découpage.
 
-## Passo 2 — Forma dramática do clipe
+## Step 2 — Clip Structure
 
-Escolha explicitamente a forma de cada clipe. No máximo combine duas se houver pivô claro no meio.
+Choose the structure of each clip explicitly. Combine at most two if there is a clear pivot in the middle.
 
 | Forma | Estrutura | Quando usar |
 |---|---|---|
@@ -120,7 +142,7 @@ Escolha explicitamente a forma de cada clipe. No máximo combine duas se houver 
 | **Hold -> Release** | Pressão acumulando em silêncio -> gesto libera tudo | Standoff, decisão |
 | **Glimpse** | Observacional, atmosférico, temporal | Ambiente, passagem de tempo |
 
-A forma escolhida precisa aparecer nos verbos, no blocking e no ritmo, nunca como label jogado no prompt.
+The chosen form must appear in the verbs, blocking, and rhythm, never as a label dropped into the prompt. In the final user-facing text, describe the dramatic function, not the name of the form.
 
 ## Passo 3 — Arco e curva de tensão
 
@@ -208,9 +230,9 @@ O gênero não é só look. Ele decide contra o que o personagem luta e como a c
 
 Se o gênero estiver claro, a skill deve usá-lo para escolher verbos, blocking, ritmo e release.
 
-## Passo 8 — Forma narrativa por tipo de cena
+## Step 8 — Narrative Pattern
 
-O shape da cena vive nos verbos e na geometria, nunca em label explícito. Escolha a forma operacional dominante:
+The scene pattern lives in the verbs and geometry, never as an explicit label. Choose the dominant operational pattern, but do not expose that label in the final text:
 
 - **Perseguição gap-closing:** distância estreitando
 - **Fuga sob pressão:** espaço fecha e depois libera
@@ -278,22 +300,24 @@ Onde os personagens estão e como se movem. Tão importante quanto a câmera.
 - Quem tem saída e quem está travado
 - Como a troca de posição muda o eixo de poder
 
-## Passo 12 — Session lock visual
+## Step 12 — Visual Continuity
 
-Defina a coerência visual da sessão antes de listar frames:
+Define the visual coherence of the session before listing frames:
 
-- **Hard-lock:** paleta de cor, camera body e lente/caráter óptico
-- **Soft-lock:** movimento de câmera e luz
+- **Palette / body / lens:** the visual identity that must remain stable
+- **Camera movement / light:** elements that may change at natural scene boundaries
 
-Hard-lock só quebra com dispositivo narrativo explícito, como flashback, sonho, memória, epílogo ou salto temporal.
+In visible user-facing text, do not use the internal lock terms; describe only visual continuity.
 
-Soft-lock só deve mudar em fronteira natural de cena com pelo menos dois gatilhos claros, como:
+That continuity only breaks for an explicit narrative device such as a flashback, dream, memory, epilogue, or time jump.
 
-- mudança de localização
-- mudança de energia
-- mudança de hora do dia
+Camera and light continuity should only change at a natural scene boundary with at least two clear triggers, such as:
 
-Um gatilho sozinho normalmente não justifica quebrar lock.
+- location change
+- energy change
+- time-of-day change
+
+A single trigger normally does not justify breaking continuity.
 
 ## Passo 13 — Ritmo, densidade e transições
 
@@ -352,7 +376,7 @@ Apresente assim para o usuário aprovar:
 ## Estratégia Visual
 [a abordagem escolhida + justificativa]
 
-## Session Lock
+## Visual Continuity
 - Hard-lock: paleta / body / lente
 - Soft-lock: câmera / luz
 
@@ -684,10 +708,11 @@ Antes de emitir `imagen-action`, verificar internamente:
 - o prompt dirige movimento em vez de contradizer ou redescrever o frame
 - não existe conflito entre frame e prompt
 - os prompts são self-contained
+- todo texto de geração destinado ao Imagen está em inglês
 - os verbos carregam o shape; não há labels dramáticos no texto final
 - emoção virou comportamento físico visível
-- hard-lock está consistente
-- soft-lock só muda com gatilho suficiente
+- visual continuity is consistent
+- camera and light only change with sufficient trigger
 - densidade do clipe não estourou
 - `<<<uuid>>>` aparece em todos os clipes necessários
 
@@ -723,9 +748,9 @@ Escreva o texto criativo, depois anexe:
 {
   "version": "1.0",
   "action": "create_scene",
-  "summary": "Gerar os 4 frames da Cena 1 — chegada do Tito",
+  "summary": "Generate the 4 frames for Scene 1 - Tito's arrival",
   "payload": {
-    "scene_name": "Cena 1 - Chegada",
+    "scene_name": "Scene 1 - Arrival",
     "aspect_ratio": "16:9",
     "continuity": {
       "characters": ["tito"],
@@ -736,10 +761,10 @@ Escreva o texto criativo, depois anexe:
       {
         "order": 1,
         "id": "KF1",
-        "shot": "plano geral",
-        "angle": "câmera baixa",
-        "movement": "estático",
-        "prompt": "[prompt do keyframe — personagem + pose + câmera + referência]",
+        "shot": "wide shot",
+        "angle": "low camera angle",
+        "movement": "static",
+        "prompt": "[keyframe prompt in English - character + pose + camera + reference]",
         "references": {
           "environment": "amb-quarto-01/aproximacoes/porta",
           "character": "tito-refsheet",
