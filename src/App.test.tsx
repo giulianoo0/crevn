@@ -8,6 +8,11 @@ import * as electronApi from './lib/electron-api';
 import * as errors from './lib/errors';
 import { toast } from 'sonner';
 
+const renderCounters = vi.hoisted(() => ({
+  projectRow: 0,
+  threadRow: 0,
+}));
+
 let scenePlanListener:
   | ((event: { jobId: string; clientRunId?: string; threadId: string; count: number; applyToShimmers: boolean }) => void)
   | null = null;
@@ -719,7 +724,7 @@ vi.mock('framer-motion', async () => {
 });
 
 vi.mock('./components/ai-elements/shimmer', () => ({
-  Shimmer: ({ children }: { children: string }) => <span>{children}</span>,
+  TextShimmer: ({ children }: { children: string }) => <span>{children}</span>,
 }));
 
 vi.mock('@number-flow/react', () => ({
@@ -835,28 +840,31 @@ vi.mock('./components/project-row', () => ({
     onRename: () => void;
     onExport?: (projectId: string) => void;
     onDelete: () => void;
-  }) => (
-    <div>
-      <div>{name}</div>
-      <button type="button" aria-label={`Start a new thread in ${name}`} onClick={() => onPrepareThreadDraft(id)}>
-        New thread {name}
-      </button>
-      <button type="button" onClick={() => onOpenProperties(id)}>
-        Properties {name}
-      </button>
-      <button type="button" onClick={onRename}>
-        Rename {name}
-      </button>
-      {onExport ? (
-        <button type="button" onClick={() => onExport(id)}>
-          Export {name}
+  }) => {
+    renderCounters.projectRow += 1;
+    return (
+      <div>
+        <div>{name}</div>
+        <button type="button" aria-label={`Start a new thread in ${name}`} onClick={() => onPrepareThreadDraft(id)}>
+          New thread {name}
         </button>
-      ) : null}
-      <button type="button" onClick={onDelete}>
-        Delete {name}
-      </button>
-    </div>
-  ),
+        <button type="button" onClick={() => onOpenProperties(id)}>
+          Properties {name}
+        </button>
+        <button type="button" onClick={onRename}>
+          Rename {name}
+        </button>
+        {onExport ? (
+          <button type="button" onClick={() => onExport(id)}>
+            Export {name}
+          </button>
+        ) : null}
+        <button type="button" onClick={onDelete}>
+          Delete {name}
+        </button>
+      </div>
+    );
+  },
 }));
 
 vi.mock('./components/thread-row', () => ({
@@ -876,25 +884,28 @@ vi.mock('./components/thread-row', () => ({
     onRename: () => void;
     onExport?: (threadId: string) => void;
     onDelete: () => void;
-  }) => (
-    <div>
-      <button type="button" onClick={onClick}>
-        {name}
-      </button>
-      {isRunning ? <span aria-label={`${name} is generating`}>running</span> : null}
-      <button type="button" onClick={onRename}>
-        Rename {name}
-      </button>
-      {onExport ? (
-        <button type="button" onClick={() => onExport(id)}>
-          Export {name}
+  }) => {
+    renderCounters.threadRow += 1;
+    return (
+      <div>
+        <button type="button" onClick={onClick}>
+          {name}
         </button>
-      ) : null}
-      <button type="button" onClick={onDelete}>
-        Delete {name}
-      </button>
-    </div>
-  ),
+        {isRunning ? <span aria-label={`${name} is generating`}>running</span> : null}
+        <button type="button" onClick={onRename}>
+          Rename {name}
+        </button>
+        {onExport ? (
+          <button type="button" onClick={() => onExport(id)}>
+            Export {name}
+          </button>
+        ) : null}
+        <button type="button" onClick={onDelete}>
+          Delete {name}
+        </button>
+      </div>
+    );
+  },
 }));
 
 describe('App header thread title', () => {
@@ -962,6 +973,8 @@ describe('App header thread title', () => {
       category: payload.category,
       ...payload,
     }));
+    renderCounters.projectRow = 0;
+    renderCounters.threadRow = 0;
   });
 
   afterEach(() => {
@@ -2868,6 +2881,7 @@ describe('App header thread title', () => {
     const rail = screen.getByTestId('scene-workspace-rail');
     expect(within(rail).getByRole('button', { name: 'Reveal scene' })).toHaveAttribute('aria-pressed', 'true');
     expect(within(rail).getByRole('button', { name: 'Scene 1' })).toBeInTheDocument();
+    expect(within(rail).getAllByText('1 beat')).toHaveLength(2);
 
     fireEvent.change(within(rail).getByRole('searchbox', { name: 'Search scenes' }), {
       target: { value: 'reveal' },
@@ -6351,6 +6365,70 @@ describe('App header thread title', () => {
 
     expect(screen.getByText((content) => content.includes('Shot 1'))).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Enviar' })).toBeInTheDocument();
+  });
+
+  it('keeps high-volume Director deltas isolated from the app shell', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        userMessage: {
+          id: 'director-user-message',
+          chatId: 'director-chat-1',
+          role: 'user',
+          contentMarkdown: 'Stream a long answer.',
+          status: 'completed',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+        assistantMessage: {
+          id: 'director-assistant-message',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: '',
+          status: 'streaming',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    const projectRowRendersAfterStart = renderCounters.projectRow;
+    const threadRowRendersAfterStart = renderCounters.threadRow;
+
+    for (let index = 1; index <= 5; index += 1) {
+      await act(async () => {
+        directorMessageDeltaListener?.({
+          threadId: 'thread-1',
+          chatId: 'director-chat-1',
+          messageId: 'director-assistant-message',
+          delta: `Chunk ${index}. `,
+          content: Array.from({ length: index }, (_, chunkIndex) => `Chunk ${chunkIndex + 1}.`).join(' '),
+        });
+        await vi.advanceTimersByTimeAsync(64);
+      });
+    }
+
+    const directorWorkspace = screen.getByTestId('director-workspace');
+    expect(within(directorWorkspace).getByText((content) => content.includes('Chunk 5.'))).toBeInTheDocument();
+    expect(renderCounters.projectRow).toBe(projectRowRendersAfterStart);
+    expect(renderCounters.threadRow).toBe(threadRowRendersAfterStart);
   });
 
   it('keeps showing Director Thinking while a streamed response waits between deltas', async () => {

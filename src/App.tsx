@@ -119,7 +119,7 @@ import {
   type ProjectPropertiesDraft,
 } from './components/project-properties-dialog';
 import { ProjectRow } from './components/project-row';
-import { Shimmer } from './components/ai-elements/shimmer';
+import { TextShimmer } from './components/ai-elements/shimmer';
 import {
   Message,
   MessageActions,
@@ -245,6 +245,7 @@ const generationModeOptions = [
 ] as const;
 
 const DIRECTOR_MESSAGE_CACHE_LIMIT = 3;
+const DIRECTOR_STREAM_FLUSH_INTERVAL_MS = 16;
 
 // Each angle carries a `prompt`: a precise, AI-facing cinematographic directive
 // written in standard film terminology. It states where the camera sits, how the
@@ -615,6 +616,60 @@ function mergeDirectorMessages(
 
     return left.id.localeCompare(right.id);
   });
+}
+
+function updateDirectorMessageContent(
+  messages: DirectorMessageRecord[],
+  messageId: string,
+  contentMarkdown: string,
+  status: DirectorMessageRecord['status'],
+  updatedAt?: string
+) {
+  let didUpdate = false;
+  const nextMessages = messages.map((message) => {
+    if (message.id !== messageId) {
+      return message;
+    }
+
+    if (
+      message.contentMarkdown === contentMarkdown &&
+      message.status === status &&
+      (!updatedAt || message.updatedAt === updatedAt)
+    ) {
+      return message;
+    }
+
+    didUpdate = true;
+    return {
+      ...message,
+      contentMarkdown,
+      status,
+      ...(updatedAt ? { updatedAt } : null),
+    };
+  });
+
+  return didUpdate ? nextMessages : messages;
+}
+
+function updateDirectorMessagesByChat(
+  messagesByChatId: Record<string, DirectorMessageRecord[]>,
+  chatId: string,
+  messageId: string,
+  contentMarkdown: string,
+  status: DirectorMessageRecord['status'],
+  updatedAt?: string
+) {
+  const currentMessages = messagesByChatId[chatId] ?? [];
+  const nextMessages = updateDirectorMessageContent(currentMessages, messageId, contentMarkdown, status, updatedAt);
+
+  if (nextMessages === currentMessages) {
+    return messagesByChatId;
+  }
+
+  return {
+    ...messagesByChatId,
+    [chatId]: nextMessages,
+  };
 }
 
 function bytesToBase64(bytes: Uint8Array) {
@@ -1298,6 +1353,15 @@ type DirectorActiveRun = {
   startedAt: string;
 };
 
+type DirectorMessageStreamSnapshot = {
+  chatId: string;
+  messageId: string;
+  content: string;
+  status: DirectorMessageRecord['status'];
+};
+
+type DirectorMessageStreamListener = (snapshot: DirectorMessageStreamSnapshot) => void;
+
 function parseDirectorJsonBlock(content: string): Record<string, unknown> | null {
   try {
     const parsed = JSON.parse(content);
@@ -1463,6 +1527,8 @@ export function App() {
   const activeRunsRef = useRef<Record<string, ActiveGenerationRun>>({});
   const pendingDirectorDeltaByMessageIdRef = useRef<Record<string, { chatId: string; content: string }>>({});
   const directorDeltaFlushTimerRef = useRef<number | null>(null);
+  const directorMessageStreamListenersRef = useRef(new Set<DirectorMessageStreamListener>());
+  const latestDirectorMessageStreamSnapshotsRef = useRef(new Map<string, DirectorMessageStreamSnapshot>());
   const activeDirectorRunsRef = useRef<Record<string, DirectorActiveRun>>({});
   const selectedThreadIdRef = useRef<string | null>(null);
   const activeSceneGroupIdRef = useRef<string | null>(null);
@@ -1534,6 +1600,29 @@ export function App() {
     const retainedChatIds = new Set(Object.keys(nextMessagesByChatId));
     directorMessagesCacheOrderRef.current = cacheOrder.filter((chatId) => retainedChatIds.has(chatId));
     return nextMessagesByChatId;
+  }, []);
+
+  const subscribeToDirectorMessageStream = useCallback((listener: DirectorMessageStreamListener) => {
+    directorMessageStreamListenersRef.current.add(listener);
+    for (const snapshot of latestDirectorMessageStreamSnapshotsRef.current.values()) {
+      listener(snapshot);
+    }
+    return () => {
+      directorMessageStreamListenersRef.current.delete(listener);
+    };
+  }, []);
+
+  const emitDirectorMessageStreamSnapshot = useCallback((snapshot: DirectorMessageStreamSnapshot) => {
+    latestDirectorMessageStreamSnapshotsRef.current.set(snapshot.messageId, snapshot);
+    for (const listener of directorMessageStreamListenersRef.current) {
+      listener(snapshot);
+    }
+  }, []);
+
+  const getDirectorMessageStreamSnapshots = useCallback((chatId: string) => {
+    return Array.from(latestDirectorMessageStreamSnapshotsRef.current.values()).filter(
+      (snapshot) => snapshot.chatId === chatId
+    );
   }, []);
 
   useEffect(() => {
@@ -4628,6 +4717,7 @@ export function App() {
 
   useEffect(() => {
     return subscribeToDirectorMessageStart((event) => {
+      latestDirectorMessageStreamSnapshotsRef.current.delete(event.assistantMessage.id);
       setActiveDirectorRunsByChatId((current) => ({
         ...current,
         [event.chatId]: {
@@ -4641,10 +4731,13 @@ export function App() {
         },
       }));
       setDirectorMessagesByChatId((current) => {
-        return limitDirectorMessagesByChatId({
+        const nextMessagesByChatId = limitDirectorMessagesByChatId({
           ...current,
           [event.chatId]: mergeDirectorMessages(current[event.chatId] ?? [], [event.userMessage, event.assistantMessage]),
         }, event.chatId);
+        directorMessagesByChatIdRef.current = nextMessagesByChatId;
+        directorMessagesCacheRef.current[event.chatId] = nextMessagesByChatId[event.chatId] ?? [];
+        return nextMessagesByChatId;
       });
     });
   }, [limitDirectorMessagesByChatId]);
@@ -4665,22 +4758,38 @@ export function App() {
         pendingDirectorDeltaByMessageIdRef.current = {};
         directorDeltaFlushTimerRef.current = null;
 
-        setDirectorMessagesByChatId((current) => {
-          const next = { ...current };
-          let touchedChatId: string | undefined;
-          for (const [messageId, pendingDelta] of Object.entries(pendingDeltas)) {
-            touchedChatId = pendingDelta.chatId;
-            next[pendingDelta.chatId] = (next[pendingDelta.chatId] ?? []).map((message) =>
-              message.id === messageId
-                ? { ...message, contentMarkdown: pendingDelta.content, status: 'streaming' }
-                : message
-            );
+        let nextMessagesByChatId = directorMessagesByChatIdRef.current;
+        let touchedChatId: string | undefined;
+
+        for (const [messageId, pendingDelta] of Object.entries(pendingDeltas)) {
+          touchedChatId = pendingDelta.chatId;
+          if (!nextMessagesByChatId[pendingDelta.chatId] && directorMessagesCacheRef.current[pendingDelta.chatId]) {
+            nextMessagesByChatId = {
+              ...nextMessagesByChatId,
+              [pendingDelta.chatId]: directorMessagesCacheRef.current[pendingDelta.chatId],
+            };
           }
-          return limitDirectorMessagesByChatId(next, touchedChatId);
-        });
-      }, 48);
+          nextMessagesByChatId = updateDirectorMessagesByChat(
+            nextMessagesByChatId,
+            pendingDelta.chatId,
+            messageId,
+            pendingDelta.content,
+            'streaming'
+          );
+          directorMessagesCacheRef.current[pendingDelta.chatId] =
+            nextMessagesByChatId[pendingDelta.chatId] ?? directorMessagesCacheRef.current[pendingDelta.chatId] ?? [];
+          emitDirectorMessageStreamSnapshot({
+            chatId: pendingDelta.chatId,
+            messageId,
+            content: pendingDelta.content,
+            status: 'streaming',
+          });
+        }
+
+        directorMessagesByChatIdRef.current = limitDirectorMessagesByChatId(nextMessagesByChatId, touchedChatId);
+      }, DIRECTOR_STREAM_FLUSH_INTERVAL_MS);
     });
-  }, [limitDirectorMessagesByChatId]);
+  }, [emitDirectorMessageStreamSnapshot, limitDirectorMessagesByChatId]);
 
   useEffect(() => {
     return () => {
@@ -4689,27 +4798,35 @@ export function App() {
       }
       directorDeltaFlushTimerRef.current = null;
       pendingDirectorDeltaByMessageIdRef.current = {};
+      latestDirectorMessageStreamSnapshotsRef.current.clear();
     };
   }, []);
 
   useEffect(() => {
     return subscribeToDirectorMessageComplete((event) => {
       delete pendingDirectorDeltaByMessageIdRef.current[event.messageId];
+      latestDirectorMessageStreamSnapshotsRef.current.delete(event.messageId);
       setActiveDirectorRunsByChatId((current) => {
         const next = { ...current };
         delete next[event.chatId];
         return next;
       });
-      setDirectorMessagesByChatId((current) =>
-        limitDirectorMessagesByChatId({
-          ...current,
-          [event.chatId]: (current[event.chatId] ?? []).map((message) =>
-            message.id === event.messageId
-              ? { ...message, contentMarkdown: event.content, status: 'completed', updatedAt: new Date().toISOString() }
-              : message
+      setDirectorMessagesByChatId((current) => {
+        const nextMessagesByChatId = limitDirectorMessagesByChatId(
+          updateDirectorMessagesByChat(
+            current,
+            event.chatId,
+            event.messageId,
+            event.content,
+            'completed',
+            new Date().toISOString()
           ),
-        }, event.chatId)
-      );
+          event.chatId
+        );
+        directorMessagesByChatIdRef.current = nextMessagesByChatId;
+        directorMessagesCacheRef.current[event.chatId] = nextMessagesByChatId[event.chatId] ?? [];
+        return nextMessagesByChatId;
+      });
       void loadDirectorChatsForThread(event.threadId).catch(() => {});
     });
   }, [limitDirectorMessagesByChatId, loadDirectorChatsForThread]);
@@ -4717,21 +4834,28 @@ export function App() {
   useEffect(() => {
     return subscribeToDirectorMessageError((event) => {
       delete pendingDirectorDeltaByMessageIdRef.current[event.messageId];
+      latestDirectorMessageStreamSnapshotsRef.current.delete(event.messageId);
       setActiveDirectorRunsByChatId((current) => {
         const next = { ...current };
         delete next[event.chatId];
         return next;
       });
-      setDirectorMessagesByChatId((current) =>
-        limitDirectorMessagesByChatId({
-          ...current,
-          [event.chatId]: (current[event.chatId] ?? []).map((message) =>
-            message.id === event.messageId
-              ? { ...message, contentMarkdown: event.content, status: 'failed', updatedAt: new Date().toISOString() }
-              : message
+      setDirectorMessagesByChatId((current) => {
+        const nextMessagesByChatId = limitDirectorMessagesByChatId(
+          updateDirectorMessagesByChat(
+            current,
+            event.chatId,
+            event.messageId,
+            event.content,
+            'failed',
+            new Date().toISOString()
           ),
-        }, event.chatId)
-      );
+          event.chatId
+        );
+        directorMessagesByChatIdRef.current = nextMessagesByChatId;
+        directorMessagesCacheRef.current[event.chatId] = nextMessagesByChatId[event.chatId] ?? [];
+        return nextMessagesByChatId;
+      });
       toast.error(event.canceled ? 'Director chat canceled' : event.errorMessage);
       void loadDirectorChatsForThread(event.threadId).catch(() => {});
     });
@@ -5155,6 +5279,8 @@ export function App() {
                     <DirectorWorkspace
                       chatId={activeDirectorChatId}
                       messages={activeDirectorMessages}
+                      onSubscribeMessageStream={subscribeToDirectorMessageStream}
+                      onGetMessageStreamSnapshots={getDirectorMessageStreamSnapshots}
                       onApproveDirectorAction={handleApproveDirectorAction}
                       onDeclineDirectorAction={handleDeclineDirectorAction}
                     />
@@ -6984,6 +7110,8 @@ function SortableSceneRailItem({
     transition,
     zIndex: isSortableDragging ? 20 : undefined,
   };
+  const beatCount = sceneGroup.frames.length;
+  const beatLabel = `${beatCount} beat${beatCount === 1 ? '' : 's'}`;
 
   return (
     <div
@@ -7035,9 +7163,19 @@ function SortableSceneRailItem({
           type="button"
           aria-pressed={isActive}
           onClick={() => onSelectSceneGroup(sceneGroup.id)}
-          className="h-9 min-w-0 flex-1 truncate rounded-full px-2 text-left text-[13px] font-medium text-[var(--foreground)]"
+          className="flex h-9 min-w-0 flex-1 items-center justify-between gap-3 rounded-full px-2 text-left text-[13px] font-medium text-[var(--foreground)]"
         >
-          {sceneGroup.title}
+          <span className="min-w-0 truncate">{sceneGroup.title}</span>
+          <span
+            className={[
+              'shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium',
+              beatCount > 4
+                ? 'border-[rgba(182,65,65,0.35)] bg-[rgba(122,44,44,0.26)] text-[rgb(245,178,178)]'
+                : 'border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] text-[var(--muted-foreground)]',
+            ].join(' ')}
+          >
+            {beatLabel}
+          </span>
         </button>
       )}
       <button
@@ -7063,11 +7201,15 @@ function SortableSceneRailItem({
 function DirectorWorkspace({
   chatId,
   messages,
+  onSubscribeMessageStream,
+  onGetMessageStreamSnapshots,
   onApproveDirectorAction,
   onDeclineDirectorAction,
 }: {
   chatId: string | null;
   messages: DirectorMessageRecord[];
+  onSubscribeMessageStream: (listener: DirectorMessageStreamListener) => () => void;
+  onGetMessageStreamSnapshots: (chatId: string) => DirectorMessageStreamSnapshot[];
   onApproveDirectorAction: (messageId: string, actionIndex: number) => void;
   onDeclineDirectorAction: (messageId: string, actionIndex: number) => void;
 }) {
@@ -7078,6 +7220,8 @@ function DirectorWorkspace({
           <DirectorMessageList
             chatId={chatId}
             messages={messages}
+            onSubscribeMessageStream={onSubscribeMessageStream}
+            onGetMessageStreamSnapshots={onGetMessageStreamSnapshots}
             onApproveDirectorAction={onApproveDirectorAction}
             onDeclineDirectorAction={onDeclineDirectorAction}
           />
@@ -7195,9 +7339,9 @@ function DirectorChatThreadRow({
             </span>
             <span className="ml-3 shrink-0 text-[12px] text-[var(--muted-foreground)] transition-opacity duration-150 group-hover:opacity-0">
               {chat.isStreaming ? (
-                <Shimmer className="text-[12px]" duration={1.6}>
+                <TextShimmer className="text-[12px]" duration={1.6}>
                   Thinking...
-                </Shimmer>
+                </TextShimmer>
               ) : (
                 formatRelativeTime(chat.updatedAt)
               )}
@@ -7313,9 +7457,9 @@ function DirectorMessageRow({
           }
         >
           {isThinking ? (
-            <Shimmer className="text-[14px] leading-6" duration={1.6}>
+            <TextShimmer className="text-[14px] leading-6" duration={1.6}>
               Thinking...
-            </Shimmer>
+            </TextShimmer>
           ) : isUser ? (
             message.contentMarkdown
           ) : (
@@ -7347,16 +7491,16 @@ function DirectorMessageRow({
                   <MessageResponse
                     key={`${message.id}-markdown-${blockIndex}`}
                     isAnimating={message.status === 'streaming'}
-                    className="director-markdown text-[14px] leading-6 text-[var(--foreground)] [&_*]:tracking-[0] [&_a]:text-[var(--accent)] [&_a]:underline-offset-4 [&_code]:rounded-[6px] [&_code]:bg-white/8 [&_code]:px-1 [&_code]:py-0.5 [&_li]:my-1 [&_ol]:my-3 [&_p]:my-0 [&_p+p]:mt-3 [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:border [&_pre]:border-[var(--border-soft)] [&_pre]:bg-[rgba(15,16,16,0.72)] [&_pre]:p-3 [&_strong]:font-semibold [&_ul]:my-3"
+                    className="director-markdown"
                   >
                   {block.content}
                 </MessageResponse>
               );
               })}
               {isStreamingAssistant && hasAssistantContent ? (
-                <Shimmer className="text-[14px] leading-6 text-[var(--muted-foreground)]" duration={1.6}>
+                <TextShimmer className="text-[14px] leading-6 text-[var(--muted-foreground)]" duration={1.6}>
                   Thinking...
-                </Shimmer>
+                </TextShimmer>
               ) : null}
             </div>
           )}
@@ -7617,32 +7761,67 @@ function DirectorStatusBlock({ data }: { data: Record<string, unknown> | null })
 function DirectorMessageList({
   chatId,
   messages,
+  onSubscribeMessageStream,
+  onGetMessageStreamSnapshots,
   onApproveDirectorAction,
   onDeclineDirectorAction,
 }: {
   chatId: string | null;
   messages: DirectorMessageRecord[];
+  onSubscribeMessageStream: (listener: DirectorMessageStreamListener) => () => void;
+  onGetMessageStreamSnapshots: (chatId: string) => DirectorMessageStreamSnapshot[];
   onApproveDirectorAction: (messageId: string, actionIndex: number) => void;
   onDeclineDirectorAction: (messageId: string, actionIndex: number) => void;
 }) {
   const listRef = useListRef(null);
   const isPinnedToBottomRef = useRef(true);
+  const [displayMessages, setDisplayMessages] = useState(messages);
   const rowHeight = useDynamicRowHeight({
     defaultRowHeight: 180,
     key: chatId ?? 'director-empty-chat',
   });
-  const lastMessage = messages[messages.length - 1] ?? null;
+  const lastMessage = displayMessages[displayMessages.length - 1] ?? null;
   const contentSignature = lastMessage
-    ? `${messages.length}:${lastMessage.id}:${lastMessage.contentMarkdown.length}:${lastMessage.status}`
+    ? `${displayMessages.length}:${lastMessage.id}:${lastMessage.contentMarkdown.length}:${lastMessage.status}`
     : '0';
   const rowProps = useMemo(
     () => ({
-      messages,
+      messages: displayMessages,
       onApproveDirectorAction,
       onDeclineDirectorAction,
     }),
-    [messages, onApproveDirectorAction, onDeclineDirectorAction]
+    [displayMessages, onApproveDirectorAction, onDeclineDirectorAction]
   );
+
+  useEffect(() => {
+    if (!chatId) {
+      setDisplayMessages(messages);
+      return;
+    }
+
+    const messagesWithSnapshots = onGetMessageStreamSnapshots(chatId).reduce(
+      (nextMessages, snapshot) =>
+        updateDirectorMessageContent(nextMessages, snapshot.messageId, snapshot.content, snapshot.status),
+      messages
+    );
+    setDisplayMessages(messagesWithSnapshots);
+  }, [chatId, messages, onGetMessageStreamSnapshots]);
+
+  useEffect(() => {
+    if (!chatId) {
+      return;
+    }
+
+    return onSubscribeMessageStream((snapshot) => {
+      if (snapshot.chatId !== chatId) {
+        return;
+      }
+
+      setDisplayMessages((current) =>
+        updateDirectorMessageContent(current, snapshot.messageId, snapshot.content, snapshot.status)
+      );
+    });
+  }, [chatId, onSubscribeMessageStream]);
 
   const handleScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
     const node = event.currentTarget;
@@ -7650,7 +7829,7 @@ function DirectorMessageList({
   }, []);
 
   useLayoutEffect(() => {
-    if (messages.length === 0) {
+    if (displayMessages.length === 0) {
       return;
     }
     if (!isPinnedToBottomRef.current) {
@@ -7659,11 +7838,11 @@ function DirectorMessageList({
     listRef.current?.scrollToRow({
       align: 'end',
       behavior: 'instant',
-      index: messages.length - 1,
+      index: displayMessages.length - 1,
     });
-  }, [contentSignature, messages.length]);
+  }, [contentSignature, displayMessages.length]);
 
-  if (messages.length === 0) {
+  if (displayMessages.length === 0) {
     return (
       <div className="flex h-full items-center justify-center px-6 pb-[260px] pt-8">
         <div className="max-w-[420px] text-center">
@@ -7680,7 +7859,7 @@ function DirectorMessageList({
     <List<DirectorMessageVirtualRowProps>
       listRef={listRef}
       rowComponent={DirectorMessageVirtualRow}
-      rowCount={messages.length}
+      rowCount={displayMessages.length}
       rowHeight={rowHeight}
       rowProps={rowProps}
       overscanCount={4}

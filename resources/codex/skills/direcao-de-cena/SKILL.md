@@ -76,6 +76,26 @@ Antes do pré-plano, diagnostique o tamanho da unidade:
 
 Se o usuário pedir apenas "a cena", a skill decide se aquilo cabe em 1 clipe ou precisa virar arco. Se 1 clipe ficar superlotado, dividir.
 
+## Regra de corte do clipe
+
+- Um clipe de 15s comporta cerca de 4 beats claros.
+- Se passar disso, dividir em mais clipes.
+- Se 3 ou mais personagens agem ao mesmo tempo, serializar a cena: grupo -> individual -> grupo.
+- Se a composição exige formação, posição específica, veículos diferentes ou ocupação espacial complexa, dar um clipe dedicado.
+- Cada clipe deve fazer uma função só: estabelecer, escalar, reverter ou liberar.
+- Um frame ou shot em image generation é uma única imagem.
+- Um beat deve normalmente ser representado por uma única imagem, porque é uma ação.
+- Beat é unidade de história; frame é unidade de imagem. Use beats para medir a complexidade da cena e frames para montar a sequência visual.
+- Um beat pode virar vários frames quando a ação é complexa; um beat simples pode caber em um frame só.
+- Use o toolkit Imagen para gerar as imagens de referência que vão tornar o plano de Seedance possível; não tente gerar o Seedance em si nesta etapa.
+- Se a cena pedir duas ações fortes no mesmo instante, separar em frames ou shots diferentes.
+
+## Regra de saída
+
+- Para o usuário, mostre o plano de planos, não o diagnóstico inteiro.
+- Se a pergunta não pede análise detalhada, não despeje toda a leitura dramática.
+- Prefira cobertura, blocking e ritmo em formato curto e fácil de ler.
+
 ## Passo 1 — Motor dramático
 
 Antes de qualquer câmera, defina:
@@ -299,6 +319,8 @@ Ver `references/linguagem-de-camera.md` para o mapeamento completo de câmera �
 Quando a cena tiver múltiplos shots, use também `references/seedance-multishot-transicoes.md` para decidir corte, continuidade e ponte entre frames.
 
 ## Formato de saída do pré-plano
+
+Use este formato por padrão. Se a cena for simples, mantenha as explicações curtas e não repita o raciocínio interno.
 
 Apresente assim para o usuário aprovar:
 

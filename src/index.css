@@ -240,3 +240,331 @@ textarea::-webkit-scrollbar {
 .prompt-composer-card [contenteditable]::selection {
   background: rgba(65, 130, 230, 0.25) !important;
 }
+
+.director-markdown {
+  color: var(--foreground);
+  font-size: 14px;
+  line-height: 1.5rem;
+}
+
+.director-markdown * {
+  letter-spacing: 0;
+}
+
+.director-markdown a {
+  color: var(--accent);
+  text-underline-offset: 4px;
+}
+
+.director-markdown p {
+  margin: 0;
+}
+
+.director-markdown p + p {
+  margin-top: 0.75rem;
+}
+
+.director-markdown strong {
+  font-weight: 600;
+}
+
+.director-markdown ul,
+.director-markdown ol {
+  margin-block: 0.75rem;
+  padding-left: 1.25rem;
+}
+
+.director-markdown li {
+  margin-block: 0.25rem;
+}
+
+.director-markdown [data-streamdown="code-block"],
+.director-markdown [data-streamdown="table-wrapper"] {
+  position: relative;
+  margin-block: 0.9rem;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  backdrop-filter: none;
+}
+
+.director-markdown [data-streamdown="code-block-actions"],
+.director-markdown [data-streamdown="table-wrapper"] > div:first-child {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+
+.is-assistant:hover .director-markdown [data-streamdown="code-block-actions"],
+.is-assistant:focus-within .director-markdown [data-streamdown="code-block-actions"],
+.is-assistant:hover .director-markdown [data-streamdown="code-block-header"],
+.is-assistant:focus-within .director-markdown [data-streamdown="code-block-header"],
+.is-assistant:hover .director-markdown [data-streamdown="table-wrapper"] > div:first-child,
+.is-assistant:focus-within .director-markdown [data-streamdown="table-wrapper"] > div:first-child {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.director-markdown [data-streamdown="code-block-actions"] {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  gap: 0.25rem;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 999px;
+  background: rgba(32, 32, 33, 0.72);
+  padding: 0.18rem;
+  backdrop-filter: blur(18px);
+}
+
+.director-markdown [data-streamdown="table-wrapper"] > div:first-child {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 999px;
+  background: rgba(32, 32, 33, 0.72);
+  padding: 0.18rem;
+  backdrop-filter: blur(18px);
+}
+
+.director-markdown [data-streamdown="table-wrapper"] > div:first-child button,
+.director-markdown [data-streamdown="code-block-actions"] button {
+  display: inline-flex;
+  height: 28px;
+  width: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  transition:
+    background-color 160ms ease,
+    color 160ms ease;
+}
+
+.director-markdown [data-streamdown="table-wrapper"] > div:first-child button:hover,
+.director-markdown [data-streamdown="code-block-actions"] button:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--foreground);
+}
+
+.director-markdown [data-streamdown="table-wrapper"] > div:first-child button:disabled,
+.director-markdown [data-streamdown="code-block-actions"] button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.director-markdown [data-streamdown="table-wrapper"] > div:first-child [class*="absolute"],
+.director-markdown [data-streamdown="code-block-actions"] [class*="absolute"] {
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  background: rgba(15, 16, 16, 0.88);
+  box-shadow: none;
+  backdrop-filter: blur(18px);
+}
+
+.director-markdown [data-streamdown="table-wrapper"] > div:first-child [class*="absolute"] button,
+.director-markdown [data-streamdown="code-block-actions"] [class*="absolute"] button {
+  width: 100%;
+  justify-content: flex-start;
+  border-radius: 0;
+  padding-inline: 0.75rem;
+  color: var(--foreground);
+  font-size: 12px;
+}
+
+.director-markdown :not(pre) > code {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  background: rgba(32, 32, 33, 0.72);
+  padding: 0.125rem 0.45rem;
+  color: rgb(238, 238, 241);
+  font-family: "Geist Mono", monospace;
+  font-size: 0.88em;
+}
+
+.director-markdown pre {
+  margin: 0;
+  overflow-x: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.director-markdown pre code {
+  display: block;
+  min-width: max-content;
+  background: transparent;
+  color: rgb(232, 232, 236);
+  font-family: "Geist Mono", monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.director-markdown [data-streamdown="code-block-header"] {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  height: auto;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+
+.director-markdown [data-streamdown="code-block-header"] span {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  background: rgba(32, 32, 33, 0.56);
+  padding: 0.12rem 0.5rem;
+  font-family: "Geist Mono", monospace;
+}
+
+.director-markdown [data-streamdown="code-block-body"] {
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 34%),
+    rgba(15, 16, 16, 0.78);
+  padding: 0.9rem;
+  font-size: 12.5px;
+  backdrop-filter: blur(18px);
+}
+
+.director-markdown [data-streamdown="code-block-body"] pre {
+  background: transparent !important;
+}
+
+.director-markdown [data-streamdown="code-block-body"] code {
+  background: transparent;
+}
+
+.director-markdown [data-streamdown="code-block"][data-language=""] [data-streamdown="code-block-header"] {
+  display: none;
+}
+
+.director-markdown [data-streamdown="table-wrapper"] > div:last-child {
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 16px;
+  background: rgba(7, 7, 7, 0.25);
+}
+
+.director-markdown table {
+  width: 100%;
+  margin: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 16px;
+  border-spacing: 0;
+  background: transparent;
+}
+
+.director-markdown thead {
+  background: rgba(32, 32, 33, 0.86);
+}
+
+.director-markdown th,
+.director-markdown td {
+  border: 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.055);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+  padding: 0.62rem 0.78rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.director-markdown th {
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.director-markdown td {
+  color: rgba(228, 227, 233, 0.86);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.director-markdown tr:last-child td {
+  border-bottom: 0;
+}
+
+.director-markdown th:last-child,
+.director-markdown td:last-child {
+  border-right: 0;
+}
+
+.director-markdown thead tr:first-child th:first-child {
+  border-top-left-radius: 17px;
+}
+
+.director-markdown thead tr:first-child th:last-child {
+  border-top-right-radius: 17px;
+}
+
+.director-markdown tbody tr:last-child td:first-child {
+  border-bottom-left-radius: 17px;
+}
+
+.director-markdown tbody tr:last-child td:last-child {
+  border-bottom-right-radius: 17px;
+}
+
+[data-streamdown="table-fullscreen"] {
+  background: rgba(7, 7, 7, 0.96);
+  color: var(--foreground);
+}
+
+[data-streamdown="table-fullscreen"] > div > div:first-child {
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border-soft);
+  background: rgba(15, 16, 16, 0.86);
+  backdrop-filter: blur(18px);
+}
+
+[data-streamdown="table-fullscreen"] button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  transition:
+    background-color 160ms ease,
+    color 160ms ease;
+}
+
+[data-streamdown="table-fullscreen"] button:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--foreground);
+}
+
+[data-streamdown="table-fullscreen"] [data-streamdown="table"] {
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 18px;
+  background: rgba(15, 16, 16, 0.78);
+}
