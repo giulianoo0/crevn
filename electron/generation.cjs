@@ -854,6 +854,7 @@ const environmentReferenceAttachmentsTable = sqliteTable('environment_reference_
   mimeType: text('mime_type').notNull(),
   bytesBase64: text('bytes_base64').notNull(),
   description: text('description'),
+  section: text('section').notNull(),
   createdAt: text('created_at').notNull(),
 });
 
@@ -1115,6 +1116,7 @@ const CREATE_ENVIRONMENT_REFERENCE_ATTACHMENTS_TABLE_SQL = `
     mime_type TEXT NOT NULL,
     bytes_base64 TEXT NOT NULL,
     description TEXT,
+    section TEXT NOT NULL DEFAULT 'angles',
     created_at TEXT NOT NULL,
     FOREIGN KEY (environment_id) REFERENCES environment_references(id)
   )
@@ -1679,6 +1681,7 @@ async function createGenerationStore(userDataDir, options = {}) {
   await migrateLegacyReferencesTable(db);
   await ensureEnvironmentAttachmentDescriptionColumn(db);
   await ensureReferenceAttachmentTitleColumns(db);
+  await ensureEnvironmentAttachmentSectionColumn(db);
   await ensureProjectSettingsColumns(db);
   await ensureGenerationJobsThreadColumn(db);
   await ensureGenerationJobMetadataColumns(db);
@@ -2547,6 +2550,10 @@ async function createGenerationStore(userDataDir, options = {}) {
     return category === 'objects' ? 'objects' : 'characters';
   }
 
+  function normalizeReferenceAttachmentSection(section, fallback = 'angles') {
+    return section === 'primary' || section === 'angles' ? section : fallback;
+  }
+
 function mapReferenceCollectionAttachment({
   attachment,
   category,
@@ -2635,7 +2642,7 @@ function mapReferenceCollectionAttachment({
       createdAt: timestamp,
     });
 
-    const attachments = payload.attachments.map((attachment) => ({
+    const attachments = payload.attachments.map((attachment, index) => ({
       id: nanoid(),
       environmentId,
       name: attachment.name,
@@ -2643,6 +2650,7 @@ function mapReferenceCollectionAttachment({
       mimeType: attachment.mimeType || 'image/png',
       bytesBase64: attachment.bytesBase64,
       description: attachment.description?.trim() || null,
+      section: normalizeReferenceAttachmentSection(attachment.section, index === 0 ? 'primary' : 'angles'),
       createdAt: timestamp,
     }));
     if (attachments.length > 0) {
@@ -2662,6 +2670,7 @@ function mapReferenceCollectionAttachment({
       bytesBase64: attachment.bytesBase64,
       createdAt: attachment.createdAt,
       category: 'environment',
+      section: attachment.section,
     }));
   }
 
@@ -2702,6 +2711,7 @@ function mapReferenceCollectionAttachment({
         bytesBase64: firstAttachment.bytesBase64,
         createdAt: firstAttachment.createdAt,
         category: 'environment',
+        section: firstAttachment.section,
       };
     }
 
@@ -2744,7 +2754,7 @@ function mapReferenceCollectionAttachment({
       .where(eq(environmentReferenceAttachmentsTable.environmentId, environmentId));
 
     const timestamp = new Date().toISOString();
-    const attachments = (payload.attachments ?? []).map((attachment) => ({
+    const attachments = (payload.attachments ?? []).map((attachment, index) => ({
       id: attachment.id ?? nanoid(),
       environmentId,
       name: attachment.name,
@@ -2752,6 +2762,7 @@ function mapReferenceCollectionAttachment({
       mimeType: attachment.mimeType || 'image/png',
       bytesBase64: attachment.bytesBase64,
       description: attachment.description?.trim() || null,
+      section: normalizeReferenceAttachmentSection(attachment.section, index === 0 ? 'primary' : 'angles'),
       createdAt: timestamp,
     }));
 
@@ -2772,6 +2783,7 @@ function mapReferenceCollectionAttachment({
       bytesBase64: attachment.bytesBase64,
       createdAt: attachment.createdAt,
       category: 'environment',
+      section: attachment.section,
     }));
   }
 
@@ -2920,6 +2932,7 @@ function mapReferenceCollectionAttachment({
           description: environmentReferenceAttachmentsTable.description,
           mimeType: environmentReferenceAttachmentsTable.mimeType,
           bytesBase64: environmentReferenceAttachmentsTable.bytesBase64,
+          section: environmentReferenceAttachmentsTable.section,
           createdAt: environmentReferenceAttachmentsTable.createdAt,
         })
         .from(environmentReferenceAttachmentsTable)
@@ -2971,6 +2984,7 @@ function mapReferenceCollectionAttachment({
         title: reference.title ?? reference.name,
         groupTitle: reference.groupTitle ?? null,
         groupDescription: reference.environmentDescription ?? null,
+        section: normalizeReferenceAttachmentSection(reference.section),
       })),
     ];
 
@@ -5640,6 +5654,38 @@ async function ensureEnvironmentAttachmentDescriptionColumn(db) {
   if (!columnNames.has('description')) {
     await db.run(sql.raw('ALTER TABLE environment_reference_attachments ADD COLUMN description TEXT'));
   }
+}
+
+async function ensureEnvironmentAttachmentSectionColumn(db) {
+  const tableInfo = await db.all(sql.raw("PRAGMA table_info('environment_reference_attachments')"));
+  const columnNames = new Set(tableInfo.map((column) => column.name));
+
+  if (!columnNames.has('section')) {
+    await db.run(sql.raw("ALTER TABLE environment_reference_attachments ADD COLUMN section TEXT NOT NULL DEFAULT 'angles'"));
+    const attachments = await db.all(
+      sql.raw(
+        'SELECT id, environment_id AS environmentId FROM environment_reference_attachments ORDER BY environment_id, created_at, id'
+      )
+    );
+    const seenEnvironmentIds = new Set();
+
+    for (const attachment of attachments) {
+      const environmentId = attachment.environmentId ?? attachment.environment_id;
+      const section = seenEnvironmentIds.has(environmentId) ? 'angles' : 'primary';
+      seenEnvironmentIds.add(environmentId);
+      await db.run(
+        sql.raw(
+          `UPDATE environment_reference_attachments SET section = '${section}' WHERE id = '${escapeSqlLiteral(attachment.id)}'`
+        )
+      );
+    }
+  }
+
+  await db.run(
+    sql.raw(
+      "UPDATE environment_reference_attachments SET section = 'angles' WHERE section IS NULL OR section NOT IN ('primary', 'angles')"
+    )
+  );
 }
 
 async function ensureReferenceAttachmentTitleColumns(db) {

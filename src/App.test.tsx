@@ -202,7 +202,7 @@ vi.mock('./lib/electron-api', () => ({
     ...payload,
   })),
   createEnvironmentReference: vi.fn(async (payload) =>
-    payload.attachments.map((attachment: { name: string; title?: string; mimeType: string; bytesBase64: string }, index: number) => ({
+    payload.attachments.map((attachment: { name: string; title?: string; mimeType: string; bytesBase64: string; section?: 'primary' | 'angles' }, index: number) => ({
       id: `environment-reference-${index + 1}`,
       collectionId: 'environment-1',
       environmentId: 'environment-1',
@@ -215,10 +215,11 @@ vi.mock('./lib/electron-api', () => ({
       bytesBase64: attachment.bytesBase64,
       createdAt: '2026-05-26T12:00:00.000Z',
       category: 'environment',
+      section: attachment.section ?? (index === 0 ? 'primary' : 'angles'),
     }))
   ),
   createReferenceCollection: vi.fn(async (payload) =>
-    payload.attachments.map((attachment: { name: string; title?: string; mimeType: string; bytesBase64: string; description?: string }, index: number) => ({
+    payload.attachments.map((attachment: { name: string; title?: string; mimeType: string; bytesBase64: string; description?: string; section?: 'primary' | 'angles' }, index: number) => ({
       id: `${payload.category}-reference-${index + 1}`,
       collectionId: `${payload.category}-collection-1`,
       environmentId: payload.category === 'environment' ? 'environment-1' : null,
@@ -231,6 +232,7 @@ vi.mock('./lib/electron-api', () => ({
       bytesBase64: attachment.bytesBase64,
       createdAt: '2026-05-26T12:00:00.000Z',
       category: payload.category,
+      section: attachment.section ?? (index === 0 ? 'primary' : 'angles'),
     }))
   ),
   updateReference: vi.fn(async (payload) => ({
@@ -246,7 +248,7 @@ vi.mock('./lib/electron-api', () => ({
     category: payload.category,
   })),
   updateEnvironmentReference: vi.fn(async (payload) =>
-    payload.attachments.map((attachment: { id?: string; name: string; title?: string; mimeType: string; bytesBase64: string; description?: string }, index: number) => ({
+    payload.attachments.map((attachment: { id?: string; name: string; title?: string; mimeType: string; bytesBase64: string; description?: string; section?: 'primary' | 'angles' }, index: number) => ({
       id: attachment.id ?? `environment-reference-${index + 1}`,
       environmentId: payload.environmentId,
       title: attachment.title ?? attachment.name,
@@ -258,10 +260,11 @@ vi.mock('./lib/electron-api', () => ({
       bytesBase64: attachment.bytesBase64,
       createdAt: '2026-05-26T12:00:00.000Z',
       category: 'environment',
+      section: attachment.section ?? (index === 0 ? 'primary' : 'angles'),
     }))
   ),
   updateReferenceCollection: vi.fn(async (payload) =>
-    payload.attachments.map((attachment: { id?: string; name: string; title?: string; mimeType: string; bytesBase64: string; description?: string }, index: number) => ({
+    payload.attachments.map((attachment: { id?: string; name: string; title?: string; mimeType: string; bytesBase64: string; description?: string; section?: 'primary' | 'angles' }, index: number) => ({
       id: attachment.id ?? `${payload.category}-reference-${index + 1}`,
       collectionId: payload.collectionId,
       environmentId: payload.category === 'environment' ? payload.collectionId : null,
@@ -274,6 +277,7 @@ vi.mock('./lib/electron-api', () => ({
       bytesBase64: attachment.bytesBase64,
       createdAt: '2026-05-26T12:00:00.000Z',
       category: payload.category,
+      section: attachment.section ?? (index === 0 ? 'primary' : 'angles'),
     }))
   ),
   describeReferenceCollection: vi.fn(async (payload) => ({
@@ -4166,9 +4170,43 @@ describe('App header thread title', () => {
     expect(screen.getByRole('tab', { name: 'Ângulos' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Move env-1.png to Ângulos' }));
+
+    expect(screen.getByRole('tab', { name: 'Ambiente' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('No images in this tab')).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole('tab', { name: 'Ângulos' }));
 
     expect(screen.getByText('env-1')).toBeInTheDocument();
+  });
+
+  it('moves the only new environment image from Ambiente to Ângulos', async () => {
+    const primary = new File(['env-1'], 'env-1.png', { type: 'image/png' });
+    Object.defineProperty(primary, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([1, 2, 3, 4]).buffer),
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add environment images' }));
+    fireEvent.change(screen.getByLabelText('Images'), {
+      target: { files: [primary] },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move env-1.png to Ângulos' }));
+
+    expect(screen.getByRole('tab', { name: 'Ambiente' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('No images in this tab')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Ângulos' }));
+
+    expect(screen.getByText('env-1')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Move env-1.png to Ambiente' })).toBeInTheDocument();
   });
 
   it('shows primary and angle tabs in edit reference and moves attachments between them before save', async () => {
@@ -4217,8 +4255,281 @@ describe('App header thread title', () => {
     expect(screen.getByRole('tab', { name: 'Ângulos' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Move env-1.png to Ângulos' }));
+
+    expect(screen.getByRole('tab', { name: 'Ambiente' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('No images in this tab')).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole('tab', { name: 'Ângulos' }));
     expect(screen.getByText('Dock angle')).toBeInTheDocument();
+  });
+
+  it('moves the only existing environment attachment from Ambiente to Ângulos', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'environment-reference-1',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-1.png',
+        title: 'Dock angle',
+        groupTitle: 'Warehouse',
+        description: 'Old note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Warehouse' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move env-1.png to Ângulos' }));
+
+    expect(screen.getByRole('tab', { name: 'Ambiente' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('No images in this tab')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Ângulos' }));
+
+    expect(screen.getByText('Dock angle')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Move env-1.png to Ambiente' })).toBeInTheDocument();
+  });
+
+  it('adds a new environment attachment in edit reference without breaking bucket moves', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'environment-reference-1',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-1.png',
+        title: 'Dock angle',
+        groupTitle: 'Warehouse',
+        description: 'Old note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+    ]);
+    const newAngle = new File(['env-2'], 'env-2.png', { type: 'image/png' });
+    Object.defineProperty(newAngle, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([5, 6, 7, 8]).buffer),
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Warehouse' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add images' }));
+    const editDialog = screen.getByRole('dialog', { name: 'Edit environment' });
+    const fileInput = editDialog.querySelector('input[type="file"]');
+    expect(fileInput).not.toBeNull();
+    fireEvent.change(fileInput!, {
+      target: { files: [newAngle] },
+    });
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Ângulos' }));
+    expect(screen.getByAltText('env-2.png')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move env-2.png to Ambiente' }));
+    expect(screen.getByRole('tab', { name: 'Ângulos' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('No images in this tab')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Ambiente' }));
+
+    expect(screen.getByAltText('env-1.png')).toBeInTheDocument();
+    expect(screen.getByAltText('env-2.png')).toBeInTheDocument();
+  });
+
+  it('saves environment attachment sections without forcing a single Ambiente image', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'environment-reference-1',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-1.png',
+        title: 'Dock angle',
+        groupTitle: 'Warehouse',
+        description: 'Old note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+      {
+        id: 'environment-reference-2',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-2.png',
+        title: 'Office corner',
+        groupTitle: 'Warehouse',
+        description: 'Existing second note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Warehouse' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move env-1.png to Ângulos' }));
+    fireEvent.click(screen.getAllByText('Save changes').at(-1)!);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const updateCall = vi.mocked(electronApi.updateReferenceCollection).mock.calls.at(-1)?.[0];
+    expect(updateCall).toMatchObject({
+      category: 'environment',
+      collectionId: 'environment-1',
+    });
+    expect(updateCall?.attachments?.[0]).toMatchObject({
+      id: 'environment-reference-1',
+      title: 'Dock angle',
+      section: 'angles',
+    });
+    expect(updateCall?.attachments?.[1]).toMatchObject({
+      id: 'environment-reference-2',
+      title: 'Office corner',
+      section: 'angles',
+    });
+  });
+
+  it('loads saved environment attachment sections instead of deriving them by order', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'environment-reference-1',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-1.png',
+        title: 'Dock angle',
+        groupTitle: 'Warehouse',
+        description: 'Old note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+        section: 'angles',
+      },
+      {
+        id: 'environment-reference-2',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-2.png',
+        title: 'Office corner',
+        groupTitle: 'Warehouse',
+        description: 'Existing second note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+        section: 'primary',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Warehouse' }));
+
+    expect(screen.getByRole('tab', { name: 'Ambiente' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByAltText('env-2.png')).toBeInTheDocument();
+    expect(screen.queryByAltText('env-1.png')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Ângulos' }));
+
+    expect(screen.getByAltText('env-1.png')).toBeInTheDocument();
+  });
+
+  it('does not revoke live environment thumbnails when swapping between primary and angles', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'environment-reference-1',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-1.png',
+        title: 'Dock angle',
+        groupTitle: 'Warehouse',
+        description: 'Old note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+      {
+        id: 'environment-reference-2',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-2.png',
+        title: 'Office corner',
+        groupTitle: 'Warehouse',
+        description: 'Existing second note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    const revokeSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Warehouse' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move env-1.png to Ângulos' }));
+
+    expect(screen.getByRole('tab', { name: 'Ambiente' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('No images in this tab')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Ângulos' }));
+
+    expect(screen.getByAltText('env-1.png')).toBeInTheDocument();
+    expect(revokeSpy).not.toHaveBeenCalled();
   });
 
   it('filters reference mentions after @ and inserts the selected name', async () => {

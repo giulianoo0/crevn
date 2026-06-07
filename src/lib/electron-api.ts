@@ -64,6 +64,7 @@ export interface ReferenceImageRecord {
   category: 'characters' | 'environment' | 'objects';
   collectionId?: string | null;
   environmentId?: string | null;
+  section?: 'primary' | 'angles' | null;
 }
 
 export interface CreateReferencePayload {
@@ -80,9 +81,11 @@ export interface CreateEnvironmentReferencePayload {
   description?: string;
   attachments: Array<{
     name: string;
+    title?: string;
     mimeType: string;
     bytesBase64: string;
     description?: string;
+    section?: 'primary' | 'angles';
   }>;
 }
 
@@ -92,9 +95,11 @@ export interface CreateReferenceCollectionPayload {
   description?: string;
   attachments: Array<{
     name: string;
+    title?: string;
     mimeType: string;
     bytesBase64: string;
     description?: string;
+    section?: 'primary' | 'angles';
   }>;
 }
 
@@ -113,9 +118,11 @@ export interface UpdateEnvironmentReferencePayload {
   attachments: Array<{
     id?: string;
     name: string;
+    title?: string;
     mimeType: string;
     bytesBase64: string;
     description?: string;
+    section?: 'primary' | 'angles';
   }>;
 }
 
@@ -127,9 +134,11 @@ export interface UpdateReferenceCollectionPayload {
   attachments: Array<{
     id?: string;
     name: string;
+    title?: string;
     mimeType: string;
     bytesBase64: string;
     description?: string;
+    section?: 'primary' | 'angles';
   }>;
 }
 

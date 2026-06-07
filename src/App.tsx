@@ -790,6 +790,7 @@ function toSavedReferenceImage(reference: ReferenceImageRecord): SavedReferenceI
     category: reference.category,
     collectionId: reference.collectionId ?? reference.environmentId ?? undefined,
     environmentId: reference.environmentId ?? undefined,
+    section: reference.section ?? undefined,
     shouldRevokePreviewUrl: true,
   };
 }
@@ -819,6 +820,7 @@ type SavedReferenceImage = ComposerReferenceImage & {
   category: ReferenceLibraryRoute;
   collectionId?: string;
   environmentId?: string;
+  section?: ReferenceImageBucket;
 };
 
 type SavedReferenceMentionGroup = {
@@ -830,6 +832,8 @@ type SavedReferenceMentionGroup = {
 };
 
 type ReferenceLibraryRoute = 'characters' | 'environment' | 'objects';
+
+type ReferenceImageBucket = 'primary' | 'angles';
 
 function getSavedReferenceMentionGroupId(reference: SavedReferenceImage) {
   return reference.collectionId ?? reference.environmentId ?? reference.id;
@@ -878,7 +882,7 @@ function extractReferenceSelectorMatches(promptText: string, mentionTitle: strin
   }
 
   const pattern = new RegExp(
-    `(^|[\\s([{'"\`])(${escapeRegExp(mentionTitle)})([#/:][^\\s.,!?;:()\\[\\]{}'"\\\`]+)`,
+    `(^|[\\s([{'"\`])@?(${escapeRegExp(mentionTitle)})([#/:][^\\s.,!?;:()\\[\\]{}'"\\\`]+)`,
     'gi',
   );
   const matches: Array<{ matchText: string; selectorText: string }> = [];
@@ -897,6 +901,18 @@ function extractReferenceSelectorMatches(promptText: string, mentionTitle: strin
   }
 
   return matches;
+}
+
+function promptContainsReferenceMention(promptText: string, mentionTitle: string) {
+  if (!promptText.trim() || !mentionTitle.trim()) {
+    return false;
+  }
+
+  const pattern = new RegExp(
+    `(^|[\\s([{'"\`])@?${escapeRegExp(mentionTitle)}(?=$|[\\s.,!?;:)\\[\\]{}'"\\\`#/:])`,
+    'i',
+  );
+  return pattern.test(promptText);
 }
 
 function referenceMatchesSelector(reference: SavedReferenceImage, selectorText: string) {
@@ -965,8 +981,6 @@ function resolveReferenceSelectorGroup(
   );
   return partialMatches.length === 1 ? partialMatches[0] : null;
 }
-
-type ReferenceImageBucket = 'primary' | 'angles';
 
 function getReferencePrimaryTabLabel(route: ReferenceLibraryRoute) {
   return route === 'environment' ? 'Ambiente' : route === 'characters' ? 'Personagem' : 'Objeto';
@@ -1038,13 +1052,14 @@ function resolveSavedReferenceSelections(
 
   for (const [groupId, references] of groups.entries()) {
     const exactSelections = references.filter((reference) => selectedIds.has(reference.id));
-    const isGroupSelected = selectedIds.has(groupId);
+    const mentionTitle = getSharedReferenceTitle(references[0]);
+    const isGroupSelected =
+      selectedIds.has(groupId) || promptContainsReferenceMention(promptText, mentionTitle);
 
     if (!isGroupSelected && exactSelections.length === 0) {
       continue;
     }
 
-    const mentionTitle = getSharedReferenceTitle(references[0]);
     const selectorMatches = isGroupSelected ? extractReferenceSelectorMatches(promptText, mentionTitle) : [];
     const matchedBySelector = new Map<string, { reference: SavedReferenceImage; matchText: string }>();
 
@@ -1483,6 +1498,7 @@ export function App() {
       mimeType: string;
       bytesBase64: string;
       description?: string;
+      section?: ReferenceImageBucket;
     }>;
   } | null>(null);
   const [deletingReference, setDeletingReference] = useState<{
@@ -1929,6 +1945,11 @@ export function App() {
 
     if (selectorGroup) {
       const sortedReferences = [...selectorGroup.references].sort((left, right) => {
+        const leftSection = left.section ?? 'angles';
+        const rightSection = right.section ?? 'angles';
+        if (leftSection !== rightSection) {
+          return leftSection === 'primary' ? -1 : 1;
+        }
         if (left.createdAt !== right.createdAt) {
           return left.createdAt.localeCompare(right.createdAt);
         }
@@ -1943,7 +1964,7 @@ export function App() {
           insertId: selectorGroup.id,
           insertTitle: selectorGroup.title,
           selectorSuffix: `#${slugifyReferenceSelectorValue(reference.title || deriveReferenceAttachmentTitle(reference.name))}`,
-          section: index === 0 ? 'primary' : 'angles',
+          section: reference.section ?? (index === 0 ? 'primary' : 'angles'),
         }))
         .filter((option) =>
           selectorQuery
@@ -2440,12 +2461,14 @@ export function App() {
     description,
     route,
     attachmentMetadata,
+    attachmentBuckets,
   }: {
     files: File[];
     title: string;
     description?: string;
     route: ReferenceLibraryRoute;
     attachmentMetadata?: Record<string, { title: string; description: string }>;
+    attachmentBuckets?: Record<string, ReferenceImageBucket>;
   }) => {
     const attachments = await Promise.all(
       files.map(async (file) => {
@@ -2457,6 +2480,7 @@ export function App() {
           mimeType: file.type || 'image/png',
           bytesBase64: bytesToBase64(bytes),
           description: attachmentMetadata?.[key]?.description?.trim() || undefined,
+          section: attachmentBuckets?.[key] ?? 'angles',
         };
       })
     );
@@ -5155,6 +5179,7 @@ export function App() {
                           mimeType: item.mimeType,
                           bytesBase64: item.bytesBase64,
                           description: item.description,
+                          section: item.section,
                         }))
                     : reference.category === 'environment'
                       ? savedReferences
@@ -5166,6 +5191,7 @@ export function App() {
                             mimeType: item.mimeType,
                             bytesBase64: item.bytesBase64,
                             description: item.description,
+                            section: item.section,
                           }))
                       : undefined,
                 })
@@ -10149,6 +10175,7 @@ function AddReferenceDialog({
     description?: string;
     route: ReferenceLibraryRoute;
     attachmentMetadata?: Record<string, { title: string; description: string }>;
+    attachmentBuckets?: Record<string, ReferenceImageBucket>;
   }) => void | Promise<void>;
   initialRoute: ReferenceLibraryRoute;
   initialFiles?: File[];
@@ -10298,14 +10325,7 @@ function AddReferenceDialog({
     setAttachmentBuckets((current) => {
       if (!(fileKey in current)) return current;
       const next = { ...current };
-      const removedBucket = next[fileKey];
       delete next[fileKey];
-      if (removedBucket === 'primary' && !Object.values(next).includes('primary')) {
-        const firstAngleKey = Object.keys(next)[0];
-        if (firstAngleKey) {
-          next[firstAngleKey] = 'primary';
-        }
-      }
       return next;
     });
     if (editingAttachmentKey === fileKey) {
@@ -10319,13 +10339,6 @@ function AddReferenceDialog({
   function moveAttachmentToBucket(fileKey: string, nextBucket: ReferenceImageBucket) {
     setAttachmentBuckets((current) => {
       const next = { ...current };
-      if (nextBucket === 'primary') {
-        for (const key of Object.keys(next)) {
-          if (next[key] === 'primary') {
-            next[key] = 'angles';
-          }
-        }
-      }
       next[fileKey] = nextBucket;
       return next;
     });
@@ -10371,6 +10384,7 @@ function AddReferenceDialog({
       description: description.trim() || undefined,
       route,
       attachmentMetadata,
+      attachmentBuckets,
     });
     onOpenChange(false);
   }
@@ -10460,21 +10474,21 @@ function AddReferenceDialog({
           <div className="space-y-4">
           <div className="space-y-2">
             <div className="text-[13px] font-medium text-[var(--foreground)]">Type</div>
-            <div className="inline-flex rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] p-1">
+            <div className="grid w-full grid-cols-3 gap-1 rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] p-1">
               {routeOptions.map((option) => (
                 <button
                   key={option.value}
                   type="button"
                   onClick={() => setRoute(option.value)}
                   className={[
-                    'relative inline-flex min-w-[104px] items-center justify-center rounded-full px-3 py-2 text-[13px] transition-colors',
+                    'relative inline-flex h-9 items-center justify-center overflow-hidden rounded-[14px] px-3 text-[13px] transition-colors',
                     route === option.value ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
                   ].join(' ')}
                 >
                   {route === option.value ? (
                     <motion.span
                       layoutId="reference-route-pill"
-                      className="absolute inset-0 rounded-full bg-[var(--surface)]"
+                      className="absolute inset-0 rounded-[14px] bg-[var(--surface)]"
                       transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
                     />
                   ) : null}
@@ -10592,7 +10606,11 @@ function AddReferenceDialog({
                       <Plus className="size-4" />
                     </button>
                   </div>
-                  <div role="tablist" aria-label="Reference image buckets" className="mb-3 inline-flex rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] p-1">
+                  <div
+                    role="tablist"
+                    aria-label="Reference image buckets"
+                    className="mb-3 grid w-full grid-cols-2 gap-1 rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] p-1"
+                  >
                     {([
                       { value: 'primary', label: primaryTabLabel },
                       { value: 'angles', label: 'Ângulos' },
@@ -10604,14 +10622,14 @@ function AddReferenceDialog({
                         aria-selected={activeImageTab === tab.value}
                         onClick={() => setActiveImageTab(tab.value)}
                         className={[
-                          'relative inline-flex min-w-[110px] items-center justify-center rounded-full px-3 py-2 text-[13px] transition-colors',
+                          'relative inline-flex h-9 items-center justify-center overflow-hidden rounded-[14px] px-3 text-[13px] transition-colors',
                           activeImageTab === tab.value ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
                         ].join(' ')}
                       >
                         {activeImageTab === tab.value ? (
                           <motion.span
                             layoutId="reference-image-bucket-pill"
-                            className="absolute inset-0 rounded-full bg-[var(--surface)]"
+                            className="absolute inset-0 rounded-[14px] bg-[var(--surface)]"
                             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
                           />
                         ) : null}
@@ -10821,6 +10839,7 @@ function EditReferenceDialog({
       mimeType: string;
       bytesBase64: string;
       description?: string;
+      section?: ReferenceImageBucket;
     }>;
   } | null;
   onSubmit: (input: {
@@ -10837,6 +10856,7 @@ function EditReferenceDialog({
       mimeType: string;
       bytesBase64: string;
       description?: string;
+      section?: ReferenceImageBucket;
     }>;
   }) => void | Promise<void>;
 }) {
@@ -10863,15 +10883,29 @@ function EditReferenceDialog({
   const [activeImageTab, setActiveImageTab] = useState<ReferenceImageBucket>('primary');
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const attachmentPreviewUrlsRef = useRef<string[]>([]);
+
+  useEffect(() => {
+    const previousPreviewUrls = attachmentPreviewUrlsRef.current;
+    const nextPreviewUrls = attachments.filter((attachment) => attachment.shouldRevokePreviewUrl).map((attachment) => attachment.previewUrl);
+
+    for (const previewUrl of previousPreviewUrls) {
+      if (!nextPreviewUrls.includes(previewUrl)) {
+        URL.revokeObjectURL(previewUrl);
+      }
+    }
+
+    attachmentPreviewUrlsRef.current = nextPreviewUrls;
+  }, [attachments]);
+
   useEffect(() => {
     return () => {
-      for (const attachment of attachments) {
-        if (attachment.shouldRevokePreviewUrl) {
-          URL.revokeObjectURL(attachment.previewUrl);
-        }
+      for (const previewUrl of attachmentPreviewUrlsRef.current) {
+        URL.revokeObjectURL(previewUrl);
       }
+      attachmentPreviewUrlsRef.current = [];
     };
-  }, [attachments]);
+  }, []);
 
   useEffect(() => {
     if (!open || !reference) {
@@ -10905,7 +10939,7 @@ function EditReferenceDialog({
         description: attachment.description,
         previewUrl: base64ToObjectUrl(attachment.bytesBase64, attachment.mimeType),
         shouldRevokePreviewUrl: true,
-        bucket: index === 0 ? 'primary' : 'angles',
+        bucket: attachment.section ?? (index === 0 ? 'primary' : 'angles'),
       }));
     });
     setActiveImageTab('primary');
@@ -10949,15 +10983,16 @@ function EditReferenceDialog({
   }
 
   function removeAttachment(localKey: string) {
-    setAttachments((current) =>
-      current.filter((attachment) => {
+    setAttachments((current) => {
+      const next = current.filter((attachment) => {
         if (attachment.localKey !== localKey) return true;
         if (attachment.shouldRevokePreviewUrl) {
           URL.revokeObjectURL(attachment.previewUrl);
         }
         return false;
-      })
-    );
+      });
+      return next;
+    });
   }
 
   async function appendFiles(fileList: FileList | File[]) {
@@ -10975,24 +11010,27 @@ function EditReferenceDialog({
           description: '',
           previewUrl: URL.createObjectURL(file),
           shouldRevokePreviewUrl: true,
-          bucket: current.some((attachment) => attachment.bucket === 'primary') || index > 0 ? 'angles' : 'primary',
+          inputIndex: index,
         };
       })
     );
-    setAttachments((current) => [...current, ...prepared]);
+    setAttachments((current) => {
+      const hasPrimary = current.some((attachment) => attachment.bucket === 'primary');
+      return [
+        ...current,
+        ...prepared.map(({ inputIndex, ...attachment }) => ({
+          ...attachment,
+          bucket: hasPrimary || inputIndex > 0 ? 'angles' as const : 'primary' as const,
+        })),
+      ];
+    });
   }
 
   function moveAttachmentToBucket(localKey: string, nextBucket: ReferenceImageBucket) {
     setAttachments((current) =>
-      current.map((attachment) => {
-        if (nextBucket === 'primary' && attachment.bucket === 'primary') {
-          return { ...attachment, bucket: 'angles' };
-        }
-        if (attachment.localKey === localKey) {
-          return { ...attachment, bucket: nextBucket };
-        }
-        return attachment;
-      }),
+      current.map((attachment) =>
+        attachment.localKey === localKey ? { ...attachment, bucket: nextBucket } : attachment
+      )
     );
   }
 
@@ -11032,13 +11070,14 @@ function EditReferenceDialog({
                       return 0;
                     })
                     .map((attachment) => ({
-                    id: attachment.id,
-                    name: attachment.name,
-                    title: attachment.title,
-                    mimeType: attachment.mimeType,
-                    bytesBase64: attachment.bytesBase64,
-                    description: attachment.description,
-                  }))
+                      id: attachment.id,
+                      name: attachment.name,
+                      title: attachment.title,
+                      mimeType: attachment.mimeType,
+                      bytesBase64: attachment.bytesBase64,
+                      description: attachment.description,
+                      section: attachment.bucket,
+                    }))
                 : undefined,
             });
             onOpenChange(false);
@@ -11070,7 +11109,11 @@ function EditReferenceDialog({
                       <Plus className="size-4" />
                     </button>
                   </div>
-                  <div role="tablist" aria-label="Reference image buckets" className="mb-3 inline-flex rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] p-1">
+                  <div
+                    role="tablist"
+                    aria-label="Reference image buckets"
+                    className="mb-3 grid w-full grid-cols-2 gap-1 rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] p-1"
+                  >
                     {([
                       { value: 'primary', label: primaryTabLabel },
                       { value: 'angles', label: 'Ângulos' },
@@ -11082,14 +11125,14 @@ function EditReferenceDialog({
                         aria-selected={activeImageTab === tab.value}
                         onClick={() => setActiveImageTab(tab.value)}
                         className={[
-                          'relative inline-flex min-w-[110px] items-center justify-center rounded-full px-3 py-2 text-[13px] transition-colors',
+                          'relative inline-flex h-9 items-center justify-center overflow-hidden rounded-[14px] px-3 text-[13px] transition-colors',
                           activeImageTab === tab.value ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
                         ].join(' ')}
                       >
                         {activeImageTab === tab.value ? (
                           <motion.span
                             layoutId="edit-reference-image-bucket-pill"
-                            className="absolute inset-0 rounded-full bg-[var(--surface)]"
+                            className="absolute inset-0 rounded-[14px] bg-[var(--surface)]"
                             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
                           />
                         ) : null}
