@@ -1,6 +1,6 @@
 ---
 name: direcao-de-cena
-description: Cria o pré-plano profissional de uma cena de cartoon/desenho estilo DreamWorks — a etapa de direção/découpage onde se decide como decupar a cena em planos antes de gerar qualquer frame, do jeito que estúdios (DreamWorks) e cinema de Hollywood fazem. Use sempre que o usuário descrever uma cena com as próprias palavras ou colar um trecho de roteiro e quiser planejar como ela será filmada, ou disser "monta o pré-plano dessa cena", "como filmo isso", "planeja os ângulos dessa cena", "faz a direção dessa cena", "decupa essa cena", "quais câmeras uso aqui". A skill recebe a descrição da cena e produz um pré-plano estruturado (objetivo da cena, beats, estratégia visual, plano de cobertura com todos os ângulos, blocking, ritmo). Depois de aprovado, gera o planejamento de frames pensando na animação no Seedance, sempre sem música. NÃO gera imagens — é planejamento de direção. Alimenta as skills de geração de ambientes, keyframes e animação.
+description: Use quando o usuário descrever uma cena com as próprias palavras, colar um trecho de roteiro, ou pedir para decupar, dirigir, planejar ângulos, cobertura, blocking, ritmo, clipes ou frames de uma cena antes da geração. Aplica-se a cenas de cartoon/animação estilo DreamWorks em que é preciso transformar intenção dramática em pré-plano, clipes com motor narrativo e planejamento Seedance-aware.
 ---
 
 # Direção de Cena
@@ -8,6 +8,16 @@ description: Cria o pré-plano profissional de uma cena de cartoon/desenho estil
 Cria o pré-plano profissional de uma cena — a etapa de découpage onde o diretor decide como filmar antes de gerar qualquer frame. Encoda a metodologia de estúdios de animação e cinema de Hollywood, com foco em cartoon/desenho estilo DreamWorks.
 
 Esta skill é o topo do pipeline. Produz o planejamento criativo que alimenta as skills de ambientes, keyframes e animação.
+
+## Mensagem central
+
+Cada clipe é uma unidade dramática completa, não uma coleção de shots bonitos. Antes de pensar em lente, movimento ou cobertura, a skill precisa responder internamente:
+
+- **Quem quer o quê?** (`want`)
+- **O que impede?** (`obstacle`)
+- **O que muda?** (`turn`)
+
+Se a resposta não existe, o clipe pode renderizar bem e continuar sem motor dramático. A função desta skill é impedir isso.
 
 ## O que faz e NÃO faz
 
@@ -45,19 +55,85 @@ O Director escreve orientação criativa em Markdown nas três fases. Na Fase 3,
 
 # FASE 1 — O PRÉ-PLANO
 
-Siga esta metodologia profissional, na ordem. Cada etapa alimenta a próxima.
+Siga esta metodologia profissional, na ordem. Cada etapa alimenta a próxima. A Fase 1 não é apenas visual: ela resolve motor dramático, shape, arco, poder espacial e cobertura.
 
-## Passo 1 — Objetivo da cena (intent)
+## Regras-mãe da Fase 1
+
+- Nunca começar pela câmera. Comece pelo motor dramático.
+- Nunca escrever emoção como label no prompt final. Traduzir tudo para comportamento físico visível.
+- Nunca tratar o clipe como colagem de momentos. Cada clipe precisa de pergunta dramática e resposta dentro da sua duração.
+- Nunca fazer curva de tensão monotônica. Vales importam; o clímax precisa respirar.
+- Nunca depender de memória do engine entre clipes. Toda continuidade relevante precisa ser reestabelecida.
+
+## Passo 0 — Diagnóstico estrutural do clipe ou arco
+
+Antes do pré-plano, diagnostique o tamanho da unidade:
+
+- **1 clipe (15s):** escolher uma forma dramática única
+- **4 clipes (60s):** três atos comprimidos
+- **8 clipes (120s):** arco completo com reversão central e release
+- **12 clipes (180s):** arco com subtrama, falsa vitória e clímax mais espaçado
+
+Se o usuário pedir apenas "a cena", a skill decide se aquilo cabe em 1 clipe ou precisa virar arco. Se 1 clipe ficar superlotado, dividir.
+
+## Passo 1 — Motor dramático
 
 Antes de qualquer câmera, defina:
 
-- **Objetivo narrativo:** o que o público precisa entender ao fim da cena
+- **Want:** o que alguém tenta conseguir, evitar, proteger ou forçar
+- **Obstacle:** o que resiste, de forma concreta, física, social ou relacional
+- **Turn:** o que muda dentro do clipe
+- **Objetivo narrativo:** o que o público precisa entender ao fim
 - **Objetivo emocional:** o que o público precisa sentir
-- **Pergunta dramática:** qual tensão move a cena (será que X vai conseguir Y?)
+- **Pergunta dramática:** qual tensão move a cena
 
-Câmera sem objetivo é câmera aleatória. Tudo que vem depois serve este objetivo.
+Câmera sem motor é câmera aleatória. Se não houver `want + obstacle + turn`, a skill deve dizer que a cena ainda não está pronta para découpage.
 
-## Passo 2 — Decomposição em beats
+## Passo 2 — Forma dramática do clipe
+
+Escolha explicitamente a forma de cada clipe. No máximo combine duas se houver pivô claro no meio.
+
+| Forma | Estrutura | Quando usar |
+|---|---|---|
+| **Setup -> Turn** | Situação estabelecida -> reversão ou revelação | Diálogo, descoberta, confronto |
+| **Ramp** | Escalada contínua até o pico | Perseguição, corrida contra o tempo |
+| **Hold -> Release** | Pressão acumulando em silêncio -> gesto libera tudo | Standoff, decisão |
+| **Glimpse** | Observacional, atmosférico, temporal | Ambiente, passagem de tempo |
+
+A forma escolhida precisa aparecer nos verbos, no blocking e no ritmo, nunca como label jogado no prompt.
+
+## Passo 3 — Arco e curva de tensão
+
+Se houver múltiplos clipes, mapear função por clipe e tensão relativa.
+
+| Arco | Estrutura mínima | Curva de tensão de referência |
+|---|---|---|
+| **4 clipes** | estabelecimento -> escalada -> reversão -> resolução | `3 -> 5 -> 8 -> 4` |
+| **8 clipes** | setup -> tentativa -> reversão central -> tudo perdido -> clímax -> release | `2 -> 4 -> 5 -> 4 -> 7 -> 9 -> 10 -> 3` |
+| **12 clipes** | ato 1 -> 2A -> 2B -> ato 3 -> release | `2 -> 3 -> 5 -> 4 -> 6 -> 7 -> 5 -> 8 -> 10 -> 9 -> 10 -> 2` |
+
+Princípios obrigatórios:
+
+- Um vale antes do clímax aumenta o impacto.
+- O clímax é singular; dois picos matam o pico.
+- O release sempre aterrissa abaixo do clímax.
+- Escalada monotônica é relato, não drama.
+
+## Passo 4 — Personagem em comportamento: want / mask / tell
+
+Todo personagem ativo precisa de pelo menos um `want`. Quando possível, adicionar:
+
+- **Mask:** o que projeta para esconder o want
+- **Tell:** o vazamento físico involuntário que denuncia o custo da máscara
+
+Nunca escrever os labels no prompt final. Sempre traduzir para sinal físico visível.
+
+Exemplo de tradução correta:
+
+- errado: "Anna quer sair, mas está nervosa"
+- certo: "Anna não para de olhar para a porta; mantém a voz calma, mas o dedo indicador bate no copo, para, bate de novo"
+
+## Passo 5 — Decomposição em beats
 
 Quebre a cena em beats — unidades de mudança. Cada beat é um momento onde algo muda (emoção, informação ou poder).
 
@@ -65,6 +141,7 @@ Para cada beat, anote:
 - O que acontece
 - O que muda (a virada do beat)
 - A emoção dominante
+- Quem ganha ou perde poder no espaço
 
 Exemplo:
 ```
@@ -74,7 +151,13 @@ Beat 3: Hesita → conflito interno (emoção: dúvida)
 Beat 4: Decide agir → resolução (emoção: determinação)
 ```
 
-## Passo 3 — Estratégia visual (a interpretação do diretor)
+Ritmo-base:
+
+- ~4 beats por clipe de 15s é o natural
+- 1 beat = uma unidade dramática com resultado
+- 6+ beats em 15s indica sobrecarga; dividir ou comprimir
+
+## Passo 6 — Estratégia visual (a interpretação do diretor)
 
 Aqui mora a arte. Defina a abordagem cinematográfica que serve a cena. Não é uma lista de planos ainda — é o CONCEITO visual.
 
@@ -90,7 +173,52 @@ Exemplos de estratégias profissionais:
 
 Escolha (ou combine) e **justifique**: por que essa abordagem serve este objetivo.
 
-## Passo 4 — Plano de cobertura (os planos)
+## Passo 7 — Gênero como motor
+
+O gênero não é só look. Ele decide contra o que o personagem luta e como a cena resolve.
+
+| Gênero | Motor | Resolução típica |
+|---|---|---|
+| **Action** | obstáculo externo escalando | resultado físico |
+| **Drama** | contradição interna tornada externa | decisão visível |
+| **Noir** | erosão moral | custo maior que a conquista |
+| **Horror** | pavor acumulando | fuga marcada ou consumo |
+| **Comedy** | expectativa -> inversão | aterrissagem da virada |
+| **Epic** | propósito em escala | transformação ampliada |
+
+Se o gênero estiver claro, a skill deve usá-lo para escolher verbos, blocking, ritmo e release.
+
+## Passo 8 — Forma narrativa por tipo de cena
+
+O shape da cena vive nos verbos e na geometria, nunca em label explícito. Escolha a forma operacional dominante:
+
+- **Perseguição gap-closing:** distância estreitando
+- **Fuga sob pressão:** espaço fecha e depois libera
+- **Duelo de iguais:** troca e contra-troca com consequência física
+- **Standoff / pré-contato:** imobilidade carregada
+- **Reveal:** ocultação -> aparição
+- **Transformação:** sujeito muda; câmera acompanha ou orbita
+- **Confronto de poder:** eixo de domínio muda de lado
+- **Interrogação:** pressão assimétrica
+- **Confissão:** câmera aperta, release no corpo
+- **Negociação equilibrada:** oferta, contraoferta, acordo ou ruptura
+- **Atmosfera / processo temporal:** o ambiente muda a si mesmo
+
+Se a cena estiver sem forma operacional, a skill ainda não deve descer para frame.
+
+## Passo 9 — Poder é espacial
+
+O engine lê corpos no espaço melhor do que abstrações emocionais. Sempre escrever poder como geometria:
+
+- quem está de pé e quem está sentado
+- quem pode sair e quem está encurralado
+- o que bloqueia fisicamente uma rota
+- distância entre corpos, props e saídas
+- mãos perto de arma, porta, telefone, prova, botão
+
+Exemplo: em vez de "ele está no controle", usar "ele permanece de pé; ela sentada; a mesa entre os dois".
+
+## Passo 10 — Plano de cobertura (os planos)
 
 Agora os planos concretos. Pense em MONTAGEM — gere cobertura suficiente pra editar.
 
@@ -103,6 +231,7 @@ Para cada plano, defina:
 - Tipo de plano (geral, médio, primeiro plano, detalhe, POV, sobre o ombro)
 - Ângulo (nível dos olhos, baixa, alta, aérea, inclinada)
 - Movimento (estático, push-in, pull-back, pan, tilt, tracking)
+- Lente/focal quando isso altera a função dramática
 - Beat que cobre
 - Propósito (por que este plano, neste momento)
 ```
@@ -119,19 +248,51 @@ Para o vocabulário completo de planos e ângulos em cartoon — todos os tamanh
 
 Para multishot, continuidade entre shots e transições no Seedance, ver `references/seedance-multishot-transicoes.md`.
 
-## Passo 5 — Blocking (encenação)
+## Passo 11 — Blocking (encenação)
 
 Onde os personagens estão e como se movem. Tão importante quanto a câmera.
 
 - Posição inicial de cada personagem
 - Movimentos durante a cena
 - Como se relacionam no espaço (perto/longe = relação emocional)
+- Quem tem saída e quem está travado
+- Como a troca de posição muda o eixo de poder
 
-## Passo 6 — Ritmo e transições
+## Passo 12 — Session lock visual
+
+Defina a coerência visual da sessão antes de listar frames:
+
+- **Hard-lock:** paleta de cor, camera body e lente/caráter óptico
+- **Soft-lock:** movimento de câmera e luz
+
+Hard-lock só quebra com dispositivo narrativo explícito, como flashback, sonho, memória, epílogo ou salto temporal.
+
+Soft-lock só deve mudar em fronteira natural de cena com pelo menos dois gatilhos claros, como:
+
+- mudança de localização
+- mudança de energia
+- mudança de hora do dia
+
+Um gatilho sozinho normalmente não justifica quebrar lock.
+
+## Passo 13 — Ritmo, densidade e transições
 
 - Pacing geral (cena calma = planos longos; ação = cortes rápidos)
 - Duração aproximada de cada plano
 - Como os planos cortam (corte seco, ou momento de animar a transição)
+- Curva de tensão do clipe/arco
+- Densidade de beats
+- Orçamento de diálogo por duração
+
+Orçamento de diálogo de referência:
+
+| Duração | Palavras sugeridas | Trocas máximas |
+|---|---|---|
+| **5-6s** | 12-16 | 2 |
+| **7-8s** | 15-20 | 3 |
+| **9-10s** | 20-25 | 4 |
+| **11-12s** | 25-30 | 4 |
+| **13-15s** | 30-35 | 5-6 |
 
 Ver `references/linguagem-de-camera.md` para o mapeamento completo de câmera → emoção, e `references/planos-e-angulos-cartoon.md` para o vocabulário completo de planos e ângulos em cartoon (tamanhos, alturas, OTS, Group OTS, etc.) com quando usar cada um.
 
@@ -144,28 +305,45 @@ Apresente assim para o usuário aprovar:
 ```markdown
 # PRÉ-PLANO — [Nome da Cena]
 
-## Objetivo
+## Motor Dramático
+- Want: ...
+- Obstacle: ...
+- Turn: ...
 - Narrativo: ...
 - Emocional: ...
 - Pergunta dramática: ...
 
+## Forma e Arco
+- Forma do clipe: ...
+- Estrutura do arco: ...
+- Curva de tensão: ...
+- Gênero / motor: ...
+- Forma narrativa dominante: ...
+
+## Personagens
+- [Nome]: want / mask / tell
+
 ## Beats
-1. [beat + mudança + emoção]
+1. [beat + mudança + emoção + mudança de poder]
 2. ...
 
 ## Estratégia Visual
 [a abordagem escolhida + justificativa]
 
+## Session Lock
+- Hard-lock: paleta / body / lente
+- Soft-lock: câmera / luz
+
 ## Plano de Cobertura
-| # | Plano | Ângulo | Movimento | Beat | Propósito |
-|---|-------|--------|-----------|------|-----------|
-| 1 | ... | ... | ... | ... | ... |
+| # | Plano | Ângulo | Movimento | Lente | Beat | Propósito |
+|---|-------|--------|-----------|-------|------|-----------|
+| 1 | ... | ... | ... | ... | ... | ... |
 
 ## Blocking
 [posições e movimentos]
 
 ## Ritmo
-[pacing + durações + transições]
+[pacing + durações + transições + densidade + diálogo]
 ```
 
 Espere a aprovação antes de ir pra Fase 2.
@@ -175,6 +353,26 @@ Espere a aprovação antes de ir pra Fase 2.
 # FASE 2 — PLANEJAMENTO DE FRAMES (Seedance-aware)
 
 Depois do pré-plano aprovado, converta cada plano em necessidades de frame, já pensando em como o Seedance vai animar.
+
+## Regra estrutural da Fase 2
+
+Cada frame e cada prompt precisam ser `self-contained`. O engine não tem memória de sessão entre clipes. Nunca depender de frases como "o mesmo quarto de antes" ou "o personagem do clipe anterior".
+
+Sempre reestabelecer:
+
+- localização completa
+- luz, clima e hora do dia
+- roupa, cabelo e leitura visual do personagem
+- props relevantes
+- `<<<uuid>>>` em todos os clipes onde o elemento reaparece
+
+Template-base de prompt self-contained:
+
+```text
+[Personagem], [descrição visual breve], [ação].
+[Localização], [luz], [hora do dia], [props relevantes].
+[O que muda dentro do clipe].
+```
 
 ## A lógica Seedance: keyframe → animação
 
@@ -218,6 +416,7 @@ Liste também:
 - Ordem de geração recomendada
 - Quais shots são contínuos e quais são blocos multishot
 - Onde o corte entra e por que ele existe
+- Como cada frame reestabelece a continuidade sem depender do clipe anterior
 - Confirmação explícita de que a geração é sem música
 
 Espere aprovação antes de ir pra Fase 3.
@@ -233,6 +432,21 @@ Quando a cena pede mais de um momento visual claro, trate como multishot.
 - Não misture muitas ações dentro do mesmo shot; se a ação mudou de intenção, é outro shot
 - Para Seedance, a continuidade por referência é mais confiável do que pedir "efeitos de transição" abstratos
 - Sempre manter a geração sem música; voz e fala só quando a cena pedir
+
+## Checklist obrigatório antes da Fase 3
+
+Antes de emitir `imagen-action`, verificar internamente:
+
+- cada clipe tem `want + obstacle + turn`
+- a curva de tensão respira e tem vale antes do clímax
+- o clímax é singular
+- os prompts são self-contained
+- os verbos carregam o shape; não há labels dramáticos no texto final
+- emoção virou comportamento físico visível
+- hard-lock está consistente
+- soft-lock só muda com gatilho suficiente
+- densidade do clipe não estourou
+- `<<<uuid>>>` aparece em todos os clipes necessários
 
 ---
 
