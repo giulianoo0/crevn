@@ -11,6 +11,7 @@ const {
   parseCrenvImageReadyLine,
   validateCrenvImageReadyEvent,
   buildCrenvImageReadyPromptContract,
+  buildCodexTurnInputItems,
 } = require('./codexImageJobRuntime.cjs');
 
 const tempDirs: string[] = [];
@@ -147,11 +148,27 @@ describe('Codex image job ready events', () => {
     });
 
     expect(contract).toContain('CRENV_IMAGE_READY');
-    expect(contract).toContain('output/tmp');
     expect(contract).toContain('output/ready');
-    expect(contract).toContain('events.jsonl');
+    expect(contract).toContain('Save each accepted final image directly under output/ready');
+    expect(contract).toContain('Do not create output/tmp candidates');
+    expect(contract).toContain('Do not write sidecar JSON files, events.jsonl, or final manifests');
     expect(contract).toContain('relative forward-slash path');
     expect(contract).toContain('No final manifest is required.');
+  });
+
+  it('builds Codex turn input with local image reference items', () => {
+    const input = buildCodexTurnInputItems({
+      prompt: 'Generate the frame.',
+      referenceImages: [
+        { path: '/tmp/job/references/tito.png', title: 'Tito', description: 'Character sheet' },
+        { path: '', title: 'Broken ref' },
+      ],
+    });
+
+    expect(input).toEqual([
+      { type: 'text', text: 'Generate the frame.' },
+      { type: 'localImage', path: '/tmp/job/references/tito.png', detail: 'high' },
+    ]);
   });
 
   it('discovers ready image files when sidecar events are missing or malformed', async () => {

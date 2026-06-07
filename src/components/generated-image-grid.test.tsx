@@ -32,6 +32,29 @@ describe('GeneratedImageGrid', () => {
     expect(screen.getAllByRole('img')).toHaveLength(5);
   });
 
+  it('caps fit-height grids so large image sets stay virtualized', () => {
+    const manyImages = Array.from({ length: 60 }, (_, index) => ({
+      id: `image-${index + 1}`,
+      fileUrl: `file:///${index + 1}.png`,
+      fileName: `${index + 1}.png`,
+    }));
+
+    const { container } = render(
+      <GeneratedImageGrid
+        images={manyImages}
+        columnCount={2}
+        cardHeight={220}
+        rowGap={12}
+        fitHeight
+        maxFitHeight={464}
+      />
+    );
+
+    expect(container.firstElementChild).toHaveStyle({ height: '464px' });
+    expect(screen.getByRole('button', { name: 'Select 1.png' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Select 60.png' })).not.toBeInTheDocument();
+  });
+
   it('renders shimmer placeholders for loading entries', () => {
     render(
       <GeneratedImageGrid
@@ -107,16 +130,24 @@ describe('GeneratedImageGrid', () => {
     expect(screen.getByRole('button', { name: 'Select 2.png' })).toHaveAttribute('data-selected', 'true');
   });
 
-  it('shows a context menu with copy, download, and delete actions for images', () => {
+  it('shows a context menu with copy, copy prompt, download, and delete actions for images', () => {
     const handleCopy = vi.fn();
+    const handleCopyPrompt = vi.fn();
     const handleDownload = vi.fn();
     const handleDelete = vi.fn();
 
     render(
       <GeneratedImageGrid
-        images={images}
+        images={[
+          {
+            ...images[0],
+            prompt: 'A cinematic control room frame',
+          },
+          ...images.slice(1),
+        ]}
         className="h-[600px]"
         onImageCopy={handleCopy}
+        onImageCopyPrompt={handleCopyPrompt}
         onImageDownload={handleDownload}
         onImageDelete={handleDelete}
       />
@@ -126,12 +157,15 @@ describe('GeneratedImageGrid', () => {
 
     fireEvent.click(screen.getByRole('menuitem', { name: 'Copy' }));
     fireEvent.contextMenu(screen.getByRole('button', { name: 'Select 1.png' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy prompt' }));
+    fireEvent.contextMenu(screen.getByRole('button', { name: 'Select 1.png' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
     fireEvent.contextMenu(screen.getByRole('button', { name: 'Select 1.png' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
 
-    expect(handleCopy).toHaveBeenCalledWith(images[0]);
-    expect(handleDownload).toHaveBeenCalledWith(images[0]);
-    expect(handleDelete).toHaveBeenCalledWith(images[0]);
+    expect(handleCopy).toHaveBeenCalledWith(expect.objectContaining({ id: '1' }));
+    expect(handleCopyPrompt).toHaveBeenCalledWith(expect.objectContaining({ id: '1' }));
+    expect(handleDownload).toHaveBeenCalledWith(expect.objectContaining({ id: '1' }));
+    expect(handleDelete).toHaveBeenCalledWith(expect.objectContaining({ id: '1' }));
   });
 });

@@ -555,6 +555,9 @@ function getElectronApi() {
       saveSceneFrameReferences: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
+      pasteClipboardImageToSceneFrame: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
       generateSceneGroup: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
@@ -792,6 +795,10 @@ export function saveSceneFrameReferences(
   }>
 ) {
   return getElectronApi().saveSceneFrameReferences(sceneFrameId, references) as Promise<SceneGroupRecord>;
+}
+
+export function pasteClipboardImageToSceneFrame(sceneFrameId: string) {
+  return getElectronApi().pasteClipboardImageToSceneFrame(sceneFrameId) as Promise<SceneGroupRecord | null>;
 }
 
 export function generateSceneGroup(input: {

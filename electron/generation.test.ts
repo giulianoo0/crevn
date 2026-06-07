@@ -72,16 +72,31 @@ describe('generation codex runner environment', () => {
   it('builds a writable codex environment inside the job workspace', () => {
     expect(generationModule.__test__).toBeDefined();
 
-    process.env.HOME = '/home/minelli';
-    process.env.CODEX_HOME = '/home/minelli/.codex';
-    const env = generationModule.__test__.buildCodexSpawnEnv('/tmp/job-123');
+    const env = generationModule.__test__.buildCodexSpawnEnv('/tmp/job-123', {
+      env: { PATH: '/usr/bin' },
+      homeDirectory: '/home/minelli',
+    });
 
+    expect(env.PATH).toBe('/usr/bin');
     expect(env.HOME).toBe('/home/minelli');
     expect(env.CODEX_HOME).toBe('/home/minelli/.codex');
     expect(env.XDG_CACHE_HOME).toBe('/tmp/job-123/.codex-cache');
     expect(env.XDG_CONFIG_HOME).toBe('/tmp/job-123/.codex-config');
     expect(env.XDG_STATE_HOME).toBe('/tmp/job-123/.codex-state');
     expect(env.TMPDIR).toBe('/tmp/job-123/.tmp');
+  });
+
+  it('preserves an explicit Codex home when building the job environment', () => {
+    const env = generationModule.__test__.buildCodexSpawnEnv('/tmp/job-123', {
+      env: {
+        HOME: '/Users/custom',
+        CODEX_HOME: '/custom/codex',
+      },
+      homeDirectory: '/home/minelli',
+    });
+
+    expect(env.HOME).toBe('/Users/custom');
+    expect(env.CODEX_HOME).toBe('/custom/codex');
   });
 
   it('parses scene plan stdout events from codex', () => {
@@ -153,6 +168,10 @@ describe('generation codex runner environment', () => {
     expect(prompt).toContain('seedance-cartoon');
     expect(prompt).toContain('Preserve environment identity using coverage plates and detail plates');
     expect(prompt).toContain('Lock character identity with named character-sheet anchors');
+    expect(prompt).toContain('Use Codex image generation directly and keep the workflow short.');
+    expect(prompt).toContain('Prefer one batched image generation call when Codex supports the requested count.');
+    expect(prompt).toContain('Reference lock checklist:');
+    expect(prompt).toContain('References win over prompt text for identity, layout, materials, palette, and fixed prop placement.');
   });
 
   it('builds a strict JSON prompt for scene structuring', () => {
@@ -193,6 +212,9 @@ describe('generation codex runner environment', () => {
     expect(tasks[1]?.prompt).toContain('Target frame prompt: Closer shot on Tito.');
     expect(tasks[1]?.prompt).toContain('This output is a static keyframe for later animation in Seedance.');
     expect(tasks[1]?.prompt).toContain('seedance-cartoon');
+    expect(tasks[1]?.prompt).toContain('Reference discipline:');
+    expect(tasks[1]?.prompt).toContain('References are authoritative anchors, not loose inspiration.');
+    expect(tasks[1]?.prompt).toContain('If text conflicts with references, references win for identity, layout, materials, palette, and fixed prop placement.');
     expect(tasks[1]?.prompt).toContain('Keep visible character identity locked to character sheets');
     expect(tasks[1]?.prompt).toContain('Use environment coverage plates and closest detail plates');
     expect(tasks[1]?.prompt).not.toContain('Previous frame context:');
@@ -299,6 +321,12 @@ describe('generation codex runner environment', () => {
     expect(prompt).toContain('Use Shot 1:, Shot 2:, and Hard cut to labels');
     expect(prompt).toContain('Duration: 12-15s for multishot, 16:9.');
     expect(prompt).toContain('Audio: no music, no background score. Sound effects and ambient only');
+    expect(prompt).toContain('Very strongly prefer writing a Seedance Coverage Plan before emitting any imagen-action');
+    expect(prompt).toContain('Seedance accepts at most 15 seconds per generation');
+    expect(prompt).toContain('Dialogue coverage:');
+    expect(prompt).toContain('Image/keyframe budget:');
+    expect(prompt).toContain('must preserve / may change');
+    expect(prompt).toContain('You may still emit the imagen-action in the same response after the plan');
     expect(prompt).toContain('Use consistent character names, exact wardrobe, proportions, face shape, hair silhouette, palette, and distinguishing details');
   });
 
@@ -793,6 +821,80 @@ describe('generation codex runner environment', () => {
       expect(sceneGroups.find((sceneGroup) => sceneGroup.title === 'Scene 2')?.frames).toEqual([
         expect.objectContaining({ title: 'Scene 2 Frame 1' }),
       ]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('pastes a clipboard image as an output asset for the target scene frame', async () => {
+    const store = await generationModule.createGenerationStore(await makeTempUserDataDir(), {
+      seedCodexSkills: false,
+      warmCodexAppServer: false,
+    });
+
+    try {
+      const workspace = await store.createProject('Storyboard');
+      const sceneGroup = await store.createSceneGroup(workspace.thread.id, {
+        title: 'Scene 1',
+        prompt: 'Opening scene.',
+        tocOrder: 1,
+      });
+      await store.createSceneFrame(sceneGroup.id, {
+        title: 'Frame 1',
+        prompt: 'Wide establishing shot.',
+        frameOrder: 1,
+      });
+      const sceneWithFrame = await store.createSceneFrame(sceneGroup.id, {
+        title: 'Frame 2',
+        prompt: 'Closer insert.',
+        frameOrder: 2,
+      });
+      const targetFrame = sceneWithFrame.frames.find((frame) => frame.title === 'Frame 2');
+      if (!targetFrame) {
+        throw new Error('Expected target frame to be created');
+      }
+
+      const updatedSceneGroup = await store.pasteClipboardImageToSceneFrame(targetFrame.id, {
+        mimeType: 'image/png',
+        bytesBase64: Buffer.from('clipboard-png-bytes').toString('base64'),
+      });
+      const updatedTargetFrame = updatedSceneGroup.frames.find((frame) => frame.id === targetFrame.id);
+      const untouchedFrame = updatedSceneGroup.frames.find((frame) => frame.title === 'Frame 1');
+      const pastedAsset = updatedTargetFrame?.assets[0];
+      if (!pastedAsset) {
+        throw new Error('Expected pasted clipboard asset to be created');
+      }
+
+      expect(untouchedFrame?.assets).toHaveLength(0);
+      expect(updatedTargetFrame?.assets).toHaveLength(1);
+      expect(updatedSceneGroup.runs[0]).toEqual(
+        expect.objectContaining({
+          status: 'succeeded',
+          provider: 'codex',
+          modelId: 'clipboard',
+          modelLabel: 'Clipboard',
+          requestedFrameCount: 1,
+        })
+      );
+      expect(pastedAsset).toEqual(
+        expect.objectContaining({
+          sceneGroupRunId: updatedSceneGroup.runs[0].id,
+          sceneFrameId: targetFrame.id,
+          outputIndex: 0,
+          originalPath: 'clipboard',
+          mimeType: 'image/png',
+        })
+      );
+      await expect(fsp.readFile(pastedAsset.storedPath)).resolves.toEqual(Buffer.from('clipboard-png-bytes'));
+
+      await expect(store.getGeneratedImage(pastedAsset.id)).resolves.toEqual(
+        expect.objectContaining({
+          id: pastedAsset.id,
+          storedPath: pastedAsset.storedPath,
+          fileName: pastedAsset.fileName,
+          mimeType: 'image/png',
+        })
+      );
     } finally {
       store.close();
     }

@@ -521,6 +521,7 @@ interface Window {
         createdAt: string;
       }>
     ) => Promise<ElectronSceneGroupRecord>;
+    pasteClipboardImageToSceneFrame: (sceneFrameId: string) => Promise<ElectronSceneGroupRecord | null>;
     generateSceneGroup: (input: {
       sceneGroupId: string;
       targetFrameId?: string;

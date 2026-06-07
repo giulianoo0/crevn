@@ -43,6 +43,7 @@ import {
   ChevronLeft,
   ChevronDown,
   ChevronUp,
+  ClipboardPaste,
   Copy,
   Crop,
   Crosshair,
@@ -179,6 +180,7 @@ import {
   listSceneGroups,
   renameProject,
   renameThread,
+  pasteClipboardImageToSceneFrame,
   checkForUpdates,
   subscribeToImageReady,
   subscribeToSceneFrameReady,
@@ -199,6 +201,7 @@ import {
   cancelDirectorChat,
 } from './lib/electron-api';
 import { getDefaultModelOption, getModelOptionById } from './lib/model-catalog';
+import { COMPOSER_SHELL_MOTION } from './lib/composer-motion';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Toaster } from '@/components/ui/sonner';
 import { Button } from '@/components/ui/button';
@@ -821,15 +824,7 @@ type SceneFrame = {
   id: string;
   title: string;
   prompt: string;
-  references: Array<{
-    id: string;
-    referenceKind: 'saved_reference' | 'uploaded_attachment';
-    referenceId: string | null;
-    name: string;
-    mimeType: string;
-    bytesBase64: string;
-    createdAt: string;
-  }>;
+  references: SceneReferenceAttachment[];
   assets: SceneGroupRecord['frames'][number]['assets'];
   isCollapsed: boolean;
   isRenaming: boolean;
@@ -967,13 +962,30 @@ export function getReferenceMentionReplacementRange(
 const INITIAL_SCENE_FRAMES: SceneFrame[] = [];
 const DEFAULT_SCENES_SIDEBAR_WIDTH = 500;
 const MIN_SCENES_SIDEBAR_WIDTH = 250;
+const SCENE_OUTPUT_EAGER_FRAME_COUNT = 3;
+const SCENE_OUTPUT_LAZY_ROOT_MARGIN = '900px 0px';
+const SCENE_OUTPUT_MAX_GRID_HEIGHT = 640;
+const SCENE_OUTPUT_FRAME_ROW_GAP = 16;
+const SCENE_FRAME_ACCORDION_EXPANDED_HEIGHT = 318;
+const SCENE_FRAME_ACCORDION_COLLAPSED_HEIGHT = 58;
+const SCENE_SIDEBAR_FRAME_LIST_MAX_HEIGHT = 720;
+
+function toSceneReferenceAttachment(reference: SceneGroupRecord['frames'][number]['references'][number]): SceneReferenceAttachment {
+  return {
+    ...reference,
+    previewUrl: base64ToObjectUrl(reference.bytesBase64, reference.mimeType),
+    title: reference.name.replace(/\.[^/.]+$/, ''),
+    description: 'Frame reference',
+    shouldRevokePreviewUrl: true,
+  };
+}
 
 function toSceneFrameUi(frame: SceneGroupRecord['frames'][number]): SceneFrame {
   return {
     id: frame.id,
     title: frame.title,
     prompt: frame.prompt,
-    references: frame.references,
+    references: frame.references.map(toSceneReferenceAttachment),
     assets: frame.assets,
     isCollapsed: false,
     isRenaming: false,
@@ -1339,8 +1351,8 @@ export function App() {
       return;
     }
 
-    setSceneFrames((current) =>
-      activeSceneGroup.frames.map((frame) => {
+    setSceneFrames((current) => {
+      const nextFrames = activeSceneGroup.frames.map((frame) => {
         const currentFrame = current.find((item) => item.id === frame.id);
         return currentFrame
           ? {
@@ -1349,11 +1361,32 @@ export function App() {
               references: currentFrame.references,
               isCollapsed: currentFrame.isCollapsed,
               isRenaming: currentFrame.isRenaming,
-            }
+          }
           : frame;
-      })
-    );
-    setSceneGroupReferences([]);
+      });
+
+      if (
+        current.length === nextFrames.length &&
+        current.every((frame, index) => {
+          const nextFrame = nextFrames[index];
+          return (
+            nextFrame &&
+            frame.id === nextFrame.id &&
+            frame.title === nextFrame.title &&
+            frame.prompt === nextFrame.prompt &&
+            frame.isCollapsed === nextFrame.isCollapsed &&
+            frame.isRenaming === nextFrame.isRenaming &&
+            frame.assets === nextFrame.assets &&
+            frame.references === nextFrame.references
+          );
+        })
+      ) {
+        return current;
+      }
+
+      return nextFrames;
+    });
+    setSceneGroupReferences((current) => (current.length === 0 ? current : []));
   }, [activeSceneGroupId, sceneGroups]);
 
   useEffect(() => {
@@ -1920,6 +1953,17 @@ export function App() {
   const handleCopyGeneratedImage = useCallback(async (image: GeneratedImageRecord) => {
     await copyGeneratedImage(image.id);
     toast.success('Image copied');
+  }, []);
+
+  const handleCopyGeneratedImagePrompt = useCallback(async (image: GeneratedImageRecord) => {
+    const prompt = image.prompt?.trim();
+    if (!prompt) {
+      toast.error('No prompt saved for this image');
+      return;
+    }
+
+    await navigator.clipboard.writeText(prompt);
+    toast.success('Prompt copied');
   }, []);
 
   const handleDownloadGeneratedImage = useCallback(async (image: GeneratedImageRecord) => {
@@ -2686,7 +2730,6 @@ export function App() {
           isGenerating: loadingImages.length > 0,
         } satisfies SceneWorkspaceFrameCard;
       })
-      .filter((card) => card.images.length > 0);
   }, [activeSceneGenerationRun, activeSceneGroup, activeSceneGroupGeneratingFrameIds, sceneFrames]);
 
   const handleSelectSceneGroup = useCallback((sceneGroupId: string) => {
@@ -2884,6 +2927,28 @@ export function App() {
     },
     [activeSceneGroup, sceneFrames]
   );
+
+  const handlePasteSceneFrameOutput = useCallback(async (frameId: string) => {
+    try {
+      const updatedSceneGroup = await pasteClipboardImageToSceneFrame(frameId);
+      if (!updatedSceneGroup) {
+        toast.error('Clipboard does not contain an image.');
+        return;
+      }
+
+      const nextSceneGroup = toSceneGroupUi(updatedSceneGroup);
+      setSceneGroups((current) =>
+        current.map((sceneGroup) => (sceneGroup.id === nextSceneGroup.id ? nextSceneGroup : sceneGroup))
+      );
+      if (activeSceneGroupId === nextSceneGroup.id) {
+        setSceneFrames(nextSceneGroup.frames);
+      }
+      toast.success('Clipboard image added');
+    } catch (error) {
+      console.error('Failed to paste clipboard image into frame output', error);
+      toast.error(getErrorMessage(error, 'Failed to paste clipboard image.'));
+    }
+  }, [activeSceneGroupId]);
 
   const handleAddSceneFrame = useCallback(async () => {
     let sceneGroup = activeSceneGroup;
@@ -4456,7 +4521,7 @@ export function App() {
   return (
     <TooltipProvider>
       <main className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
-      <Toaster position="top-center" />
+      <Toaster position="bottom-right" />
       <CreateProjectDialog
         open={isCreateProjectDialogOpen}
         onOpenChange={setIsCreateProjectDialogOpen}
@@ -4730,6 +4795,12 @@ export function App() {
                           toast.error(getErrorMessage(error, 'Failed to copy generated image.'));
                         });
                       }}
+                      onImageCopyPrompt={(image) => {
+                        void handleCopyGeneratedImagePrompt(image as GeneratedImageRecord).catch((error) => {
+                          console.error('Failed to copy generated image prompt', error);
+                          toast.error(getErrorMessage(error, 'Failed to copy generated image prompt.'));
+                        });
+                      }}
                       onImageDownload={(image) => {
                         void handleDownloadGeneratedImage(image as GeneratedImageRecord).catch((error) => {
                           console.error('Failed to download generated image', error);
@@ -4763,7 +4834,14 @@ export function App() {
                     onRenameSceneGroup={handleRenameSceneGroup}
                     onReorderSceneGroups={handleReorderSceneGroups}
                     onDeleteSceneGroup={handleDeleteSceneGroup}
+                    onPasteFrameOutput={handlePasteSceneFrameOutput}
                     onOpenImage={openGeneratedImagePlayer}
+                    onCopyImage={(image) => {
+                      void handleCopyGeneratedImage(image).catch((error) => {
+                        console.error('Failed to copy scene output image', error);
+                        toast.error(getErrorMessage(error, 'Failed to copy scene output image.'));
+                      });
+                    }}
                   />
                   </motion.section>
                 ) : null}
@@ -6141,13 +6219,6 @@ const COMPOSER_GLASS_STYLE = {
   WebkitBackdropFilter: 'blur(28px)',
 } as const;
 
-export const COMPOSER_SHELL_MOTION = {
-  initial: { opacity: 0, y: 18 },
-  animate: { opacity: 1, y: 0 },
-  exit: { opacity: 0, y: 22 },
-  transition: { duration: 0.24, ease: [0.22, 1, 0.36, 1] },
-};
-
 function SceneGenerateButton({
   onClick,
   onStop,
@@ -6241,7 +6312,9 @@ function ScenesWorkspace({
   onRenameSceneGroup,
   onReorderSceneGroups,
   onDeleteSceneGroup,
+  onPasteFrameOutput,
   onOpenImage,
+  onCopyImage,
 }: {
   sceneGroups: SceneGroupUi[];
   activeSceneGroupId: string | null;
@@ -6250,7 +6323,9 @@ function ScenesWorkspace({
   onRenameSceneGroup: (sceneGroupId: string, title: string) => void;
   onReorderSceneGroups: (draggedSceneGroupId: string, targetSceneGroupId: string) => void;
   onDeleteSceneGroup: (sceneGroupId: string) => void;
+  onPasteFrameOutput: (frameId: string) => void;
   onOpenImage: (image: GeneratedImageRecord) => void;
+  onCopyImage: (image: GeneratedImageRecord) => void;
 }) {
   if (frameCards.length > 0) {
     return (
@@ -6271,35 +6346,50 @@ function ScenesWorkspace({
             onReorderSceneGroups={onReorderSceneGroups}
             onDeleteSceneGroup={onDeleteSceneGroup}
           />
-          {frameCards.map((card) => (
-            <div
-              key={card.frameId}
-              className="overflow-hidden rounded-[26px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.82)]"
-            >
-              <div className="flex items-center justify-between border-b border-[var(--border-soft)] px-5 py-4">
-                <div>
-                  <div className="text-[14px] font-medium text-[var(--foreground)]">{card.frameTitle}</div>
-                  <div className="mt-1 text-[12px] text-[var(--muted-foreground)]">
-                    {card.isGenerating ? 'Generating frame output...' : `${card.images.filter((image) => !image.isLoading).length} output${card.images.filter((image) => !image.isLoading).length === 1 ? '' : 's'}`}
+          {frameCards.map((card, index) => {
+            const outputCount = card.images.filter((image) => !image.isLoading).length;
+
+            return (
+              <div
+                key={card.frameId}
+                className="overflow-hidden rounded-[26px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.82)]"
+              >
+                <div className="flex items-center justify-between border-b border-[var(--border-soft)] px-5 py-4">
+                  <div>
+                    <div className="text-[14px] font-medium text-[var(--foreground)]">{card.frameTitle}</div>
+                    <div className="mt-1 text-[12px] text-[var(--muted-foreground)]">
+                      {card.isGenerating ? 'Generating frame output...' : `${outputCount} output${outputCount === 1 ? '' : 's'}`}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      aria-label={`Paste clipboard image as ${card.frameTitle} output`}
+                      onClick={() => onPasteFrameOutput(card.frameId)}
+                      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] text-[var(--muted-foreground)] transition-colors hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)] hover:text-[var(--foreground)]"
+                    >
+                      <ClipboardPaste className="size-4" />
+                    </button>
+                    <div className="rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-3 py-1 text-[11px] text-[var(--muted-foreground)]">
+                      {card.isGenerating ? 'Loading' : `${outputCount} output${outputCount === 1 ? '' : 's'}`}
+                    </div>
                   </div>
                 </div>
-                <div className="rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-3 py-1 text-[11px] text-[var(--muted-foreground)]">
-                  {card.isGenerating ? 'Loading' : `${card.images.filter((image) => !image.isLoading).length} output${card.images.filter((image) => !image.isLoading).length === 1 ? '' : 's'}`}
+                <div className="p-5">
+                  <LazySceneFrameOutputGrid
+                    frameTitle={card.frameTitle}
+                    images={card.images}
+                    columnCount={card.images.length > 1 ? 2 : 1}
+                    cardHeight={card.images.length > 1 ? 280 : 360}
+                    rowGap={SCENE_OUTPUT_FRAME_ROW_GAP}
+                    isInitiallyVisible={index < SCENE_OUTPUT_EAGER_FRAME_COUNT}
+                    onImageOpen={(image) => onOpenImage(image as GeneratedImageRecord)}
+                    onImageCopy={(image) => onCopyImage(image as GeneratedImageRecord)}
+                  />
                 </div>
               </div>
-              <div className="p-5">
-                <GeneratedImageGrid
-                  images={card.images}
-                  className="w-full"
-                  columnCount={card.images.length > 1 ? 2 : 1}
-                  cardHeight={card.images.length > 1 ? 280 : 360}
-                  rowGap={16}
-                  fitHeight
-                  onImageOpen={(image) => onOpenImage(image as GeneratedImageRecord)}
-                />
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </motion.div>
     );
@@ -6330,6 +6420,78 @@ function ScenesWorkspace({
         </div>
       </div>
     </motion.div>
+  );
+}
+
+function LazySceneFrameOutputGrid({
+  frameTitle,
+  images,
+  columnCount,
+  cardHeight,
+  rowGap,
+  isInitiallyVisible,
+  onImageOpen,
+  onImageCopy,
+}: {
+  frameTitle: string;
+  images: GeneratedImageRecord[];
+  columnCount: number;
+  cardHeight: number;
+  rowGap: number;
+  isInitiallyVisible: boolean;
+  onImageOpen: (image: GeneratedImageRecord) => void;
+  onImageCopy: (image: GeneratedImageRecord) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [shouldRenderGrid, setShouldRenderGrid] = useState(isInitiallyVisible);
+  const rowCount = Math.max(1, Math.ceil(Math.max(images.length, 1) / columnCount));
+  const totalGridHeight = rowCount * (cardHeight + rowGap);
+  const renderedGridHeight = Math.min(totalGridHeight, SCENE_OUTPUT_MAX_GRID_HEIGHT);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) {
+      return;
+    }
+
+    if (typeof window.IntersectionObserver !== 'function') {
+      setShouldRenderGrid(true);
+      return;
+    }
+
+    const observer = new window.IntersectionObserver(
+      (entries) => {
+        setShouldRenderGrid(entries.some((entry) => entry.isIntersecting || entry.intersectionRatio > 0));
+      },
+      { root: null, rootMargin: SCENE_OUTPUT_LAZY_ROOT_MARGIN, threshold: 0 }
+    );
+
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div ref={containerRef} className="w-full">
+      {shouldRenderGrid ? (
+        <GeneratedImageGrid
+          images={images}
+          className="w-full"
+          columnCount={columnCount}
+          cardHeight={cardHeight}
+          rowGap={rowGap}
+          fitHeight
+          maxFitHeight={SCENE_OUTPUT_MAX_GRID_HEIGHT}
+          onImageOpen={(image) => onImageOpen(image as GeneratedImageRecord)}
+          onImageCopy={(image) => onImageCopy(image as GeneratedImageRecord)}
+        />
+      ) : (
+        <div
+          aria-label={`${frameTitle} outputs pending viewport`}
+          className="rounded-[20px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.32)]"
+          style={{ minHeight: renderedGridHeight }}
+        />
+      )}
+    </div>
   );
 }
 
@@ -7261,6 +7423,39 @@ function ScenesSidebar({
   onToggleRenameFrame: (frameId: string) => void;
   onAddFrame: () => void;
 }) {
+  const frameRowProps = useMemo(
+    () => ({
+      frames,
+      savedReferences,
+      onRenameFrame,
+      onDeleteFrame,
+      onUpdateFramePrompt,
+      onUpdateFrameReferences,
+      onGenerateFrame,
+      onToggleFrame,
+      onToggleRenameFrame,
+      generatingFrameIds,
+      isGenerating,
+    }),
+    [
+      frames,
+      savedReferences,
+      onRenameFrame,
+      onDeleteFrame,
+      onUpdateFramePrompt,
+      onUpdateFrameReferences,
+      onGenerateFrame,
+      onToggleFrame,
+      onToggleRenameFrame,
+      generatingFrameIds,
+      isGenerating,
+    ]
+  );
+  const frameListHeight = Math.min(
+    Math.max(frames.length * SCENE_FRAME_ACCORDION_EXPANDED_HEIGHT, SCENE_FRAME_ACCORDION_EXPANDED_HEIGHT),
+    SCENE_SIDEBAR_FRAME_LIST_MAX_HEIGHT
+  );
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-14 items-center justify-between border-b border-[var(--border-soft)] px-5">
@@ -7320,24 +7515,20 @@ function ScenesSidebar({
           topPaddingClassName="pt-4"
           labelClassName="text-[14px] font-medium text-[var(--foreground)]"
         />
-        {frames.map((frame, index) => (
-          <SceneFrameAccordion
-            key={frame.id}
-            frame={frame}
-            index={index}
-            isLast={index === frames.length - 1}
-            savedReferences={savedReferences}
-            onRename={(title) => onRenameFrame(frame.id, title)}
-            onDelete={() => onDeleteFrame(frame.id)}
-            onToggleRename={() => onToggleRenameFrame(frame.id)}
-            onPromptChange={(prompt) => onUpdateFramePrompt(frame.id, prompt)}
-            onReferencesChange={(references) => onUpdateFrameReferences(frame.id, references)}
-            onGenerate={() => onGenerateFrame(frame.id)}
-            isGenerating={generatingFrameIds.includes(frame.id)}
-            isGenerationDisabled={isGenerating}
-            onToggle={() => onToggleFrame(frame.id)}
+        {frames.length > 0 ? (
+          <List<SceneFrameVirtualRowProps>
+            rowComponent={SceneFrameVirtualRow}
+            rowCount={frames.length}
+            rowHeight={(index, props) =>
+              props.frames[index]?.isCollapsed ? SCENE_FRAME_ACCORDION_COLLAPSED_HEIGHT : SCENE_FRAME_ACCORDION_EXPANDED_HEIGHT
+            }
+            rowProps={frameRowProps}
+            overscanCount={2}
+            defaultHeight={SCENE_SIDEBAR_FRAME_LIST_MAX_HEIGHT}
+            className="overscroll-contain"
+            style={{ height: frameListHeight, width: '100%' }}
           />
-        ))}
+        ) : null}
         <div className="flex justify-end px-5 py-4">
           <Button
             type="button"
@@ -7351,6 +7542,61 @@ function ScenesSidebar({
         </div>
       </div>
 
+    </div>
+  );
+}
+
+type SceneFrameVirtualRowProps = {
+  frames: SceneFrame[];
+  savedReferences: SavedReferenceImage[];
+  onRenameFrame: (frameId: string, title: string) => void;
+  onDeleteFrame: (frameId: string) => void;
+  onUpdateFramePrompt: (frameId: string, prompt: string) => void;
+  onUpdateFrameReferences: (frameId: string, references: SceneReferenceAttachment[]) => void;
+  onGenerateFrame: (frameId: string) => void;
+  onToggleFrame: (frameId: string) => void;
+  onToggleRenameFrame: (frameId: string) => void;
+  generatingFrameIds: string[];
+  isGenerating: boolean;
+};
+
+function SceneFrameVirtualRow({
+  index,
+  style,
+  frames,
+  savedReferences,
+  onRenameFrame,
+  onDeleteFrame,
+  onUpdateFramePrompt,
+  onUpdateFrameReferences,
+  onGenerateFrame,
+  onToggleFrame,
+  onToggleRenameFrame,
+  generatingFrameIds,
+  isGenerating,
+}: RowComponentProps<SceneFrameVirtualRowProps>) {
+  const frame = frames[index];
+  if (!frame) {
+    return null;
+  }
+
+  return (
+    <div style={style}>
+      <SceneFrameAccordion
+        frame={frame}
+        index={index}
+        isLast={index === frames.length - 1}
+        savedReferences={savedReferences}
+        onRename={(title) => onRenameFrame(frame.id, title)}
+        onDelete={() => onDeleteFrame(frame.id)}
+        onToggleRename={() => onToggleRenameFrame(frame.id)}
+        onPromptChange={(prompt) => onUpdateFramePrompt(frame.id, prompt)}
+        onReferencesChange={(references) => onUpdateFrameReferences(frame.id, references)}
+        onGenerate={() => onGenerateFrame(frame.id)}
+        isGenerating={generatingFrameIds.includes(frame.id)}
+        isGenerationDisabled={isGenerating}
+        onToggle={() => onToggleFrame(frame.id)}
+      />
     </div>
   );
 }

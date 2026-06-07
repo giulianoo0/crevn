@@ -50,6 +50,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteSceneFrame: (sceneFrameId) => ipcRenderer.invoke('generation:deleteSceneFrame', sceneFrameId),
   saveSceneFrameReferences: (sceneFrameId, references) =>
     ipcRenderer.invoke('generation:saveSceneFrameReferences', sceneFrameId, references),
+  pasteClipboardImageToSceneFrame: (sceneFrameId) =>
+    ipcRenderer.invoke('generation:pasteClipboardImageToSceneFrame', sceneFrameId),
   generateSceneGroup: (input) => ipcRenderer.invoke('generation:generateSceneGroup', input),
   structureScenePrompt: (input) => ipcRenderer.invoke('generation:structureScenePrompt', input),
   cancelSceneGroupGeneration: (sceneGroupId) =>

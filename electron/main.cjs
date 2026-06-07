@@ -418,6 +418,23 @@ app.whenReady().then(async () => {
     return generationStore.saveSceneFrameReferences(sceneFrameId, references);
   });
 
+  ipcMain.handle('generation:pasteClipboardImageToSceneFrame', async (_event, sceneFrameId) => {
+    const image = clipboard.readImage();
+    if (image.isEmpty()) {
+      return null;
+    }
+
+    const bytes = image.toPNG();
+    if (bytes.length === 0) {
+      return null;
+    }
+
+    return generationStore.pasteClipboardImageToSceneFrame(sceneFrameId, {
+      mimeType: 'image/png',
+      bytesBase64: bytes.toString('base64'),
+    });
+  });
+
   ipcMain.handle('generation:generateSceneGroup', async (_event, input) => {
     return generationStore.generateSceneGroup(input);
   });

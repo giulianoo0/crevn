@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import type { CSSProperties, ComponentType } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { App, COMPOSER_SHELL_MOTION, getReferenceMentionReplacementRange } from './App';
+import { App, getReferenceMentionReplacementRange } from './App';
+import { COMPOSER_SHELL_MOTION } from './lib/composer-motion';
 import * as electronApi from './lib/electron-api';
 import * as errors from './lib/errors';
 import { toast } from 'sonner';
@@ -553,6 +554,55 @@ vi.mock('./lib/electron-api', () => ({
   copyGeneratedImage: vi.fn(async () => undefined),
   downloadGeneratedImage: vi.fn(async () => undefined),
   deleteGeneratedImage: vi.fn(async () => undefined),
+  pasteClipboardImageToSceneFrame: vi.fn(async (sceneFrameId: string) => {
+    sceneGroupsFixture = sceneGroupsFixture.map((sceneGroup) => ({
+      ...sceneGroup,
+      runs: [
+        {
+          id: 'clipboard-run-1',
+          sceneGroupId: sceneGroup.id,
+          threadId: sceneGroup.threadId,
+          status: 'succeeded',
+          provider: 'codex',
+          modelId: 'clipboard',
+          modelLabel: 'Clipboard',
+          requestedFrameCount: 1,
+          errorMessage: null,
+          durationMs: 0,
+          createdAt: '2026-06-01T10:03:00.000Z',
+          updatedAt: '2026-06-01T10:03:00.000Z',
+        },
+        ...sceneGroup.runs,
+      ],
+      frames: sceneGroup.frames.map((frame) =>
+        frame.id === sceneFrameId
+          ? {
+              ...frame,
+              assets: [
+                ...frame.assets,
+                {
+                  id: 'clipboard-asset-1',
+                  sceneGroupRunId: 'clipboard-run-1',
+                  sceneFrameId,
+                  outputIndex: frame.assets.length,
+                  originalPath: 'clipboard',
+                  storedPath: '/tmp/clipboard-frame.png',
+                  fileName: 'clipboard-frame.png',
+                  mimeType: 'image/png',
+                  width: null,
+                  height: null,
+                  createdAt: '2026-06-01T10:03:00.000Z',
+                },
+              ],
+            }
+          : frame
+      ),
+    }));
+
+    return sceneGroupsFixture.find((sceneGroup) =>
+      sceneGroup.frames.some((frame) => frame.id === sceneFrameId)
+    ) ?? null;
+  }),
   subscribeToScenePlan: vi.fn((listener) => {
     scenePlanListener = listener;
     return () => {
@@ -602,7 +652,7 @@ vi.mock('react-window', () => ({
     rowProps: { messages: unknown[] };
   }) => (
     <div data-testid="virtualized-list">
-      {Array.from({ length: rowCount }, (_, index) => (
+      {Array.from({ length: Math.min(rowCount, 12) }, (_, index) => (
         <RowComponent key={index} index={index} style={{}} {...rowProps} />
       ))}
     </div>
@@ -612,7 +662,7 @@ vi.mock('react-window', () => ({
 }));
 
 vi.mock('sonner', () => ({
-  Toaster: () => null,
+  Toaster: ({ position }: { position?: string }) => <div data-testid="sonner-toaster" data-position={position} />,
   toast: {
     success: vi.fn(),
     error: vi.fn(),
@@ -675,16 +725,18 @@ vi.mock('./components/generated-image-grid', () => ({
     onImageSelect,
     onImageOpen,
     onImageCopy,
+    onImageCopyPrompt,
     onImageDownload,
     onImageDelete,
   }: {
-    images?: Array<{ id: string; fileName: string }>;
+    images?: Array<{ id: string; fileName: string; prompt?: string | null }>;
     selectedImageIds?: string[];
-    onImageSelect?: (image: { id: string; fileName: string }) => void;
-    onImageOpen?: (image: { id: string; fileName: string }) => void;
-    onImageCopy?: (image: { id: string; fileName: string }) => void;
-    onImageDownload?: (image: { id: string; fileName: string }) => void;
-    onImageDelete?: (image: { id: string; fileName: string }) => void;
+    onImageSelect?: (image: { id: string; fileName: string; prompt?: string | null }) => void;
+    onImageOpen?: (image: { id: string; fileName: string; prompt?: string | null }) => void;
+    onImageCopy?: (image: { id: string; fileName: string; prompt?: string | null }) => void;
+    onImageCopyPrompt?: (image: { id: string; fileName: string; prompt?: string | null }) => void;
+    onImageDownload?: (image: { id: string; fileName: string; prompt?: string | null }) => void;
+    onImageDelete?: (image: { id: string; fileName: string; prompt?: string | null }) => void;
   }) => {
     const clickTimeouts = new Map<string, number>();
 
@@ -730,6 +782,11 @@ vi.mock('./components/generated-image-grid', () => ({
                 <button type="button" onClick={() => onImageCopy?.(image)}>
                   Copy {image.fileName}
                 </button>
+                {image.prompt ? (
+                  <button type="button" onClick={() => onImageCopyPrompt?.(image)}>
+                    Copy prompt {image.fileName}
+                  </button>
+                ) : null}
                 <button type="button" onClick={() => onImageDownload?.(image)}>
                   Download {image.fileName}
                 </button>
@@ -919,6 +976,16 @@ describe('App header thread title', () => {
     });
 
     expect(screen.getByRole('heading', { name: 'Thread Two' })).toBeInTheDocument();
+  });
+
+  it('places toast notifications at the bottom right of the app shell', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('sonner-toaster')).toHaveAttribute('data-position', 'bottom-right');
   });
 
   it('does not load scene groups while switching threads in Classic mode', async () => {
@@ -2174,6 +2241,32 @@ describe('App header thread title', () => {
     expect(vi.mocked(electronApi.deleteGeneratedImage)).toHaveBeenCalledWith('generated-1');
   });
 
+  it('copies a generated image prompt from Classic image actions', async () => {
+    vi.mocked(electronApi.listGeneratedImages).mockResolvedValue([
+      {
+        id: 'generated-1',
+        fileName: 'frame-1.png',
+        fileUrl: 'crenv-asset://generated?path=frame-1.png',
+        createdAt: '2026-05-26T10:30:00.000Z',
+        prompt: 'A cinematic control room frame',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy prompt frame-1.png' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('A cinematic control room frame');
+  });
+
   it('shows centered header actions for selected generated images and hides copy for multi-select', async () => {
     vi.mocked(electronApi.listGeneratedImages).mockResolvedValue([
       {
@@ -3068,6 +3161,260 @@ describe('App header thread title', () => {
     expect(screen.getByText('Frame 2 · 1')).toBeInTheDocument();
   });
 
+  it('defers offscreen scene output grids when a scene has many generated frames', async () => {
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    const observerCallbacks: IntersectionObserverCallback[] = [];
+    const previousIntersectionObserver = window.IntersectionObserver;
+    class MockIntersectionObserver {
+      readonly root = null;
+      readonly rootMargin = '';
+      readonly thresholds = [];
+
+      constructor(callback: IntersectionObserverCallback) {
+        observerCallbacks.push(callback);
+      }
+
+      observe = (element: Element) => {
+        observe(element);
+      };
+      unobserve = vi.fn();
+      disconnect = disconnect;
+      takeRecords = () => [];
+    }
+    window.IntersectionObserver = MockIntersectionObserver as unknown as typeof IntersectionObserver;
+
+    sceneGroupsFixture = [
+      {
+        ...makeSceneGroupsFixture()[0],
+        frames: Array.from({ length: 8 }, (_, frameIndex) => ({
+          ...makeSceneGroupsFixture()[0].frames[0],
+          id: `scene-frame-${frameIndex + 1}`,
+          sceneGroupId: 'scene-group-1',
+          title: `Frame ${frameIndex + 1}`,
+          frameOrder: frameIndex + 1,
+          assets: Array.from({ length: 3 }, (_, assetIndex) => ({
+            id: `scene-asset-${frameIndex + 1}-${assetIndex + 1}`,
+            sceneGroupRunId: 'scene-run-1',
+            sceneFrameId: `scene-frame-${frameIndex + 1}`,
+            outputIndex: assetIndex,
+            originalPath: `/tmp/frame-${frameIndex + 1}-${assetIndex + 1}.png`,
+            storedPath: `/tmp/frame-${frameIndex + 1}-${assetIndex + 1}.png`,
+            fileName: `frame-${frameIndex + 1}-${assetIndex + 1}.png`,
+            mimeType: 'image/png',
+            width: 1280,
+            height: 720,
+            createdAt: '2026-06-01T12:00:01.000Z',
+          })),
+        })),
+        runs: [
+          {
+            id: 'scene-run-1',
+            sceneGroupId: 'scene-group-1',
+            threadId: 'thread-1',
+            status: 'succeeded',
+            provider: 'codex',
+            modelId: 'codex-gpt-5-4-mini',
+            modelLabel: 'Codex / GPT-5.4 Mini',
+            requestedFrameCount: 8,
+            errorMessage: null,
+            durationMs: 1200,
+            createdAt: '2026-06-01T12:00:00.000Z',
+            updatedAt: '2026-06-01T12:00:01.200Z',
+          },
+        ],
+      },
+    ];
+
+    try {
+      render(<App />);
+
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+
+      expect(screen.getAllByTestId('generated-image-grid')).toHaveLength(3);
+      expect(screen.getByRole('button', { name: 'Select Frame 1 · 1' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Select Frame 8 · 1' })).not.toBeInTheDocument();
+      expect(observe).toHaveBeenCalled();
+
+      const frameEightObserver = observerCallbacks.at(-1);
+      expect(frameEightObserver).toBeDefined();
+
+      await act(async () => {
+        frameEightObserver?.(
+          [{ isIntersecting: true, intersectionRatio: 1 } as IntersectionObserverEntry],
+          {} as IntersectionObserver
+        );
+      });
+
+      expect(screen.getByRole('button', { name: 'Select Frame 8 · 1' })).toBeInTheDocument();
+      expect(screen.getAllByTestId('generated-image-grid')).toHaveLength(4);
+
+      await act(async () => {
+        frameEightObserver?.(
+          [{ isIntersecting: false, intersectionRatio: 0 } as IntersectionObserverEntry],
+          {} as IntersectionObserver
+        );
+      });
+
+      expect(screen.queryByRole('button', { name: 'Select Frame 8 · 1' })).not.toBeInTheDocument();
+      expect(screen.getAllByTestId('generated-image-grid')).toHaveLength(3);
+    } finally {
+      window.IntersectionObserver = previousIntersectionObserver;
+    }
+  });
+
+  it('virtualizes the scenes sidebar without forcing the workspace into a nested scroller', async () => {
+    const previousIntersectionObserver = window.IntersectionObserver;
+    class MockIntersectionObserver {
+      readonly root = null;
+      readonly rootMargin = '';
+      readonly thresholds = [];
+
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+      takeRecords = () => [];
+    }
+    window.IntersectionObserver = MockIntersectionObserver as unknown as typeof IntersectionObserver;
+
+    sceneGroupsFixture = [
+      {
+        ...makeSceneGroupsFixture()[0],
+        frames: Array.from({ length: 80 }, (_, frameIndex) => ({
+          ...makeSceneGroupsFixture()[0].frames[0],
+          id: `scene-frame-${frameIndex + 1}`,
+          sceneGroupId: 'scene-group-1',
+          title: `Frame ${frameIndex + 1}`,
+          frameOrder: frameIndex + 1,
+          assets: [
+            {
+              id: `scene-asset-${frameIndex + 1}`,
+              sceneGroupRunId: 'scene-run-1',
+              sceneFrameId: `scene-frame-${frameIndex + 1}`,
+              outputIndex: 0,
+              originalPath: `/tmp/frame-${frameIndex + 1}.png`,
+              storedPath: `/tmp/frame-${frameIndex + 1}.png`,
+              fileName: `frame-${frameIndex + 1}.png`,
+              mimeType: 'image/png',
+              width: 1280,
+              height: 720,
+              createdAt: '2026-06-01T12:00:01.000Z',
+            },
+          ],
+        })),
+        runs: [
+          {
+            id: 'scene-run-1',
+            sceneGroupId: 'scene-group-1',
+            threadId: 'thread-1',
+            status: 'succeeded',
+            provider: 'codex',
+            modelId: 'codex-gpt-5-4-mini',
+            modelLabel: 'Codex / GPT-5.4 Mini',
+            requestedFrameCount: 80,
+            errorMessage: null,
+            durationMs: 1200,
+            createdAt: '2026-06-01T12:00:00.000Z',
+            updatedAt: '2026-06-01T12:00:01.200Z',
+          },
+        ],
+      },
+    ];
+
+    try {
+      render(<App />);
+
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+
+      expect(screen.getByRole('button', { name: 'Frame 1' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Frame 80' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Paste clipboard image as Frame 80 output' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Select Frame 80 · 1' })).not.toBeInTheDocument();
+    } finally {
+      window.IntersectionObserver = previousIntersectionObserver;
+    }
+  });
+
+  it('copies scene output images from the Scenes grid actions', async () => {
+    sceneGroupsFixture = [
+      {
+        ...makeSceneGroupsFixture()[0],
+        runs: [
+          {
+            id: 'scene-run-1',
+            sceneGroupId: 'scene-group-1',
+            threadId: 'thread-1',
+            status: 'succeeded',
+            provider: 'codex',
+            modelId: 'codex-gpt-5-4-mini',
+            modelLabel: 'Codex / GPT-5.4 Mini',
+            requestedFrameCount: 1,
+            errorMessage: null,
+            durationMs: 1200,
+            createdAt: '2026-06-01T12:00:00.000Z',
+            updatedAt: '2026-06-01T12:00:01.200Z',
+          },
+        ],
+        frames: [
+          {
+            ...makeSceneGroupsFixture()[0].frames[0],
+            assets: [
+              {
+                id: 'scene-asset-1',
+                sceneGroupRunId: 'scene-run-1',
+                sceneFrameId: 'scene-frame-1',
+                outputIndex: 0,
+                originalPath: '/tmp/frame-1.png',
+                storedPath: '/tmp/frame-1.png',
+                fileName: 'frame-1.png',
+                mimeType: 'image/png',
+                width: 1280,
+                height: 720,
+                createdAt: '2026-06-01T12:00:01.000Z',
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy Frame 1 · 1' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(vi.mocked(electronApi.copyGeneratedImage)).toHaveBeenCalledWith('scene-asset-1');
+  });
+
   it('stops scene generation without clearing prompts', async () => {
     let resolveGeneration: ((value: Awaited<ReturnType<typeof electronApi.generateSceneGroup>>) => void) | null = null;
     vi.mocked(electronApi.generateSceneGroup).mockImplementationOnce(
@@ -3346,6 +3693,32 @@ describe('App header thread title', () => {
         ],
       })
     );
+  });
+
+  it('pastes the native clipboard image into the clicked scene frame output list only', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scenes' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.queryByRole('button', { name: 'Select Frame 1 · 1' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Paste clipboard image as Frame 1 output' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.pasteClipboardImageToSceneFrame).toHaveBeenCalledWith('scene-frame-1');
+    expect(screen.getByRole('button', { name: 'Select Frame 1 · 1' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Select Frame 2 · 1' })).not.toBeInTheDocument();
   });
 
   it('creates a frame even if the active scene group is still missing locally', async () => {

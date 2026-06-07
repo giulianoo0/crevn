@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
-const { createCodexAppServerClient } = require('./codexAppServerClient.cjs');
+const { buildCodexAppServerSpawnEnv, createCodexAppServerClient } = require('./codexAppServerClient.cjs');
 
 class FakeProcess extends EventEmitter {
   stdin = new PassThrough();
@@ -37,6 +37,29 @@ class FakeProcess extends EventEmitter {
 }
 
 describe('codex app-server client', () => {
+  it('builds an explicit app-server environment with a writable Codex home', () => {
+    expect(
+      buildCodexAppServerSpawnEnv({
+        env: { PATH: '/usr/bin' },
+        homeDirectory: '/home/alex',
+      })
+    ).toMatchObject({
+      PATH: '/usr/bin',
+      HOME: '/home/alex',
+      CODEX_HOME: '/home/alex/.codex',
+    });
+
+    expect(
+      buildCodexAppServerSpawnEnv({
+        env: { HOME: '/Users/custom', CODEX_HOME: '/custom/codex' },
+        homeDirectory: '/home/alex',
+      })
+    ).toMatchObject({
+      HOME: '/Users/custom',
+      CODEX_HOME: '/custom/codex',
+    });
+  });
+
   it('initializes over newline-delimited stdio', async () => {
     const fake = new FakeProcess();
     const client = createCodexAppServerClient({
@@ -58,6 +81,30 @@ describe('codex app-server client', () => {
       },
       { method: 'initialized', params: {} },
     ]);
+  });
+
+  it('spawns app-server with the resolved Codex home environment', async () => {
+    const fake = new FakeProcess();
+    let spawnOptions: { env?: Record<string, string>; stdio?: unknown } | undefined;
+    const client = createCodexAppServerClient({
+      env: { PATH: '/usr/bin' },
+      homeDirectory: '/home/alex',
+      spawnProcess: (options: { env?: Record<string, string>; stdio?: unknown }) => {
+        spawnOptions = options;
+        return fake;
+      },
+    });
+
+    const startPromise = client.start();
+    fake.server({ id: 1, result: {} });
+    await startPromise;
+
+    expect(spawnOptions?.stdio).toEqual(['pipe', 'pipe', 'pipe']);
+    expect(spawnOptions?.env).toMatchObject({
+      PATH: '/usr/bin',
+      HOME: '/home/alex',
+      CODEX_HOME: '/home/alex/.codex',
+    });
   });
 
   it('resolves requests and dispatches notifications', async () => {

@@ -78,20 +78,32 @@ function isPathInside(candidatePath, parentPath) {
 
 function buildCrenvImageReadyPromptContract({ jobId, outputDirectory, requestedCount }) {
   return [
-    'Streaming image registration contract:',
+    'Direct image registration contract:',
     `- Job id: ${jobId}`,
     `- Output directory: ${outputDirectory}`,
     `- Requested accepted image count: ${requestedCount}`,
-    '- Write in-progress candidates under output/tmp.',
-    '- Review or regenerate each candidate before exposing it.',
-    '- Move only accepted images into output/ready.',
-    '- For every accepted image, write output/ready/<imageId>.json with the same JSON object you emit.',
-    '- Append each accepted-image JSON object to output/events.jsonl.',
+    '- Save each accepted final image directly under output/ready.',
+    '- Do not create output/tmp candidates.',
+    '- Do not write sidecar JSON files, events.jsonl, or final manifests.',
+    '- Do not perform iterative self-review or regeneration unless an image is missing, corrupt, wrong-count, or unusable.',
     '- In every event, set path to a relative forward-slash path like output/ready/000.png, never a Windows backslash path.',
-    '- Print exactly one single-line event for each accepted image:',
+    '- Print exactly one single-line event immediately after each final image file exists:',
     `CRENV_IMAGE_READY {"schema":"${IMAGE_READY_SCHEMA}","jobId":"${jobId}","imageId":"unique-image-id","outputIndex":0,"path":"output/ready/000.png","reviewStatus":"accepted"}`,
     '- No final manifest is required.',
   ].join('\n');
+}
+
+function buildCodexTurnInputItems({ prompt, referenceImages = [] }) {
+  return [
+    { type: 'text', text: prompt },
+    ...referenceImages
+      .filter((referenceImage) => typeof referenceImage?.path === 'string' && referenceImage.path.trim())
+      .map((referenceImage) => ({
+        type: 'localImage',
+        path: referenceImage.path,
+        detail: 'high',
+      })),
+  ];
 }
 
 async function discoverCrenvImageReadyEvents(outputDirectory) {
@@ -176,6 +188,7 @@ async function runCodexImageAppServerJob({
   workingDirectory,
   outputDirectory,
   prompt,
+  referenceImages = [],
   requestedCount,
   fastMode = false,
   model,
@@ -186,7 +199,7 @@ async function runCodexImageAppServerJob({
   await client.start();
 
   console.info(
-    `[crenv:codex:${jobId}] app-server image job starting model=${model ?? 'default'} fast=${fastMode ? 'yes' : 'no'} requested=${requestedCount} cwd=${workingDirectory} output=${outputDirectory} promptChars=${prompt.length}`
+    `[crenv:codex:${jobId}] app-server image job starting model=${model ?? 'default'} fast=${fastMode ? 'yes' : 'no'} requested=${requestedCount} refs=${referenceImages.length} cwd=${workingDirectory} output=${outputDirectory} promptChars=${prompt.length}`
   );
   const opened = await client.startThread({
     cwd: workingDirectory,
@@ -351,8 +364,9 @@ async function runCodexImageAppServerJob({
   try {
     const turnResponse = await client.startTurn({
       threadId: providerThreadId,
-      input: [{ type: 'text', text: prompt }],
+      input: buildCodexTurnInputItems({ prompt, referenceImages }),
       approvalPolicy: 'never',
+      effort: 'low',
       ...buildCodexTurnSandboxParams(),
       ...(model ? { model } : {}),
       ...(fastMode ? { serviceTier: 'fast' } : {}),
@@ -437,6 +451,7 @@ function parseScenePlanLineForImageRuntime(line) {
 module.exports = {
   IMAGE_READY_PREFIX,
   IMAGE_READY_SCHEMA,
+  buildCodexTurnInputItems,
   buildCrenvImageReadyPromptContract,
   discoverCrenvImageReadyEvents,
   parseCrenvImageReadyLine,

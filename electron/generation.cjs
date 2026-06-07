@@ -14,7 +14,7 @@ const { sqliteTable, text, integer } = require('drizzle-orm/sqlite-core');
 const yazl = require('yazl');
 const yauzl = require('yauzl');
 
-const { createCodexAppServerClient } = require('./codexAppServerClient.cjs');
+const { buildCodexAppServerSpawnEnv, createCodexAppServerClient } = require('./codexAppServerClient.cjs');
 const { runDirectorAppServerTurn } = require('./directorAppServerRuntime.cjs');
 const {
   buildCrenvImageReadyPromptContract,
@@ -144,6 +144,13 @@ function buildSceneFramePrompt({
     'Use only the scene continuity brief, attached references, and this target frame prompt.',
     'This output is a static keyframe for later animation in Seedance.',
     'The later seedance-cartoon stage will use this frame as a reference image, so make identity, environment, pose, lighting, and composition stable enough for video prompt generation.',
+    'Reference discipline:',
+    '- References are authoritative anchors, not loose inspiration.',
+    '- If text conflicts with references, references win for identity, layout, materials, palette, and fixed prop placement.',
+    '- Change only the camera angle, framing, expression, pose, action beat, or local edit requested by this target frame.',
+    '- Preserve visible character face shape, proportions, wardrobe, hair silhouette, palette, and distinguishing marks.',
+    '- Preserve environment geometry, materials, object positions, lighting direction, scale, and local texture continuity.',
+    '- Do not average, blend, or redesign identities when several references are attached; assign each reference a clear role.',
     'Keep environment identity, materials, layout, lighting direction, palette, and character continuity stable.',
     'Use environment coverage plates and closest detail plates for the visible area; preserve local textures, trim, props, and fixed object placement.',
     'Keep visible character identity locked to character sheets: face shape, proportions, wardrobe, hair silhouette, palette, and distinguishing details.',
@@ -577,6 +584,13 @@ function buildDirectorChatPrompt({
     'A create_scene payload shape is {"title":"...","scenePrompt":"...","references":["@Reference"],"generate":true,"frames":[{"title":"Frame 1","prompt":"...","references":["@Reference"]}]}',
     'A generate_classic payload shape is {"prompt":"...","count":1,"aspectRatio":"16:9","references":["@Reference"]}.',
     ...DIRECTOR_SEEDANCE_CARTOON_CONTRACT_LINES,
+    'Very strongly prefer writing a Seedance Coverage Plan before emitting any imagen-action, unless the user explicitly asks to skip planning or only execute.',
+    'Seedance accepts at most 15 seconds per generation. If a requested beat needs more than 15 seconds, split it into multiple Seedance-ready scene groups or clearly state the split.',
+    'A Seedance Coverage Plan should be concrete and brief: duration budget, beat order, shot count, angle/take choice, image/keyframe count, references, and what must preserve / may change.',
+    'Dialogue coverage: map each dialogue line or story beat to a shot/take, angle, shot size, speaker/reaction focus, eye line, gesture, and reference anchors.',
+    'Image/keyframe budget: decide how many still images each frame/shot needs; naturally request more than 1 image per frame when expression, camera, timing, or continuity uncertainty benefits from variants.',
+    'For each planned shot, state must preserve / may change so the generator knows which reference traits are locked and which performance/camera traits are free.',
+    'You may still emit the imagen-action in the same response after the plan when the plan is generation-ready.',
     'Treat environment references as locked layout anchors: preserve room geometry, wall/floor materials, door/window placement, furniture positions, lighting direction, and spatial scale unless the user explicitly asks to change them.',
     'Treat character sheets as locked identity anchors: preserve face shape, proportions, costume, hair, palette, and distinguishing details across every prompt and frame.',
     'Every imagen-action payload must include the relevant environment and character @Reference names; do not rely on prose mentions alone.',
@@ -3902,6 +3916,7 @@ async function createGenerationStore(userDataDir, options = {}) {
               workingDirectory,
               outputDirectory,
               prompt: buildCodexImageGenerationPrompt(providerPromptInput),
+              referenceImages: providerPromptInput.referenceImages,
               requestedCount: count,
               fastMode,
               model: selection.codexModel,
@@ -4362,6 +4377,78 @@ async function createGenerationStore(userDataDir, options = {}) {
         }))
       );
     }
+    const details = await listSceneGroups(sceneGroup.threadId);
+    return details.find((item) => item.id === sceneGroup.id) ?? null;
+  }
+
+  async function pasteClipboardImageToSceneFrame(sceneFrameId, image) {
+    const existing = await db.select().from(sceneFramesTable).where(eq(sceneFramesTable.id, sceneFrameId)).limit(1);
+    const sceneFrame = existing[0];
+    if (!sceneFrame) {
+      throw new Error('Scene frame not found.');
+    }
+
+    const sceneGroups = await db
+      .select()
+      .from(sceneGroupsTable)
+      .where(eq(sceneGroupsTable.id, sceneFrame.sceneGroupId))
+      .limit(1);
+    const sceneGroup = sceneGroups[0];
+    if (!sceneGroup) {
+      throw new Error('Scene group not found.');
+    }
+
+    if (!image?.bytesBase64) {
+      return null;
+    }
+
+    const timestamp = new Date().toISOString();
+    const runId = nanoid();
+    const assetId = nanoid();
+    const buffer = Buffer.from(image.bytesBase64, 'base64');
+    if (buffer.length === 0) {
+      return null;
+    }
+
+    await fsp.mkdir(paths.generatedImagesDir, { recursive: true });
+    const fileName = `${assetId}.png`;
+    const storedPath = path.join(paths.generatedImagesDir, fileName);
+    await fsp.writeFile(storedPath, buffer);
+
+    const existingAssets = await db
+      .select({ id: sceneFrameAssetsTable.id })
+      .from(sceneFrameAssetsTable)
+      .where(eq(sceneFrameAssetsTable.sceneFrameId, sceneFrameId));
+
+    await db.insert(sceneGroupRunsTable).values({
+      id: runId,
+      sceneGroupId: sceneGroup.id,
+      threadId: sceneGroup.threadId,
+      status: 'succeeded',
+      provider: 'codex',
+      modelId: 'clipboard',
+      modelLabel: 'Clipboard',
+      requestedFrameCount: 1,
+      errorMessage: null,
+      durationMs: 0,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    await db.insert(sceneFrameAssetsTable).values({
+      id: assetId,
+      sceneGroupRunId: runId,
+      sceneFrameId,
+      outputIndex: existingAssets.length,
+      originalPath: 'clipboard',
+      storedPath,
+      fileName,
+      mimeType: image.mimeType || 'image/png',
+      width: null,
+      height: null,
+      createdAt: timestamp,
+    });
+
     const details = await listSceneGroups(sceneGroup.threadId);
     return details.find((item) => item.id === sceneGroup.id) ?? null;
   }
@@ -5084,7 +5171,35 @@ async function createGenerationStore(userDataDir, options = {}) {
       .where(eq(generatedAssetsTable.id, imageId))
       .limit(1);
 
-    return assets[0] ?? null;
+    if (assets[0]) {
+      return assets[0];
+    }
+
+    const sceneAssets = await db
+      .select({
+        id: sceneFrameAssetsTable.id,
+        jobId: sceneFrameAssetsTable.sceneGroupRunId,
+        originalPath: sceneFrameAssetsTable.originalPath,
+        storedPath: sceneFrameAssetsTable.storedPath,
+        fileName: sceneFrameAssetsTable.fileName,
+        mimeType: sceneFrameAssetsTable.mimeType,
+        width: sceneFrameAssetsTable.width,
+        height: sceneFrameAssetsTable.height,
+        createdAt: sceneFrameAssetsTable.createdAt,
+        prompt: sceneFramesTable.prompt,
+        provider: sceneGroupRunsTable.provider,
+        modelId: sceneGroupRunsTable.modelId,
+        modelLabel: sceneGroupRunsTable.modelLabel,
+        referenceImagesJson: sql`NULL`,
+        durationMs: sceneGroupRunsTable.durationMs,
+      })
+      .from(sceneFrameAssetsTable)
+      .innerJoin(sceneGroupRunsTable, eq(sceneFrameAssetsTable.sceneGroupRunId, sceneGroupRunsTable.id))
+      .innerJoin(sceneFramesTable, eq(sceneFrameAssetsTable.sceneFrameId, sceneFramesTable.id))
+      .where(eq(sceneFrameAssetsTable.id, imageId))
+      .limit(1);
+
+    return sceneAssets[0] ?? null;
   }
 
   async function deleteGeneratedImage(imageId) {
@@ -5150,6 +5265,7 @@ async function createGenerationStore(userDataDir, options = {}) {
     updateSceneFrame,
     deleteSceneFrame,
     saveSceneFrameReferences,
+    pasteClipboardImageToSceneFrame,
     generateSceneGroup,
     structureScenePrompt,
     cancelSceneGroupGeneration,
@@ -5606,6 +5722,14 @@ function buildProviderImageGenerationPrompt(input, providerLabel, capabilityInst
     '',
     IMAGE_PRODUCTION_GUIDANCE,
     '',
+    'Reference lock checklist:',
+    '- References win over prompt text for identity, layout, materials, palette, and fixed prop placement.',
+    '- Do not use references as loose inspiration unless their role is explicitly style-only.',
+    '- When multiple references are attached, do not average or blend identities; assign each filename/title a specific role.',
+    '- Preserve exact scene geometry, character identity, prop silhouette, material finish, lighting direction, and scale for every anchor reference.',
+    '- Change only the requested camera, framing, expression, pose, action beat, or localized edit.',
+    '- The final image should pass a reference review for geometry, identity, props, and style continuity.',
+    '',
     ...(input.referenceImages.length > 0
       ? [
           'Reference image files:',
@@ -5634,6 +5758,7 @@ function buildProviderImageGenerationPrompt(input, providerLabel, capabilityInst
           'If a master scene is useful, create it first and then derive additional views from it.',
           'If existing references already define the scene strongly, reuse them as the anchor instead of creating a new master image.',
           'Use the attached references to decide whether this is a continuation/edit of an existing scene or a fresh scene that only borrows style/material cues.',
+          'Treat references as strict scene and subject locks; do not redesign the environment, characters, props, or material language between frames.',
           'Preserve environment identity, materials, layout, lighting direction, palette, and spatial continuity whenever the request calls for the same scene.',
           'Choose camera coverage yourself and hide explicit angle-selection logic from the final output behavior.',
           'If you choose a scene-coverage workflow, the final output must contain at least 4 image files total.',
@@ -5709,7 +5834,13 @@ function buildCodexImageGenerationPrompt(input) {
   return buildProviderImageGenerationPrompt(
     input,
     'Codex',
-    'Use Codex image generation capabilities to create image files for the following prompt.'
+    [
+      'Use Codex image generation directly and keep the workflow short.',
+      'Prefer one batched image generation call when Codex supports the requested count.',
+      'Do not run shell commands, helper scripts, package scripts, tests, or project automation for generation.',
+      'Do not perform iterative self-review or regeneration unless an image is missing, corrupt, wrong-count, or visibly unusable.',
+      'Treat attached localImage items and the listed reference file paths as the same strict visual anchors.',
+    ].join('\n')
   );
 }
 
@@ -6563,9 +6694,13 @@ async function runAntigravityJob({
   });
 }
 
-function buildCodexSpawnEnv(workingDirectory) {
+function buildCodexSpawnEnv(
+  workingDirectory,
+  { env = process.env, homeDirectory = os.homedir() } = {}
+) {
+  const codexEnv = buildCodexAppServerSpawnEnv({ env, homeDirectory });
   return {
-    ...process.env,
+    ...codexEnv,
     XDG_CACHE_HOME: path.join(workingDirectory, '.codex-cache'),
     XDG_CONFIG_HOME: path.join(workingDirectory, '.codex-config'),
     XDG_STATE_HOME: path.join(workingDirectory, '.codex-state'),

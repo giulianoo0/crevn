@@ -1,5 +1,7 @@
 const { spawn } = require('node:child_process');
 const { EventEmitter } = require('node:events');
+const os = require('node:os');
+const path = require('node:path');
 const readline = require('node:readline');
 
 const DEFAULT_CLIENT_INFO = {
@@ -11,11 +13,26 @@ const DEFAULT_CLIENT_INFO = {
 const TRACE_APP_SERVER_RAW = process.env.CRENV_CODEX_APP_SERVER_TRACE === '1';
 const TRACE_APP_SERVER_EVENTS = process.env.CRENV_CODEX_APP_SERVER_TRACE === '1';
 
+function buildCodexAppServerSpawnEnv({ env = process.env, homeDirectory = os.homedir() } = {}) {
+  const resolvedHome = typeof env.HOME === 'string' && env.HOME.trim() ? env.HOME.trim() : homeDirectory;
+  const codexHome = typeof env.CODEX_HOME === 'string' && env.CODEX_HOME.trim() ? env.CODEX_HOME.trim() : path.join(homeDirectory, '.codex');
+  return {
+    ...env,
+    HOME: resolvedHome,
+    CODEX_HOME: codexHome,
+  };
+}
+
 function createCodexAppServerClient(options = {}) {
+  const spawnEnv = buildCodexAppServerSpawnEnv({
+    env: options.env ?? process.env,
+    homeDirectory: options.homeDirectory,
+  });
   const spawnProcess =
     options.spawnProcess ??
-    (() =>
+    ((spawnOptions) =>
       spawn('codex', ['app-server'], {
+        ...spawnOptions,
         stdio: ['pipe', 'pipe', 'pipe'],
       }));
   const clientInfo = options.clientInfo ?? DEFAULT_CLIENT_INFO;
@@ -46,7 +63,10 @@ function createCodexAppServerClient(options = {}) {
   }
 
   async function startProcess() {
-    child = spawnProcess();
+    child = spawnProcess({
+      env: spawnEnv,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
     console.info('[crenv:codex-app-server] spawn: codex app-server');
     closed = false;
     readlineInterface = readline.createInterface({ input: child.stdout });
@@ -320,4 +340,5 @@ function truncate(value, maxLength) {
 
 module.exports = {
   createCodexAppServerClient,
+  buildCodexAppServerSpawnEnv,
 };

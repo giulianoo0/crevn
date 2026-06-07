@@ -144,6 +144,7 @@ interface GeneratedImageGridRowProps {
   onImageClick?: (image: GeneratedImageGridImage) => void;
   onImageDoubleClick?: (image: GeneratedImageGridImage) => void;
   onImageCopy?: (image: GeneratedImageGridImage) => void;
+  onImageCopyPrompt?: (image: GeneratedImageGridImage) => void;
   onImageDownload?: (image: GeneratedImageGridImage) => void;
   onImageDelete?: (image: GeneratedImageGridImage) => void;
 }
@@ -158,6 +159,7 @@ function GeneratedImageGridRow({
   onImageClick,
   onImageDoubleClick,
   onImageCopy,
+  onImageCopyPrompt,
   onImageDownload,
   onImageDelete,
 }: RowComponentProps<GeneratedImageGridRowProps>) {
@@ -220,6 +222,12 @@ function GeneratedImageGridRow({
                 <Copy className="mr-2 size-3.5" />
                 Copy
               </ContextMenuItem>
+              {image.prompt?.trim() ? (
+                <ContextMenuItem onClick={() => onImageCopyPrompt?.(image)}>
+                  <Copy className="mr-2 size-3.5" />
+                  Copy prompt
+                </ContextMenuItem>
+              ) : null}
               <ContextMenuItem onClick={() => onImageDownload?.(image)}>
                 <Download className="mr-2 size-3.5" />
                 Download
@@ -251,10 +259,12 @@ export function GeneratedImageGrid({
   cardHeight = ROW_HEIGHT,
   rowGap = ROW_GAP,
   fitHeight = false,
+  maxFitHeight,
   selectedImageIds = [],
   onImageSelect,
   onImageOpen,
   onImageCopy,
+  onImageCopyPrompt,
   onImageDownload,
   onImageDelete,
 }: {
@@ -264,10 +274,12 @@ export function GeneratedImageGrid({
   cardHeight?: number;
   rowGap?: number;
   fitHeight?: boolean;
+  maxFitHeight?: number;
   selectedImageIds?: string[];
   onImageSelect?: (image: GeneratedImageGridImage) => void;
   onImageOpen?: (image: GeneratedImageGridImage) => void;
   onImageCopy?: (image: GeneratedImageGridImage) => void;
+  onImageCopyPrompt?: (image: GeneratedImageGridImage) => void;
   onImageDownload?: (image: GeneratedImageGridImage) => void;
   onImageDelete?: (image: GeneratedImageGridImage) => void;
 }) {
@@ -316,6 +328,13 @@ export function GeneratedImageGrid({
     }
     return value;
   }, [columnCount, images]);
+  const totalHeight = rows.length * (cardHeight + rowGap);
+  const listHeight =
+    fitHeight
+      ? typeof maxFitHeight === 'number' && Number.isFinite(maxFitHeight) && maxFitHeight > 0
+        ? Math.min(totalHeight, maxFitHeight)
+        : totalHeight
+      : '100%';
 
   return (
     <List
@@ -330,12 +349,13 @@ export function GeneratedImageGrid({
         onImageClick: handleImageClick,
         onImageDoubleClick: handleImageDoubleClick,
         onImageCopy,
+        onImageCopyPrompt,
         onImageDownload,
         onImageDelete,
       }}
       overscanCount={OVERSCAN_ROWS}
       className={className}
-      style={{ height: fitHeight ? rows.length * (cardHeight + rowGap) : '100%', width: '100%' }}
+      style={{ height: listHeight, width: '100%' }}
     />
   );
 }
