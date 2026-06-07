@@ -986,6 +986,40 @@ describe('App header thread title', () => {
     expect(screen.getByRole('heading', { name: 'Thread Two' })).toBeInTheDocument();
   });
 
+  it('uses the compact 36px thread header and centered tab selection chrome', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const headerChrome = screen.getByTestId('thread-header-chrome');
+    const headerText = screen.getByTestId('thread-header-title-text');
+    const tabsChrome = screen.getByTestId('generation-workspace-tabs');
+    const tabsIndicator = screen.getByTestId('generation-workspace-tabs-indicator');
+
+    expect(headerChrome.className).toContain('h-9');
+    expect(headerText.className).toContain('text-[16px]');
+    expect(tabsChrome.className).toContain('h-9');
+    expect(tabsIndicator.className).toContain('left-1');
+    expect(tabsIndicator.className).toContain('top-1');
+    expect(tabsIndicator.className).toContain('bottom-1');
+    expect(tabsIndicator.className).toContain('w-[calc((100%_-_8px)/3)]');
+  });
+
+  it('uses a smaller fully rounded collapsed composer shell', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const classicComposerShell = screen.getByTestId('classic-composer-shell');
+    expect(classicComposerShell.className).toContain('h-[60px]');
+    expect(classicComposerShell.className).toContain('rounded-full');
+    expect(classicComposerShell.className).not.toContain('rounded-[24px]');
+  });
+
   it('places toast notifications at the bottom right of the app shell', async () => {
     render(<App />);
 
@@ -4091,6 +4125,88 @@ describe('App header thread title', () => {
     );
   });
 
+  it('shows primary and angle tabs in add reference and moves files between them', async () => {
+    const primary = new File(['env-1'], 'env-1.png', { type: 'image/png' });
+    const angle = new File(['env-2'], 'env-2.png', { type: 'image/png' });
+    Object.defineProperty(primary, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([1, 2, 3, 4]).buffer),
+    });
+    Object.defineProperty(angle, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([5, 6, 7, 8]).buffer),
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add environment images' }));
+    fireEvent.change(screen.getByLabelText('Images'), {
+      target: { files: [primary, angle] },
+    });
+
+    expect(screen.getByRole('tab', { name: 'Ambiente' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Ângulos' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move env-1.png to Ângulos' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Ângulos' }));
+
+    expect(screen.getByText('env-1')).toBeInTheDocument();
+  });
+
+  it('shows primary and angle tabs in edit reference and moves attachments between them before save', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'environment-reference-1',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-1.png',
+        title: 'Dock angle',
+        groupTitle: 'Warehouse',
+        description: 'Old note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+      {
+        id: 'environment-reference-2',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-2.png',
+        title: 'Office corner',
+        groupTitle: 'Warehouse',
+        description: 'Existing second note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Warehouse' }));
+
+    expect(screen.getByRole('tab', { name: 'Ambiente' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Ângulos' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move env-1.png to Ângulos' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Ângulos' }));
+    expect(screen.getByText('Dock angle')).toBeInTheDocument();
+  });
+
   it('filters reference mentions after @ and inserts the selected name', async () => {
     vi.mocked(electronApi.listReferences).mockResolvedValue([
       {
@@ -4186,6 +4302,164 @@ describe('App header thread title', () => {
 
     expect(screen.getAllByRole('option', { name: 'Garagem' })).toHaveLength(1);
     expect(screen.getByText((content) => content.includes('2 angles'))).toBeInTheDocument();
+  });
+
+  it('shows attachment selector options after typing # for a grouped reference', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'hangar-wide',
+        name: 'hangar-wide.png',
+        title: 'Wide Base',
+        groupTitle: 'Hangar',
+        description: 'Master wide environment plate.',
+        groupDescription: 'Primary hangar continuity set.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+        collectionId: 'hangar-set',
+      },
+      {
+        id: 'hangar-console',
+        name: 'hangar-console.png',
+        title: 'Console Detail',
+        groupTitle: 'Hangar',
+        description: 'Close crop of the launch console lights.',
+        groupDescription: 'Primary hangar continuity set.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+        collectionId: 'hangar-set',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Use @Hangar#' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('option', { name: 'Wide Base' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Console Detail' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Hangar' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Console Detail' }));
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Hangar');
+    expect(composerInput).toHaveValue('Use Hangar#console-detail ');
+  });
+
+  it('reopens selector mode after typing # immediately after an existing mention node', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'hangar-wide',
+        name: 'hangar-wide.png',
+        title: 'Wide Base',
+        groupTitle: 'Hangar',
+        description: 'Master wide environment plate.',
+        groupDescription: 'Primary hangar continuity set.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+        collectionId: 'hangar-set',
+      },
+      {
+        id: 'hangar-console',
+        name: 'hangar-console.png',
+        title: 'Console Detail',
+        groupTitle: 'Hangar',
+        description: 'Close crop of the launch console lights.',
+        groupDescription: 'Primary hangar continuity set.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+        collectionId: 'hangar-set',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.paste(composerInput, {
+        clipboardData: {
+          files: [],
+          getData: (type: string) =>
+            type === 'text/html'
+              ? '<span data-testid="selected-reference-mention" data-mention-id="hangar-set" data-mention-title="Hangar">Hangar</span>#'
+              : 'Hangar#',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('option', { name: 'Wide Base' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Console Detail' })).toBeInTheDocument();
+  });
+
+  it('keeps the active selector option scrolled into view during keyboard navigation', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue(
+      Array.from({ length: 8 }, (_, index) => ({
+        id: `hangar-angle-${index + 1}`,
+        name: `hangar-angle-${index + 1}.png`,
+        title: `Angle ${index + 1}`,
+        groupTitle: 'Hangar',
+        description: `Angle note ${index + 1}`,
+        groupDescription: 'Primary hangar continuity set.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: `2026-05-26T12:0${index}:00.000Z`,
+        category: 'environment' as const,
+        collectionId: 'hangar-set',
+      })),
+    );
+
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const scrollIntoViewSpy = vi.mocked(HTMLElement.prototype.scrollIntoView);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Use @Hangar#' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.keyDown(composerInput, { key: 'ArrowDown' });
+      fireEvent.keyDown(composerInput, { key: 'ArrowDown' });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(scrollIntoViewSpy).toHaveBeenCalled();
+    scrollIntoViewSpy.mockRestore();
   });
 
   it('expands a selected multi-angle @ reference into all images for generation', async () => {
@@ -4444,6 +4718,83 @@ describe('App header thread title', () => {
           }),
         ],
       })
+    );
+  });
+
+  it('resolves @Reference#image selectors against per-image titles and only attaches the matched image', async () => {
+    const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
+      jobId: 'job-1',
+      assets: [],
+    });
+    generateImagesMock.mockClear();
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'hangar-wide',
+        name: 'hangar-wide.png',
+        title: 'Wide Base',
+        groupTitle: 'Hangar',
+        description: 'Master wide environment plate.',
+        groupDescription: 'Primary hangar continuity set.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+        collectionId: 'hangar-set',
+      },
+      {
+        id: 'hangar-console',
+        name: 'hangar-console.png',
+        title: 'Console Detail',
+        groupTitle: 'Hangar',
+        description: 'Close crop of the launch console lights.',
+        groupDescription: 'Primary hangar continuity set.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+        collectionId: 'hangar-set',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.paste(composerInput, {
+        clipboardData: {
+          files: [],
+          getData: (type: string) => {
+            if (type === 'text/plain') return 'Frame on @Hangar#console-detail during launch';
+            return '';
+          },
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Hangar');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(generateImagesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining('Frame on RefImage1 (Hangar - Console Detail) during launch'),
+        referenceImages: [
+          expect.objectContaining({
+            name: 'hangar-console.png',
+            title: 'RefImage1',
+            description: expect.stringContaining('Reference set: Hangar.'),
+          }),
+        ],
+      }),
     );
   });
 

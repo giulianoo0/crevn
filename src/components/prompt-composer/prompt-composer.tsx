@@ -61,11 +61,26 @@ type MentionCandidate = {
   title: string;
 };
 
+function splitMentionSelectorToken(token: string) {
+  const separatorIndex = token.search(/[#/:]/);
+  if (separatorIndex === -1) {
+    return {
+      mentionTitle: token,
+      selectorSuffix: '',
+    };
+  }
+
+  return {
+    mentionTitle: token.slice(0, separatorIndex),
+    selectorSuffix: token.slice(separatorIndex),
+  };
+}
+
 export type PromptComposerHandle = {
   focus: () => void;
   clear: () => void;
   setText: (text: string, mentionCandidates?: MentionCandidate[]) => void;
-  insertMention: (id: string, title: string, range?: { start: number; end: number }) => void;
+  insertMention: (id: string, title: string, range?: { start: number; end: number }, suffixOverride?: string) => void;
 };
 
 type PromptComposerProps = {
@@ -228,7 +243,8 @@ function parsePromptMentionText(
     const matchIndex = match.index ?? -1;
     if (matchIndex < 0) continue;
 
-    const mentionCandidate = candidatesByTitle.get(rawTitle.toLocaleLowerCase());
+    const { mentionTitle, selectorSuffix } = splitMentionSelectorToken(rawTitle);
+    const mentionCandidate = candidatesByTitle.get(mentionTitle.toLocaleLowerCase());
     if (!mentionCandidate) continue;
 
     const mentionStart = matchIndex + leadingText.length;
@@ -242,6 +258,9 @@ function parsePromptMentionText(
       id: mentionCandidate.id,
       title: mentionCandidate.title,
     });
+    if (selectorSuffix) {
+      segments.push({ type: 'text', text: selectorSuffix });
+    }
     hasMention = true;
     lastIndex = matchIndex + fullMatch.length;
   }
@@ -319,8 +338,8 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
         setText: (text: string, nextMentionCandidates = mentionCandidates) => {
           writeComposerText(editor, text, nextMentionCandidates);
         },
-        insertMention: (id: string, title: string, range) => {
-          insertMentionRef.current?.(id, title, range);
+        insertMention: (id: string, title: string, range, suffixOverride) => {
+          insertMentionRef.current?.(id, title, range, suffixOverride);
         },
       }),
       [editor, mentionCandidates],

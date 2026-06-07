@@ -36,7 +36,7 @@ type MentionPluginProps = {
   onTextChange: (text: string) => void;
   onEnterWithMention?: () => void;
   insertMentionRef: React.MutableRefObject<
-    ((id: string, title: string, range?: { start: number; end: number }) => void) | null
+    ((id: string, title: string, range?: { start: number; end: number }, suffixOverride?: string) => void) | null
   >;
 };
 
@@ -56,9 +56,17 @@ export function MentionPlugin({
   } | null>(null);
   onEnterWithMentionRef.current = onEnterWithMention;
 
+  const splitSelectorSuffix = (text: string) => {
+    const separatorIndex = text.search(/[#/:]/);
+    if (separatorIndex === -1) {
+      return { selectorSuffix: '' };
+    }
+    return { selectorSuffix: text.slice(separatorIndex) };
+  };
+
   // --- Insert mention: replace @query with a MentionNode ---
   const insertMention = useCallback(
-    (id: string, title: string, range?: { start: number; end: number }) => {
+    (id: string, title: string, range?: { start: number; end: number }, suffixOverride?: string) => {
       editor.update(() => {
         const root = $getRoot();
         const selection = $getSelection();
@@ -121,12 +129,23 @@ export function MentionPlugin({
         }
 
         const text = targetNode.getTextContent();
+        const matchedText = text.slice(matchStart + 1, matchEnd);
+        const { selectorSuffix } = splitSelectorSuffix(matchedText);
+        const resolvedSelectorSuffix = typeof suffixOverride === 'string' ? suffixOverride : selectorSuffix;
         const beforeAt = text.slice(0, matchStart);
         const afterMatch = text.slice(matchEnd);
-        const mentionNode = $createMentionNode(id, title);
+        const previousSibling = targetNode.getPreviousSibling();
+        const shouldReusePreviousMention =
+          matchStart === 0 &&
+          previousSibling &&
+          $isMentionNode(previousSibling) &&
+          previousSibling.getMentionId() === id;
+
+        const mentionNode = shouldReusePreviousMention ? null : $createMentionNode(id, title);
         const replacementNodes = [
           ...(beforeAt.length > 0 ? [$createTextNode(beforeAt)] : []),
-          mentionNode,
+          ...(mentionNode ? [mentionNode] : []),
+          ...(resolvedSelectorSuffix.length > 0 ? [$createTextNode(resolvedSelectorSuffix)] : []),
           $createTextNode(' '),
           ...(afterMatch.length > 0 ? [$createTextNode(afterMatch)] : []),
         ];
@@ -138,7 +157,9 @@ export function MentionPlugin({
           previousNode = nextNode;
         }
 
-        const spaceNode = replacementNodes[replacementNodes.indexOf(mentionNode) + 1];
+        const spaceNode =
+          replacementNodes.find((node) => node instanceof TextNode && node.getTextContent() === ' ') ??
+          replacementNodes[replacementNodes.length - 1];
         spaceNode.select();
         latestMentionMatchRef.current = null;
       });
@@ -202,6 +223,7 @@ export function MentionPlugin({
           .getTextContent()
           .slice(0, anchor.offset);
         const matchResult = textUpToCursor.match(/@([^\s@]*)$/);
+        const selectorMatchResult = textUpToCursor.match(/[#/:]([^\s@]*)$/);
 
         if (matchResult && matchResult.index !== undefined) {
           latestMentionMatchRef.current = {
@@ -212,6 +234,22 @@ export function MentionPlugin({
           onMentionMatch({
             query: matchResult[1].toLowerCase(),
             start: globalNodeOffset + matchResult.index,
+          });
+        } else if (
+          selectorMatchResult &&
+          selectorMatchResult.index !== undefined &&
+          anchorNode.getPreviousSibling() &&
+          $isMentionNode(anchorNode.getPreviousSibling())
+        ) {
+          const previousMentionNode = anchorNode.getPreviousSibling();
+          latestMentionMatchRef.current = {
+            nodeKey: anchorNode.getKey(),
+            offset: anchor.offset,
+            start: selectorMatchResult.index,
+          };
+          onMentionMatch({
+            query: `${previousMentionNode.getMentionTitle()}${selectorMatchResult[0].toLowerCase()}`,
+            start: globalNodeOffset + selectorMatchResult.index,
           });
         } else {
           latestMentionMatchRef.current = null;

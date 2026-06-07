@@ -14,6 +14,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  Fragment,
   type RefObject,
   type CSSProperties,
 } from 'react';
@@ -560,9 +561,10 @@ function formatDurationBetween(startValue: string, endValue: string) {
 }
 
 function estimateHeaderTitleWidth(title: string, includesSidebarToggle: boolean) {
-  const baseShellWidth = 24 + 24 + 2;
-  const toggleWidth = includesSidebarToggle ? 36 + 8 : 0;
-  return Math.ceil(baseShellWidth + toggleWidth + Math.max(title.length, 8) * 9.5);
+  const headerHorizontalPadding = 10 * 2;
+  const shellBorderWidth = 2;
+  const toggleWidth = includesSidebarToggle ? 28 + 8 : 0;
+  return Math.ceil(headerHorizontalPadding + shellBorderWidth + toggleWidth + Math.max(title.length, 8) * 8.3);
 }
 
 function buildHeaderTitleText(threadTitle: string, chatTitle: string | null) {
@@ -782,6 +784,139 @@ function getSharedReferenceTitle(reference: Pick<SavedReferenceImage, 'title' | 
   return reference.groupTitle?.trim() || reference.title;
 }
 
+function getReferenceMentionLookupQuery(query: string) {
+  return query.split(/[#/:]/, 1)[0]?.toLowerCase() ?? '';
+}
+
+function splitReferenceMentionQuery(query: string) {
+  const match = query.match(/^([^#/:]*)([#/:]?)(.*)$/);
+  return {
+    baseQuery: match?.[1]?.toLowerCase() ?? '',
+    separator: match?.[2] ?? '',
+    selectorQuery: match?.[3]?.toLowerCase() ?? '',
+  };
+}
+
+function normalizeReferenceSelectorValue(value: string) {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\.[^/.]+$/, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function slugifyReferenceSelectorValue(value: string) {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .trim();
+}
+
+function extractReferenceSelectorMatches(promptText: string, mentionTitle: string) {
+  if (!promptText.trim() || !mentionTitle.trim()) {
+    return [];
+  }
+
+  const pattern = new RegExp(
+    `(^|[\\s([{'"\`])(${escapeRegExp(mentionTitle)})([#/:][^\\s.,!?;:()\\[\\]{}'"\\\`]+)`,
+    'gi',
+  );
+  const matches: Array<{ matchText: string; selectorText: string }> = [];
+
+  for (const match of promptText.matchAll(pattern)) {
+    const matchedTitle = match[2];
+    const matchedSelector = match[3];
+    if (!matchedTitle || !matchedSelector) {
+      continue;
+    }
+
+    matches.push({
+      matchText: `${matchedTitle}${matchedSelector}`,
+      selectorText: matchedSelector.slice(1),
+    });
+  }
+
+  return matches;
+}
+
+function referenceMatchesSelector(reference: SavedReferenceImage, selectorText: string) {
+  const normalizedSelector = normalizeReferenceSelectorValue(selectorText);
+  if (!normalizedSelector) {
+    return false;
+  }
+
+  const candidates = [
+    reference.title,
+    deriveReferenceAttachmentTitle(reference.name),
+    reference.name,
+    reference.description ?? '',
+  ]
+    .map(normalizeReferenceSelectorValue)
+    .filter((value) => value.length > 0);
+
+  return candidates.some(
+    (candidate) =>
+      candidate === normalizedSelector ||
+      candidate.includes(normalizedSelector) ||
+      normalizedSelector.includes(candidate),
+  );
+}
+
+type ResolvedSavedReferenceSelection = {
+  reference: SavedReferenceImage;
+  mentionTitle: string;
+  groupSize: number;
+  selectorApplied: boolean;
+  matchText: string;
+};
+
+type ReferenceSelectorOption = {
+  id: string;
+  title: string;
+  description: string;
+  previewUrl: string;
+  insertId: string;
+  insertTitle: string;
+  selectorSuffix?: string;
+  section?: 'primary' | 'angles';
+};
+
+function resolveReferenceSelectorGroup(
+  groups: SavedReferenceMentionGroup[],
+  baseQuery: string,
+): SavedReferenceMentionGroup | null {
+  if (!baseQuery) {
+    return null;
+  }
+
+  const normalizedBaseQuery = normalizeReferenceSelectorValue(baseQuery);
+  if (!normalizedBaseQuery) {
+    return null;
+  }
+
+  const exactMatch =
+    groups.find((group) => normalizeReferenceSelectorValue(group.title) === normalizedBaseQuery) ?? null;
+  if (exactMatch) {
+    return exactMatch;
+  }
+
+  const partialMatches = groups.filter((group) =>
+    normalizeReferenceSelectorValue(group.title).includes(normalizedBaseQuery),
+  );
+  return partialMatches.length === 1 ? partialMatches[0] : null;
+}
+
+type ReferenceImageBucket = 'primary' | 'angles';
+
+function getReferencePrimaryTabLabel(route: ReferenceLibraryRoute) {
+  return route === 'environment' ? 'Ambiente' : route === 'characters' ? 'Personagem' : 'Objeto';
+}
+
 function buildSavedReferenceMentionGroups(savedReferences: SavedReferenceImage[]): SavedReferenceMentionGroup[] {
   const groups = new Map<string, SavedReferenceImage[]>();
 
@@ -829,6 +964,92 @@ function resolveSavedReferencesFromMentionIds(
   }
 
   return [...resolved.values()];
+}
+
+function resolveSavedReferenceSelections(
+  savedReferences: SavedReferenceImage[],
+  selectedReferenceIds: string[],
+  promptText: string,
+): ResolvedSavedReferenceSelection[] {
+  const selectedIds = new Set(selectedReferenceIds);
+  const groups = new Map<string, SavedReferenceImage[]>();
+
+  for (const reference of savedReferences) {
+    const groupId = getSavedReferenceMentionGroupId(reference);
+    groups.set(groupId, [...(groups.get(groupId) ?? []), reference]);
+  }
+
+  const resolved = new Map<string, ResolvedSavedReferenceSelection>();
+
+  for (const [groupId, references] of groups.entries()) {
+    const exactSelections = references.filter((reference) => selectedIds.has(reference.id));
+    const isGroupSelected = selectedIds.has(groupId);
+
+    if (!isGroupSelected && exactSelections.length === 0) {
+      continue;
+    }
+
+    const mentionTitle = getSharedReferenceTitle(references[0]);
+    const selectorMatches = isGroupSelected ? extractReferenceSelectorMatches(promptText, mentionTitle) : [];
+    const matchedBySelector = new Map<string, { reference: SavedReferenceImage; matchText: string }>();
+
+    for (const selectorMatch of selectorMatches) {
+      const matchedReference = references.find((reference) =>
+        referenceMatchesSelector(reference, selectorMatch.selectorText),
+      );
+      if (!matchedReference || matchedBySelector.has(matchedReference.id)) {
+        continue;
+      }
+      matchedBySelector.set(matchedReference.id, {
+        reference: matchedReference,
+        matchText: selectorMatch.matchText,
+      });
+    }
+
+    if (matchedBySelector.size > 0) {
+      for (const { reference, matchText } of matchedBySelector.values()) {
+        resolved.set(reference.id, {
+          reference,
+          mentionTitle,
+          groupSize: references.length,
+          selectorApplied: true,
+          matchText,
+        });
+      }
+      continue;
+    }
+
+    const fallbackReferences = isGroupSelected ? references : exactSelections;
+    for (const reference of fallbackReferences) {
+      if (resolved.has(reference.id)) {
+        continue;
+      }
+      resolved.set(reference.id, {
+        reference,
+        mentionTitle,
+        groupSize: references.length,
+        selectorApplied: false,
+        matchText: mentionTitle,
+      });
+    }
+  }
+
+  return [...resolved.values()];
+}
+
+function buildSavedReferenceDescription(selection: ResolvedSavedReferenceSelection) {
+  const parts = [];
+  if (selection.groupSize > 1) {
+    parts.push(`Reference set: ${selection.mentionTitle}.`);
+    parts.push(`Image title: ${selection.reference.title}.`);
+  }
+  if (selection.reference.groupDescription?.trim()) {
+    parts.push(selection.reference.groupDescription.trim());
+  }
+  if (selection.reference.description?.trim()) {
+    parts.push(selection.reference.description.trim());
+  }
+  return parts.join(' ').trim() || undefined;
 }
 
 type ComposerGenerationMode = (typeof generationModeOptions)[number]['value'];
@@ -1549,6 +1770,7 @@ export function App() {
       ? activeDirectorChat.title
       : null;
   const referenceMentionMatch = promptMentionMatch;
+  const referenceMentionOptionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const isUpdateBusy =
     isCheckingUpdates || updateStatus?.state === 'checking' || updateStatus?.state === 'downloading';
   const canInstallUpdate = updateStatus?.state === 'downloaded';
@@ -1609,16 +1831,47 @@ export function App() {
     () => buildSavedReferenceMentionGroups(savedReferences),
     [savedReferences]
   );
-  const referenceMentionOptions = useMemo(() => {
+  const referenceMentionOptions = useMemo<ReferenceSelectorOption[]>(() => {
     if (!referenceMentionMatch) return [];
+
+    const { baseQuery, separator, selectorQuery } = splitReferenceMentionQuery(referenceMentionMatch.query);
+    const selectorGroup =
+      separator !== '' ? resolveReferenceSelectorGroup(savedReferenceMentionGroups, baseQuery) : null;
+
+    if (selectorGroup) {
+      const sortedReferences = [...selectorGroup.references].sort((left, right) => {
+        if (left.createdAt !== right.createdAt) {
+          return left.createdAt.localeCompare(right.createdAt);
+        }
+        return left.id.localeCompare(right.id);
+      });
+      return sortedReferences
+        .map((reference, index) => ({
+          id: `${selectorGroup.id}:${reference.id}`,
+          title: reference.title,
+          description: reference.description ?? selectorGroup.description,
+          previewUrl: reference.previewUrl,
+          insertId: selectorGroup.id,
+          insertTitle: selectorGroup.title,
+          selectorSuffix: `#${slugifyReferenceSelectorValue(reference.title || deriveReferenceAttachmentTitle(reference.name))}`,
+          section: index === 0 ? 'primary' : 'angles',
+        }))
+        .filter((option) =>
+          selectorQuery
+            ? option.title.toLowerCase().includes(selectorQuery) ||
+              option.selectorSuffix?.slice(1).includes(slugifyReferenceSelectorValue(selectorQuery))
+            : true,
+        )
+        .slice(0, 24);
+    }
 
     const savedOpts = savedReferenceMentionGroups.map((group) => ({
       id: group.id,
       title: group.title,
       description: group.description,
       previewUrl: group.previewUrl,
-      isSaved: true,
-      reference: group,
+      insertId: group.id,
+      insertTitle: group.title,
     }));
 
     const attachedOpts = referenceImages.map((img) => {
@@ -1628,15 +1881,17 @@ export function App() {
         title: titleWithoutExt,
         description: 'Attached inline image',
         previewUrl: img.previewUrl,
-        isSaved: false,
-        reference: img,
+        insertId: img.id,
+        insertTitle: titleWithoutExt,
       };
     });
 
     const combined = [...savedOpts, ...attachedOpts];
 
     return combined
-      .filter((option) => option.title.toLowerCase().includes(referenceMentionMatch.query))
+      .filter((option) =>
+        option.title.toLowerCase().includes(getReferenceMentionLookupQuery(referenceMentionMatch.query)),
+      )
       .slice(0, 24);
   }, [referenceMentionMatch, savedReferenceMentionGroups, referenceImages]);
   const referenceMentionCandidates = useMemo(
@@ -1656,6 +1911,17 @@ export function App() {
   useEffect(() => {
     setActiveReferenceMentionIndex(0);
   }, [referenceMentionMatch?.query, referenceMentionOptions.length]);
+
+  useEffect(() => {
+    if (referenceMentionOptions.length === 0) {
+      referenceMentionOptionRefs.current = [];
+      return;
+    }
+
+    referenceMentionOptionRefs.current[activeReferenceMentionIndex]?.scrollIntoView?.({
+      block: 'nearest',
+    });
+  }, [activeReferenceMentionIndex, referenceMentionOptions]);
 
   const selectedPromptReferences = useMemo(() => {
     const savedRefs = resolveSavedReferencesFromMentionIds(savedReferences, selectedPromptReferenceIds);
@@ -1682,12 +1948,13 @@ export function App() {
     setIsFocused(true);
   }, []);
 
-  const insertReferenceMention = useCallback((option: { id: string; title: string }) => {
+  const insertReferenceMention = useCallback((option: ReferenceSelectorOption) => {
     const range = getReferenceMentionReplacementRange(referenceMentionMatch, cursorIndex);
     activeComposerRef.current?.insertMention(
-      option.id,
-      option.title,
-      range
+      option.insertId,
+      option.insertTitle,
+      range,
+      option.selectorSuffix,
     );
     holdComposerOpen();
   }, [activeComposerRef, cursorIndex, holdComposerOpen, referenceMentionMatch]);
@@ -2370,23 +2637,22 @@ export function App() {
       );
     }
 
-    const selectedSavedReferences = resolveSavedReferencesFromMentionIds(savedReferences, selectedPromptReferenceIds);
+    const selectedSavedReferences = resolveSavedReferenceSelections(
+      savedReferences,
+      selectedPromptReferenceIds,
+      prompt.trim(),
+    );
     const seenDirectorReferenceBytes = new Set<string>();
     const referencePayload = [
-      ...selectedSavedReferences.map((reference) => {
+      ...selectedSavedReferences.map((selection) => {
+        const reference = selection.reference;
         seenDirectorReferenceBytes.add(reference.bytesBase64);
-        const groupSize = savedReferences.filter(
-          (item) => getSavedReferenceMentionGroupId(item) === getSavedReferenceMentionGroupId(reference)
-        ).length;
         return {
           name: reference.name,
           mimeType: reference.mimeType,
           bytesBase64: reference.bytesBase64,
           title: reference.title,
-          description:
-            groupSize > 1
-              ? [`Multiple-angle reference set: ${reference.title}.`, reference.description].filter(Boolean).join(' ')
-              : reference.description,
+          description: buildSavedReferenceDescription(selection),
         };
       }),
       ...referenceImages
@@ -3563,30 +3829,39 @@ export function App() {
         currentReferenceImages = [...currentReferenceImages, ...rehydratedGeneratedReferences];
       }
 
-      const uniqueReferenceImages = [];
+      const uniqueReferenceImages: Array<{
+        name: string;
+        title: string;
+        description?: string;
+        mimeType: string;
+        bytesBase64: string;
+        matchText: string;
+        promptLabel: string;
+      }> = [];
       const seenBytes = new Set<string>();
 
       // 1. Add mentioned saved references
-      const selectedSavedReferences = resolveSavedReferencesFromMentionIds(
+      const selectedSavedReferences = resolveSavedReferenceSelections(
         currentSavedReferences,
-        currentSelectedPromptReferenceIds
+        currentSelectedPromptReferenceIds,
+        trimmedPrompt,
       );
-      for (const ref of selectedSavedReferences) {
+      for (const selection of selectedSavedReferences) {
+        const ref = selection.reference;
         if (ref.bytesBase64) {
           seenBytes.add(ref.bytesBase64);
         }
-        const groupSize = currentSavedReferences.filter(
-          (reference) => getSavedReferenceMentionGroupId(reference) === getSavedReferenceMentionGroupId(ref)
-        ).length;
         uniqueReferenceImages.push({
           name: ref.name,
           title: ref.title,
-          description:
-            groupSize > 1
-              ? [`Multiple-angle reference set: ${ref.title}.`, ref.description].filter(Boolean).join(' ')
-              : ref.description ?? undefined,
+          description: buildSavedReferenceDescription(selection),
           mimeType: ref.mimeType,
           bytesBase64: ref.bytesBase64,
+          matchText: selection.matchText,
+          promptLabel:
+            selection.groupSize > 1 && selection.selectorApplied
+              ? `${selection.mentionTitle} - ${ref.title}`
+              : selection.mentionTitle,
         });
       }
 
@@ -3600,9 +3875,11 @@ export function App() {
         }
         uniqueReferenceImages.push({
           name: img.name,
-          title: img.name.replace(/\.[^/.]+$/, ""),
+          title: img.name.replace(/\.[^/.]+$/, ''),
           mimeType: img.mimeType,
           bytesBase64: img.bytesBase64,
+          matchText: img.name.replace(/\.[^/.]+$/, ''),
+          promptLabel: img.name.replace(/\.[^/.]+$/, ''),
         });
       }
 
@@ -3610,12 +3887,12 @@ export function App() {
       let mappedPrompt = trimmedPrompt;
       const refsForReplacementByTitle = new Map<string, { title: string; placeholder: string }>();
       uniqueReferenceImages.forEach((ref, index) => {
-        if (!ref.title || refsForReplacementByTitle.has(ref.title)) {
+        if (!ref.matchText || refsForReplacementByTitle.has(ref.matchText)) {
           return;
         }
-        refsForReplacementByTitle.set(ref.title, {
-          title: ref.title,
-          placeholder: `RefImage${index + 1} (${ref.title})`,
+        refsForReplacementByTitle.set(ref.matchText, {
+          title: ref.matchText,
+          placeholder: `RefImage${index + 1} (${ref.promptLabel})`,
         });
       });
       const sortedRefsForReplacement = [...refsForReplacementByTitle.values()].sort(
@@ -4503,7 +4780,7 @@ export function App() {
         measuredWidth > 0
           ? measuredWidth > nextHeaderWidth
           : estimateHeaderTitleWidth(estimatedTitle, isSidebarCollapsed) > nextHeaderWidth;
-      const shellChromeWidth = (isSidebarCollapsed ? 36 + 8 : 0) + 24 + 24 + 2;
+      const shellChromeWidth = (isSidebarCollapsed ? 28 + 8 : 0) + 20 + 20 + 2;
       const nextTextWidth = isHeaderClamped
         ? Math.max(64, nextHeaderWidth - shellChromeWidth)
         : measuredTextWidth > 0
@@ -4954,20 +5231,20 @@ export function App() {
               <div
                 ref={headerMeasureRef}
                 aria-hidden="true"
-                className="pointer-events-none absolute left-0 top-0 inline-flex h-12 items-center rounded-full border border-transparent px-3 opacity-0"
+                className="pointer-events-none absolute left-0 top-0 inline-flex h-9 items-center rounded-full border border-transparent px-2.5 opacity-0"
               >
                 <div
                   className="overflow-hidden"
                   style={{
-                    width: isSidebarCollapsed ? 36 : 0,
+                    width: isSidebarCollapsed ? 28 : 0,
                     marginRight: isSidebarCollapsed ? 8 : 0,
                   }}
                 >
-                  <span className="block h-9 w-9" />
+                  <span className="block h-7 w-7" />
                 </div>
                 <div
                   ref={headerTitleMeasureRef}
-                  className="inline-flex items-center whitespace-nowrap text-[18px] font-medium leading-none tracking-[0] text-transparent"
+                  className="inline-flex items-center whitespace-nowrap text-[16px] font-medium leading-none tracking-[0] text-transparent"
                 >
                   <span ref={headerThreadMeasureRef}>{activeThreadTitle}</span>
                   {activeHeaderChatTitle ? (
@@ -4985,8 +5262,9 @@ export function App() {
                   animate={{ opacity: 1, filter: 'blur(0px)', y: 0 }}
                   exit={{ opacity: 0, filter: 'blur(6px)', y: -3 }}
                   transition={{ duration: 0.24, ease: [0.23, 1, 0.32, 1] }}
+                  data-testid="thread-header-chrome"
                 className={[
-                  't-resize flex h-12 items-center overflow-hidden px-3',
+                  't-resize flex h-9 items-center overflow-hidden px-2.5',
                   isScenesWorkspace
                     ? 'rounded-full border border-[var(--border-soft)] bg-[var(--surface)] shadow-none backdrop-blur-none'
                     : 'rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] shadow-[0_10px_30px_rgba(0,0,0,0.3)] backdrop-blur-2xl',
@@ -4996,7 +5274,7 @@ export function App() {
                   <motion.div
                     initial={false}
                     animate={{
-                      width: isSidebarCollapsed ? 36 : 0,
+                      width: isSidebarCollapsed ? 28 : 0,
                       opacity: isSidebarCollapsed ? 1 : 0,
                       marginRight: isSidebarCollapsed ? 8 : 0,
                     }}
@@ -5007,16 +5285,19 @@ export function App() {
                       type="button"
                       aria-label="Expand sidebar"
                       onClick={() => setIsSidebarCollapsed(false)}
-                      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-transparent hover:text-[var(--foreground)]"
+                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-transparent hover:text-[var(--foreground)]"
                     >
-                      <PanelLeftOpen className="size-4" />
+                      <PanelLeftOpen className="size-3.5" />
                     </button>
                   </motion.div>
                   <h1
                     className="flex h-full min-w-0 shrink items-center justify-start overflow-hidden text-left leading-none"
                     style={headerTextWidth ? { width: `${headerTextWidth}px` } : undefined}
                   >
-                    <div className="flex min-w-0 max-w-full items-center overflow-hidden whitespace-nowrap align-middle text-left text-[18px] font-medium leading-none tracking-[0] text-[var(--foreground)]">
+                    <div
+                      data-testid="thread-header-title-text"
+                      className="flex min-w-0 max-w-full items-center overflow-hidden whitespace-nowrap align-middle text-left text-[16px] font-medium leading-none tracking-[0] text-[var(--foreground)]"
+                    >
                       <AnimatePresence mode="wait" initial={false}>
                         <motion.span
                           key={activeThreadTitle}
@@ -5711,50 +5992,60 @@ export function App() {
                 onMouseDown={holdComposerOpen}
               >
                 {referenceMentionOptions.map((reference, index) => (
-                  <button
-                    key={reference.id}
-                    type="button"
-                    role="option"
-                    aria-label={reference.title}
-                    aria-selected={index === activeReferenceMentionIndex}
-                    onMouseEnter={() => setActiveReferenceMentionIndex(index)}
-                    onClick={() => insertReferenceMention(reference)}
-                    className={[
-                      'flex w-full items-center gap-3 rounded-[14px] px-2.5 py-2 text-left transition-colors hover:bg-white/6',
-                      index === activeReferenceMentionIndex ? 'bg-white/8 ring-1 ring-white/10' : '',
-                    ].join(' ')}
-                  >
-                    <img
-                      src={reference.previewUrl}
-                      alt=""
-                      className="h-8 w-8 shrink-0 rounded-[10px] object-cover"
-                    />
-                    <span className="min-w-0">
-                      <span className="block truncate text-[13px] font-medium text-[var(--foreground)]">
-                        {reference.title}
-                      </span>
-                      {reference.description ? (
-                        <span className="block truncate text-[12px] text-[var(--muted-foreground)]">
-                          {reference.description}
+                  <Fragment key={reference.id}>
+                    {index > 0 && reference.section && reference.section !== referenceMentionOptions[index - 1]?.section ? (
+                      <div className="mx-2 my-1 border-t border-white/8 pt-1 text-[11px] text-[var(--muted-foreground)]">
+                        {reference.section === 'primary' ? 'Referência principal' : 'Ângulos'}
+                      </div>
+                    ) : null}
+                    <button
+                      ref={(node) => {
+                        referenceMentionOptionRefs.current[index] = node;
+                      }}
+                      type="button"
+                      role="option"
+                      aria-label={reference.title}
+                      aria-selected={index === activeReferenceMentionIndex}
+                      onMouseEnter={() => setActiveReferenceMentionIndex(index)}
+                      onClick={() => insertReferenceMention(reference)}
+                      className={[
+                        'flex w-full items-center gap-3 rounded-[14px] px-2.5 py-2 text-left transition-colors hover:bg-white/6',
+                        index === activeReferenceMentionIndex ? 'bg-white/8 ring-1 ring-white/10' : '',
+                      ].join(' ')}
+                    >
+                      <img
+                        src={reference.previewUrl}
+                        alt=""
+                        className="h-8 w-8 shrink-0 rounded-[10px] object-cover"
+                      />
+                      <span className="min-w-0">
+                        <span className="block truncate text-[13px] font-medium text-[var(--foreground)]">
+                          {reference.title}
                         </span>
-                      ) : null}
-                    </span>
-                  </button>
+                        {reference.description ? (
+                          <span className="block truncate text-[12px] text-[var(--muted-foreground)]">
+                            {reference.description}
+                          </span>
+                        ) : null}
+                      </span>
+                    </button>
+                  </Fragment>
                 ))}
               </motion.div>
             ) : null}
           </AnimatePresence>
 
           <div
+            data-testid="classic-composer-shell"
             className={[
-              'prompt-composer-card relative overflow-hidden rounded-[24px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)]',
+              'prompt-composer-card relative overflow-hidden border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)]',
               'shadow-[0_24px_72px_rgba(0,0,0,0.45)] backdrop-blur-2xl',
               'transition-[height,padding] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
               isExpanded
                 ? hasReferenceImages
-                  ? 'h-[268px] px-5 pb-5 pt-5'
-                  : 'h-[228px] px-5 pb-5 pt-5'
-                : 'h-[64px] px-4 py-3',
+                  ? 'h-[268px] rounded-[24px] px-5 pb-5 pt-5'
+                  : 'h-[228px] rounded-[24px] px-5 pb-5 pt-5'
+                : 'h-[60px] rounded-full px-3.5 py-2.5',
             ].join(' ')}
             style={COMPOSER_GLASS_STYLE}
             onPointerDown={focusComposerFromEvent}
@@ -6203,6 +6494,7 @@ export function App() {
         onMentionOptionHover={setActiveReferenceMentionIndex}
         leftInset={isSidebarCollapsed ? 16 : 276}
         rightInset={scenesSidebarWidth + 40}
+        optionRefs={referenceMentionOptionRefs}
       />
       ) : null}
       </AnimatePresence>
@@ -6291,13 +6583,17 @@ function GenerationWorkspaceTabs({
   const activeIndex = options.findIndex((option) => option.value === selectedMode);
 
   return (
-    <div className="relative inline-grid h-12 grid-cols-3 items-center rounded-full bg-[rgba(15,16,16,0.88)] p-1 shadow-[0_10px_30px_rgba(0,0,0,0.3)] backdrop-blur-2xl">
+    <div
+      data-testid="generation-workspace-tabs"
+      className="relative inline-grid h-9 grid-cols-3 items-center rounded-full bg-[rgba(15,16,16,0.88)] p-1 shadow-[0_10px_30px_rgba(0,0,0,0.3)] backdrop-blur-2xl"
+    >
       <motion.span
+        data-testid="generation-workspace-tabs-indicator"
         aria-hidden="true"
         initial={false}
         animate={{ x: `${Math.max(0, activeIndex) * 100}%` }}
         transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
-        className="absolute bottom-1 left-1 top-1 w-[calc(33.333%_-_5px)] rounded-full bg-[var(--border-soft)]"
+        className="absolute bottom-1 left-1 top-1 w-[calc((100%_-_8px)/3)] rounded-full bg-[var(--border-soft)]"
       />
       {options.map((option) => {
         const isSelected = option.value === selectedMode;
@@ -6310,7 +6606,7 @@ function GenerationWorkspaceTabs({
             aria-pressed={isSelected}
             onClick={() => onSelectMode(option.value)}
             className={[
-              'relative z-10 inline-flex h-10 min-w-[84px] items-center justify-center rounded-full px-5 text-[13px] font-medium tracking-[0] transition-colors duration-200',
+              'relative z-10 inline-flex h-7 min-w-[82px] items-center justify-center rounded-full px-4 text-[12px] font-medium tracking-[0] transition-colors duration-200',
               isSelected
                 ? 'text-[var(--foreground)]'
                 : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
@@ -7670,18 +7966,14 @@ function DirectorComposerBar({
   onMentionOptionHover,
   leftInset,
   rightInset,
+  optionRefs,
 }: {
   inputId: string;
   prompt: string;
   isExpanded: boolean;
   hasReferenceImages: boolean;
   referenceImages: ComposerReferenceImage[];
-  referenceMentionOptions: Array<{
-    id: string;
-    title: string;
-    description: string;
-    previewUrl: string;
-  }>;
+  referenceMentionOptions: ReferenceSelectorOption[];
   referenceMentionCandidates: Array<{ id: string; title: string }>;
   activeReferenceMentionIndex: number;
   popoverBottom: number;
@@ -7708,7 +8000,7 @@ function DirectorComposerBar({
   onAppendReferenceImages: (files: FileList | File[]) => void;
   onOpenReference: (referenceImage: ComposerReferenceImage) => void;
   onRemoveReference: (referenceId: string) => void;
-  onInsertReferenceMention: (reference: { id: string; title: string }) => void;
+  onInsertReferenceMention: (reference: ReferenceSelectorOption) => void;
   onKeepOpen: (event?: Event | SyntheticEvent | ReactMouseEvent<HTMLElement>) => void;
   onOpenModelPicker: (open: boolean) => void;
   onProviderChange: (providerId: 'codex' | 'antigravity') => void;
@@ -7724,6 +8016,7 @@ function DirectorComposerBar({
   onMentionOptionHover: (index: number) => void;
   leftInset: number;
   rightInset: number;
+  optionRefs: RefObject<Array<HTMLButtonElement | null>>;
 }) {
   const pointerMentionSelectionRef = useRef(false);
 
@@ -7751,56 +8044,70 @@ function DirectorComposerBar({
               onMouseDown={onKeepOpen}
             >
               {referenceMentionOptions.map((reference, index) => (
-                <button
-                  key={reference.id}
-                  type="button"
-                  role="option"
-                  aria-label={reference.title}
-                  aria-selected={index === activeReferenceMentionIndex}
-                  onPointerDown={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    pointerMentionSelectionRef.current = true;
-                    onKeepOpen(event);
-                    onInsertReferenceMention(reference);
-                    window.setTimeout(() => {
-                      pointerMentionSelectionRef.current = false;
-                    }, 0);
-                  }}
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    onKeepOpen(event);
-                  }}
-                  onMouseEnter={() => onMentionOptionHover(index)}
-                  onClick={() => {
-                    if (pointerMentionSelectionRef.current) {
-                      return;
-                    }
-                    onInsertReferenceMention(reference);
-                  }}
-                  className={[
-                    'flex w-full items-center gap-3 rounded-[14px] px-2.5 py-2 text-left transition-colors hover:bg-white/6',
-                    index === activeReferenceMentionIndex ? 'bg-white/8 ring-1 ring-white/10' : '',
-                  ].join(' ')}
-                >
-                  <img src={reference.previewUrl} alt="" className="h-8 w-8 shrink-0 rounded-[10px] object-cover" />
-                  <span className="min-w-0">
-                    <span className="block truncate text-[13px] font-medium text-[var(--foreground)]">{reference.title}</span>
-                    <span className="block truncate text-[12px] text-[var(--muted-foreground)]">{reference.description}</span>
-                  </span>
-                </button>
+                <Fragment key={reference.id}>
+                  {index > 0 && reference.section && reference.section !== referenceMentionOptions[index - 1]?.section ? (
+                    <div className="mx-2 my-1 border-t border-white/8 pt-1 text-[11px] text-[var(--muted-foreground)]">
+                      {reference.section === 'primary' ? 'Referência principal' : 'Ângulos'}
+                    </div>
+                  ) : null}
+                  <button
+                    ref={(node) => {
+                      optionRefs.current[index] = node;
+                    }}
+                    type="button"
+                    role="option"
+                    aria-label={reference.title}
+                    aria-selected={index === activeReferenceMentionIndex}
+                    onPointerDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      pointerMentionSelectionRef.current = true;
+                      onKeepOpen(event);
+                      onInsertReferenceMention(reference);
+                      window.setTimeout(() => {
+                        pointerMentionSelectionRef.current = false;
+                      }, 0);
+                    }}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onKeepOpen(event);
+                    }}
+                    onMouseEnter={() => onMentionOptionHover(index)}
+                    onClick={() => {
+                      if (pointerMentionSelectionRef.current) {
+                        return;
+                      }
+                      onInsertReferenceMention(reference);
+                    }}
+                    className={[
+                      'flex w-full items-center gap-3 rounded-[14px] px-2.5 py-2 text-left transition-colors hover:bg-white/6',
+                      index === activeReferenceMentionIndex ? 'bg-white/8 ring-1 ring-white/10' : '',
+                    ].join(' ')}
+                  >
+                    <img src={reference.previewUrl} alt="" className="h-8 w-8 shrink-0 rounded-[10px] object-cover" />
+                    <span className="min-w-0">
+                      <span className="block truncate text-[13px] font-medium text-[var(--foreground)]">{reference.title}</span>
+                      <span className="block truncate text-[12px] text-[var(--muted-foreground)]">{reference.description}</span>
+                    </span>
+                  </button>
+                </Fragment>
               ))}
             </motion.div>
           ) : null}
         </AnimatePresence>
 
         <div
+          data-testid="director-composer-shell"
           className={[
-            'prompt-composer-card relative overflow-hidden rounded-[24px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)]',
+            'prompt-composer-card relative overflow-hidden border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)]',
             'shadow-[0_24px_72px_rgba(0,0,0,0.45)] backdrop-blur-2xl',
             'transition-[height,padding] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
-            isExpanded ? (hasReferenceImages ? 'h-[248px] px-5 pb-5 pt-5' : 'h-[208px] px-5 pb-5 pt-5') : 'h-[64px] px-4 py-3',
+            isExpanded
+              ? hasReferenceImages
+                ? 'h-[248px] rounded-[24px] px-5 pb-5 pt-5'
+                : 'h-[208px] rounded-[24px] px-5 pb-5 pt-5'
+              : 'h-[60px] rounded-full px-3.5 py-2.5',
           ].join(' ')}
           style={COMPOSER_GLASS_STYLE}
           onPointerDown={onSurfaceInteract}
@@ -8052,7 +8359,7 @@ function SceneInputCard({
     if (!mentionMatch) return [];
 
     return mentionCandidates
-      .filter((reference) => reference.title.toLowerCase().includes(mentionMatch.query))
+      .filter((reference) => reference.title.toLowerCase().includes(getReferenceMentionLookupQuery(mentionMatch.query)))
       .slice(0, 5);
   }, [mentionCandidates, mentionMatch]);
 
@@ -8735,7 +9042,9 @@ function ImagePlayerDialog({
     }));
 
     return [...savedOpts, ...characterOpts]
-      .filter((option) => option.title.toLowerCase().includes(extraPromptMentionMatch.query))
+      .filter((option) =>
+        option.title.toLowerCase().includes(getReferenceMentionLookupQuery(extraPromptMentionMatch.query)),
+      )
       .slice(0, 5);
   }, [extraPromptMentionMatch, savedReferences, session]);
 
@@ -9688,11 +9997,13 @@ function AddReferenceDialog({
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [attachmentMetadata, setAttachmentMetadata] = useState<Record<string, { title: string; description: string }>>({});
+  const [attachmentBuckets, setAttachmentBuckets] = useState<Record<string, ReferenceImageBucket>>({});
   const [isAttachmentMetadataDialogOpen, setIsAttachmentMetadataDialogOpen] = useState(false);
   const [editingAttachmentKey, setEditingAttachmentKey] = useState<string | null>(null);
   const [attachmentTitleDraft, setAttachmentTitleDraft] = useState('');
   const [attachmentDescriptionDraft, setAttachmentDescriptionDraft] = useState('');
   const [isGeneratingDescriptions, setIsGeneratingDescriptions] = useState(false);
+  const [activeImageTab, setActiveImageTab] = useState<ReferenceImageBucket>('primary');
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const trimmedTitle = title.trim();
   const selectedFilePreviews = useMemo(
@@ -9713,11 +10024,13 @@ function AddReferenceDialog({
         setTitle('');
         setDescription('');
         setAttachmentMetadata({});
+        setAttachmentBuckets({});
         setIsAttachmentMetadataDialogOpen(false);
         setEditingAttachmentKey(null);
         setAttachmentTitleDraft('');
         setAttachmentDescriptionDraft('');
         setIsGeneratingDescriptions(false);
+        setActiveImageTab('primary');
         return;
       }
 
@@ -9733,6 +10046,11 @@ function AddReferenceDialog({
               },
             ])
           )
+        );
+        setAttachmentBuckets(
+          Object.fromEntries(
+            initialFiles.map((file, index) => [buildAttachmentKey(file), index === 0 ? 'primary' : 'angles']),
+          ),
         );
       }
   }, [initialFiles, initialRoute, open]);
@@ -9777,6 +10095,17 @@ function AddReferenceDialog({
       }
       return next;
     });
+    setAttachmentBuckets((current) => {
+      const next = { ...current };
+      const hasPrimary = Object.values(next).includes('primary');
+      nextFiles.forEach((file, index) => {
+        const key = buildAttachmentKey(file);
+        if (!next[key]) {
+          next[key] = !hasPrimary && index === 0 ? 'primary' : 'angles';
+        }
+      });
+      return next;
+    });
   }
 
   function removeSelectedFile(fileKey: string) {
@@ -9787,12 +10116,40 @@ function AddReferenceDialog({
       delete next[fileKey];
       return next;
     });
+    setAttachmentBuckets((current) => {
+      if (!(fileKey in current)) return current;
+      const next = { ...current };
+      const removedBucket = next[fileKey];
+      delete next[fileKey];
+      if (removedBucket === 'primary' && !Object.values(next).includes('primary')) {
+        const firstAngleKey = Object.keys(next)[0];
+        if (firstAngleKey) {
+          next[firstAngleKey] = 'primary';
+        }
+      }
+      return next;
+    });
     if (editingAttachmentKey === fileKey) {
       setIsAttachmentMetadataDialogOpen(false);
       setEditingAttachmentKey(null);
       setAttachmentTitleDraft('');
       setAttachmentDescriptionDraft('');
     }
+  }
+
+  function moveAttachmentToBucket(fileKey: string, nextBucket: ReferenceImageBucket) {
+    setAttachmentBuckets((current) => {
+      const next = { ...current };
+      if (nextBucket === 'primary') {
+        for (const key of Object.keys(next)) {
+          if (next[key] === 'primary') {
+            next[key] = 'angles';
+          }
+        }
+      }
+      next[fileKey] = nextBucket;
+      return next;
+    });
   }
 
   function openAttachmentMetadataDialog(fileKey: string) {
@@ -9820,9 +10177,17 @@ function AddReferenceDialog({
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (files.length === 0 || !trimmedTitle) return;
+    const orderedFiles = [...files].sort((left, right) => {
+      const leftBucket = attachmentBuckets[buildAttachmentKey(left)] ?? 'angles';
+      const rightBucket = attachmentBuckets[buildAttachmentKey(right)] ?? 'angles';
+      if (leftBucket !== rightBucket) {
+        return leftBucket === 'primary' ? -1 : 1;
+      }
+      return 0;
+    });
 
     await onSubmit({
-      files,
+      files: orderedFiles,
       title: trimmedTitle,
       description: description.trim() || undefined,
       route,
@@ -9892,6 +10257,10 @@ function AddReferenceDialog({
     { value: 'characters', label: 'Character' },
   ] as const;
   const currentCopy = routeCopy[route];
+  const primaryTabLabel = getReferencePrimaryTabLabel(route);
+  const visibleSelectedFilePreviews = selectedFilePreviews.filter(
+    (file) => (attachmentBuckets[file.key] ?? 'angles') === activeImageTab,
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -10044,8 +10413,35 @@ function AddReferenceDialog({
                       <Plus className="size-4" />
                     </button>
                   </div>
+                  <div role="tablist" aria-label="Reference image buckets" className="mb-3 inline-flex rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] p-1">
+                    {([
+                      { value: 'primary', label: primaryTabLabel },
+                      { value: 'angles', label: 'Ângulos' },
+                    ] as const).map((tab) => (
+                      <button
+                        key={tab.value}
+                        type="button"
+                        role="tab"
+                        aria-selected={activeImageTab === tab.value}
+                        onClick={() => setActiveImageTab(tab.value)}
+                        className={[
+                          'relative inline-flex min-w-[110px] items-center justify-center rounded-full px-3 py-2 text-[13px] transition-colors',
+                          activeImageTab === tab.value ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
+                        ].join(' ')}
+                      >
+                        {activeImageTab === tab.value ? (
+                          <motion.span
+                            layoutId="reference-image-bucket-pill"
+                            className="absolute inset-0 rounded-full bg-[var(--surface)]"
+                            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                          />
+                        ) : null}
+                        <span className="relative z-10">{tab.label}</span>
+                      </button>
+                    ))}
+                  </div>
                   <div className="grid max-h-[min(44vh,420px)] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
-                    {selectedFilePreviews.map((file) => (
+                    {visibleSelectedFilePreviews.map((file) => (
                       <div
                         key={file.key}
                         className="group relative overflow-hidden rounded-[16px] border border-[var(--border-soft)] bg-[var(--surface)]"
@@ -10062,6 +10458,16 @@ function AddReferenceDialog({
                             </div>
                           </div>
                           <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                moveAttachmentToBucket(file.key, (attachmentBuckets[file.key] ?? 'angles') === 'primary' ? 'angles' : 'primary')
+                              }
+                              className="inline-flex h-7 items-center justify-center rounded-full border border-white/20 bg-black/55 px-2 text-[10px] text-white transition-colors hover:bg-black/70"
+                              aria-label={`Move ${file.name} to ${(attachmentBuckets[file.key] ?? 'angles') === 'primary' ? 'Ângulos' : primaryTabLabel}`}
+                            >
+                              {(attachmentBuckets[file.key] ?? 'angles') === 'primary' ? 'Ângulos' : primaryTabLabel}
+                            </button>
                             <button
                               type="button"
                               onClick={() => openAttachmentMetadataDialog(file.key)}
@@ -10088,6 +10494,11 @@ function AddReferenceDialog({
                       </div>
                     ))}
                   </div>
+                  {visibleSelectedFilePreviews.length === 0 ? (
+                    <div className="rounded-[14px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)] px-4 py-6 text-center text-[12px] text-[var(--muted-foreground)]">
+                      No images in this tab
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>
@@ -10263,12 +10674,14 @@ function EditReferenceDialog({
       description?: string;
       previewUrl: string;
       shouldRevokePreviewUrl?: boolean;
+      bucket: ReferenceImageBucket;
     }>
   >([]);
   const [editingAttachmentKey, setEditingAttachmentKey] = useState<string | null>(null);
   const [attachmentTitleDraft, setAttachmentTitleDraft] = useState('');
   const [attachmentDescriptionDraft, setAttachmentDescriptionDraft] = useState('');
   const [isAttachmentMetadataDialogOpen, setIsAttachmentMetadataDialogOpen] = useState(false);
+  const [activeImageTab, setActiveImageTab] = useState<ReferenceImageBucket>('primary');
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -10313,8 +10726,10 @@ function EditReferenceDialog({
         description: attachment.description,
         previewUrl: base64ToObjectUrl(attachment.bytesBase64, attachment.mimeType),
         shouldRevokePreviewUrl: true,
+        bucket: index === 0 ? 'primary' : 'angles',
       }));
     });
+    setActiveImageTab('primary');
   }, [open, reference]);
 
   const trimmedTitle = title.trim();
@@ -10381,11 +10796,29 @@ function EditReferenceDialog({
           description: '',
           previewUrl: URL.createObjectURL(file),
           shouldRevokePreviewUrl: true,
+          bucket: current.some((attachment) => attachment.bucket === 'primary') || index > 0 ? 'angles' : 'primary',
         };
       })
     );
     setAttachments((current) => [...current, ...prepared]);
   }
+
+  function moveAttachmentToBucket(localKey: string, nextBucket: ReferenceImageBucket) {
+    setAttachments((current) =>
+      current.map((attachment) => {
+        if (nextBucket === 'primary' && attachment.bucket === 'primary') {
+          return { ...attachment, bucket: 'angles' };
+        }
+        if (attachment.localKey === localKey) {
+          return { ...attachment, bucket: nextBucket };
+        }
+        return attachment;
+      }),
+    );
+  }
+
+  const primaryTabLabel = getReferencePrimaryTabLabel(reference?.category ?? 'environment');
+  const visibleAttachments = attachments.filter((attachment) => attachment.bucket === activeImageTab);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -10412,7 +10845,14 @@ function EditReferenceDialog({
               title: trimmedTitle,
               description: description.trim() || undefined,
               attachments: isCollection
-                ? attachments.map((attachment) => ({
+                ? [...attachments]
+                    .sort((left, right) => {
+                      if (left.bucket !== right.bucket) {
+                        return left.bucket === 'primary' ? -1 : 1;
+                      }
+                      return 0;
+                    })
+                    .map((attachment) => ({
                     id: attachment.id,
                     name: attachment.name,
                     title: attachment.title,
@@ -10451,43 +10891,89 @@ function EditReferenceDialog({
                       <Plus className="size-4" />
                     </button>
                   </div>
+                  <div role="tablist" aria-label="Reference image buckets" className="mb-3 inline-flex rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] p-1">
+                    {([
+                      { value: 'primary', label: primaryTabLabel },
+                      { value: 'angles', label: 'Ângulos' },
+                    ] as const).map((tab) => (
+                      <button
+                        key={tab.value}
+                        type="button"
+                        role="tab"
+                        aria-selected={activeImageTab === tab.value}
+                        onClick={() => setActiveImageTab(tab.value)}
+                        className={[
+                          'relative inline-flex min-w-[110px] items-center justify-center rounded-full px-3 py-2 text-[13px] transition-colors',
+                          activeImageTab === tab.value ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
+                        ].join(' ')}
+                      >
+                        {activeImageTab === tab.value ? (
+                          <motion.span
+                            layoutId="edit-reference-image-bucket-pill"
+                            className="absolute inset-0 rounded-full bg-[var(--surface)]"
+                            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                          />
+                        ) : null}
+                        <span className="relative z-10">{tab.label}</span>
+                      </button>
+                    ))}
+                  </div>
                   {attachments.length > 0 ? (
-                    <div className="grid max-h-[min(44vh,420px)] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
-                      {attachments.map((attachment) => (
-                        <div
-                          key={attachment.localKey}
-                          className="group relative overflow-hidden rounded-[16px] border border-[var(--border-soft)] bg-[var(--surface)]"
-                        >
-                          <div className="relative aspect-square overflow-hidden">
-                            <img src={attachment.previewUrl} alt={attachment.name} className="h-full w-full object-cover" />
-                            <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1.5 pt-4">
-                              <div className="line-clamp-1 text-[11px] text-white/92">{attachment.title}</div>
+                    visibleAttachments.length > 0 ? (
+                      <div className="grid max-h-[min(44vh,420px)] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
+                        {visibleAttachments.map((attachment) => (
+                          <div
+                            key={attachment.localKey}
+                            className="group relative overflow-hidden rounded-[16px] border border-[var(--border-soft)] bg-[var(--surface)]"
+                          >
+                            <div className="relative aspect-square overflow-hidden">
+                              <img src={attachment.previewUrl} alt={attachment.name} className="h-full w-full object-cover" />
+                              <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1.5 pt-4">
+                                <div className="line-clamp-1 text-[11px] text-white/92">{attachment.title}</div>
+                              </div>
+                              <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    moveAttachmentToBucket(
+                                      attachment.localKey,
+                                      attachment.bucket === 'primary' ? 'angles' : 'primary',
+                                    )
+                                  }
+                                  className="inline-flex h-7 items-center justify-center rounded-full border border-white/20 bg-black/55 px-2 text-[10px] text-white transition-colors hover:bg-black/70"
+                                  aria-label={`Move ${attachment.name} to ${attachment.bucket === 'primary' ? 'Ângulos' : primaryTabLabel}`}
+                                >
+                                  {attachment.bucket === 'primary' ? 'Ângulos' : primaryTabLabel}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openAttachmentMetadataDialog(attachment.localKey)}
+                                  className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
+                                  aria-label={`Edit render metadata for ${attachment.name}`}
+                                >
+                                  <Pencil className="size-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => removeAttachment(attachment.localKey)}
+                                  className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-[rgba(190,58,58,0.65)]"
+                                  aria-label={`Remove ${attachment.name}`}
+                                >
+                                  <X className="size-3.5" />
+                                </button>
+                              </div>
                             </div>
-                            <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                              <button
-                                type="button"
-                                onClick={() => openAttachmentMetadataDialog(attachment.localKey)}
-                                className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
-                                aria-label={`Edit render metadata for ${attachment.name}`}
-                              >
-                                <Pencil className="size-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => removeAttachment(attachment.localKey)}
-                                className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-[rgba(190,58,58,0.65)]"
-                                aria-label={`Remove ${attachment.name}`}
-                              >
-                                <X className="size-3.5" />
-                              </button>
+                            <div className="border-t border-[var(--border-soft)] px-2 py-1.5 text-[11px] text-[var(--muted-foreground)]">
+                              <div className="line-clamp-2">{attachment.description?.trim() || 'No description yet'}</div>
                             </div>
                           </div>
-                          <div className="border-t border-[var(--border-soft)] px-2 py-1.5 text-[11px] text-[var(--muted-foreground)]">
-                            <div className="line-clamp-2">{attachment.description?.trim() || 'No description yet'}</div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="rounded-[14px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)] px-4 py-6 text-center text-[12px] text-[var(--muted-foreground)]">
+                        No images in this tab
+                      </div>
+                    )
                   ) : (
                     <div className="rounded-[14px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)] px-4 py-6 text-center text-[12px] text-[var(--muted-foreground)]">
                       No images selected

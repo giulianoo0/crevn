@@ -126,6 +126,48 @@ describe('PromptComposer', () => {
     expect(onMentionMatch).toHaveBeenLastCalledWith({ query: 'gar', start: 16 });
   });
 
+  it('rehydrates pasted selector mentions while preserving the attachment suffix', async () => {
+    const onTextChange = vi.fn();
+    const onMentionIdsChange = vi.fn();
+
+    render(
+      <PromptComposer
+        ariaLabel="Prompt"
+        placeholder="Write something"
+        isExpanded
+        hasReferenceImages={false}
+        mentionCandidates={[
+          {
+            id: 'reference-hangar',
+            title: 'Hangar',
+          },
+        ]}
+        onTextChange={onTextChange}
+        onMentionMatch={() => {}}
+        onMentionIdsChange={onMentionIdsChange}
+      />,
+    );
+
+    const input = screen.getByRole('textbox', { name: 'Prompt' });
+
+    await act(async () => {
+      fireEvent.paste(input, {
+        clipboardData: {
+          files: [],
+          getData: (type: string) => {
+            if (type === 'text/plain') return 'Use @Hangar#console-detail for the insert';
+            return '';
+          },
+        },
+      });
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Hangar');
+    expect(input).toHaveTextContent('Use Hangar#console-detail for the insert');
+    expect(onTextChange).toHaveBeenLastCalledWith('Use Hangar#console-detail for the insert');
+    expect(onMentionIdsChange).toHaveBeenLastCalledWith(['reference-hangar']);
+  });
+
   it('inserts an imperative mention from an explicit text range when editor selection is unavailable', async () => {
     const onTextChange = vi.fn();
     const onMentionIdsChange = vi.fn();
