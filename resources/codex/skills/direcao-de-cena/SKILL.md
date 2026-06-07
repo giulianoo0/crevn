@@ -354,6 +354,47 @@ Espere a aprovação antes de ir pra Fase 2.
 
 Depois do pré-plano aprovado, converta cada plano em necessidades de frame, já pensando em como o Seedance vai animar.
 
+## Conceito fundamental
+
+O engine não anima um roteiro; ele interpola entre estados visuais.
+
+Em termos práticos, o Seedance funciona mais como um modelo de difusão de vídeo do que como software de animação tradicional:
+
+- recebe frame(s) de referência
+- recebe prompt de texto
+- recebe parâmetros como duração e estilo
+- "imagina" os fotogramas intermediários condicionados por essas âncoras
+
+O resultado não é animação keyframe no sentido clássico. É geração de vídeo coerente entre estados.
+
+- O frame descreve estado, não movimento
+- O clipe é o que acontece entre frames
+- Quanto menor o delta visual entre frames consecutivos, maior a precisão da interpolação
+- Quanto maior o salto, mais o engine inventa e maior o risco de artefato
+
+Pensar assim:
+
+```text
+FRAME A -> interpola -> FRAME B
+estado 1                estado 2
+```
+
+A função da skill é controlar os estados com clareza suficiente para o engine não precisar adivinhar o caminho.
+
+## Os três modos de entrada de frames
+
+Pensar a entrada em três regimes:
+
+- **Frame único (`image-to-video`):** máxima liberdade, mínimo controle. Bom para atmosfera, `glimpse`, ambiente e ação simples.
+- **Dois frames (`first + last`):** controla começo e fim. Bom para turn claro, gesto com início/fim definidos e movimento de câmera controlado.
+- **Múltiplos frames (`multi-frame reference`):** controla rota e beats intermediários. Bom para 2+ beats, câmera com trajeto definido e cenas com múltiplos personagens.
+
+Regra prática:
+
+- se o clipe depende mais de atmosfera do que de coreografia, 1 frame pode bastar
+- se o clipe depende de um antes e depois nítidos, usar 2 frames
+- se o caminho entre esses estados importa, usar 3 ou mais frames
+
 ## Regra estrutural da Fase 2
 
 Cada frame e cada prompt precisam ser `self-contained`. O engine não tem memória de sessão entre clipes. Nunca depender de frases como "o mesmo quarto de antes" ou "o personagem do clipe anterior".
@@ -374,6 +415,110 @@ Template-base de prompt self-contained:
 [O que muda dentro do clipe].
 ```
 
+## Os três tipos de frame
+
+Use estes papéis como gramática-base do clipe:
+
+- **Frame de Âncora:** estado inicial completo; composição, luz, corpos e câmera já estabelecidos
+- **Frame de Pivot:** beat dramático; estado de transição onde o turn acontece
+- **Frame de Release:** estado final resolvido; tensão descarrega ou reconfigura
+
+O pivot é o frame que faz a cena significar algo. Ele não deve pular direto do antes para o depois se o caminho do gesto, da câmera ou da luz importar.
+
+## Como o engine distribui frames no tempo
+
+Com 3 frames em um clipe, o engine tende a espalhá-los ao longo da duração, mas não em terços matemáticos. Ele pondera pela quantidade de mudança visual entre pares.
+
+```text
+0s        ~meio 1        ~meio 2       fim
+[F1] ---- interpola ---- [F2] ---- interpola ---- [F3]
+```
+
+Implicação prática:
+
+- se um beat precisa acontecer claramente cedo, o frame correspondente precisa "puxar" mudança suficiente logo no primeiro trecho
+- se a maior transformação está entre `F2 -> F3`, o engine tende a gastar mais energia temporal nesse trecho
+- timing fino não deve depender só do prompt; deve aparecer na estrutura visual dos frames
+
+## Quantos frames por clipe
+
+Use a densidade dramática para decidir:
+
+- **1 beat:** 2 frames -> âncora + release
+- **2 beats:** 3 frames -> âncora + pivot + release
+- **3-4 beats:** 4 frames -> âncora + pivot 1 + pivot 2 + release
+- **5+ beats:** dividir em dois clipes
+
+Mais de 4 frames em um clipe de 15s é sinal de alerta. Em geral, o problema não é falta de frame; é excesso de clipe.
+
+## O que cada frame controla
+
+Cada frame precisa fixar explicitamente:
+
+- posição da câmera: altura, distância, ângulo
+- distância focal: quanto do ambiente aparece
+- posição dos personagens: onde cada corpo está no quadro
+- estado da ação: em que ponto do gesto ou ação o corpo está
+- luz: direção, intensidade e fontes visíveis
+- profundidade de campo: o que está em foco e o que cai fora
+
+## Regra do delta
+
+O engine interpola pelo caminho mais curto entre dois estados. Para reduzir artefato:
+
+- mudar no máximo **uma variável principal por salto de frame**
+- preferir: câmera **ou** personagem **ou** luz
+- evitar mudar os três ao mesmo tempo
+- manter a mesma distância focal dentro do clipe, salvo motivo muito forte
+
+Se o caminho importa, adicionar frame intermediário para forçar a rota.
+
+```text
+Sem controle:
+A -> ? -> B
+
+Com controle:
+A -> C -> B
+```
+
+Isso é especialmente importante para:
+
+- órbitas e movimentos circulares de câmera
+- gestos que passam por um ponto específico
+- transições de luz que exigem estado intermediário
+
+## O que o prompt faz que o frame não faz
+
+Os frames fixam estados estáticos. O prompt define intenção, direção e atmosfera.
+
+| O frame define | O prompt define |
+|---|---|
+| posição dos corpos | direção do movimento |
+| composição do quadro | intenção da câmera |
+| estado da luz | atmosfera e temperatura emocional |
+| props e ambiente visível | som, ambiência e textura auditiva |
+| expressão congelada | energia, urgência e peso do gesto |
+| o que está no quadro | para onde o quadro está indo |
+
+Regra: o prompt deve dirigir o que acontece entre frames, não reescrever de forma redundante o que o frame já mostra.
+
+## Hierarquia de autoridade
+
+Quando frame e prompt entram em conflito, assumir esta ordem:
+
+1. frame de referência visual
+2. prompt descrevendo estado
+3. prompt descrevendo movimento
+4. parâmetros de estilo, câmera e acabamento
+
+Consequência operacional:
+
+- se o frame mostra a câmera à esquerda e o prompt diz direita, o frame ganha
+- se o frame mostra roupa azul e o prompt fala vermelho, o frame ganha
+- se não há contradição visual, a instrução de movimento do prompt tende a ser seguida
+
+Nunca escrever no prompt algo que contradiga visualmente os frames.
+
 ## A lógica Seedance: keyframe → animação
 
 O Seedance anima a partir de frames estáticos. Para cada plano do pré-plano, decida:
@@ -388,6 +533,19 @@ O Seedance anima a partir de frames estáticos. Para cada plano do pré-plano, d
 - **Música sempre desligada** no destino Seedance
 - **Reference image quase sempre antes de start/end**; use start/end só quando o movimento realmente precisar de interpolação controlada
 
+## Estrutura operacional do prompt
+
+Quando a saída pedir prompt para animar frames, organizar em blocos mentais:
+
+- **Bloco 1: Ambiente** -> só o que permanece constante
+- **Bloco 2: Estado inicial** -> alinhado com o frame de âncora
+- **Bloco 3: Movimento** -> o que acontece entre os frames
+- **Bloco 4: Estado final** -> alinhado com o frame de release
+- **Bloco 5: Câmera** -> uma instrução de movimento global, limpa e singular
+- **Bloco 6: Som** -> atmosfera auditiva quando a cena pedir
+
+Se o prompt estiver descrevendo múltiplas câmeras, múltiplos movimentos ou múltiplas direções concorrentes, simplificar.
+
 ## Decisão start+end frame vs frame único
 
 | Situação | Frames necessários |
@@ -398,6 +556,54 @@ O Seedance anima a partir de frames estáticos. Para cada plano do pré-plano, d
 | Transformação ou morph | 2 frames (antes + depois) |
 | Mudança de beat com novo shot | 1 reference image por shot |
 | Transição suave entre dois shots | bridge frame ou `Between Images` |
+
+## Montagem de frames por tipo de cena
+
+Modelos de referência:
+
+- **Cena estática com turn emocional:** âncora com câmera fixa, pivot no gesto, release no novo estado relacional
+- **Cena de movimento com câmera seguindo:** âncora, pivot em deslocamento, release com parada ou chegada; manter focal consistente
+- **Cena épica com câmera descendo ou fechando:** quase sempre pedir frame intermediário extra para controlar o arco e evitar salto excessivo
+
+Se câmera, ângulo e escala do sujeito mudarem juntos, assuma risco alto e considere adicionar um frame de controle.
+
+## Erros comuns na construção de frames
+
+- **Delta muito grande:** interior dia sentado -> exterior noite correndo. Isso não é interpolação; é corte entre clipes.
+- **Composição inconsistente:** 35mm num frame e 75mm no seguinte sem justificativa. O engine inventa zoom e lateral ao mesmo tempo.
+- **Pivot sem transição:** mão livre -> mão já segurando objeto. Falta o estado intermediário do gesto.
+- **Luz inconsistente:** direção da luz muda entre frames do mesmo clipe. Isso vira artefato, não linguagem.
+
+Artefatos típicos e causas prováveis:
+
+- personagem "derrete" no meio do clipe -> delta grande demais
+- câmera faz movimento não pedido -> composição dos frames conflita com o prompt
+- objeto aparece e desaparece -> presença inconsistente entre frames
+- luz pulsa ou vira -> lógica de luz inconsistente
+- personagem duplica -> composição intermediária ambígua do mesmo corpo
+- movimento fica elástico -> o engine tomou o caminho mais curto entre estados incompatíveis
+
+Correção padrão:
+
+- se mudou espaço, tempo ou lógica de luz, cortar para novo clipe
+- se o gesto tem caminho importante, inserir pivot intermediário
+- se a composição mudou, preservar focal e decidir se a mudança é da câmera ou do corpo
+
+## Frames como linguagem de continuidade
+
+Em sequências de clipes, o release do clipe N tende a virar a âncora do clipe N+1.
+
+```text
+CLIPE 1: ancora -> pivot -> [release]
+CLIPE 2:                         [ancora] -> pivot -> release
+```
+
+Para essa ponte funcionar, verificar:
+
+- mesma posição de câmera, ou corte intencional claramente justificado
+- mesmo estado corporal do personagem
+- mesma roupa, props e lógica de luz
+- mesma leitura espacial do ambiente, salvo mudança deliberada de cena
 
 ## Formato de saída do planejamento de frames
 
@@ -440,6 +646,21 @@ Antes de emitir `imagen-action`, verificar internamente:
 - cada clipe tem `want + obstacle + turn`
 - a curva de tensão respira e tem vale antes do clímax
 - o clímax é singular
+- cada frame é um estado visual completo e estável
+- o delta entre frames consecutivos muda no máximo uma variável principal
+- a distância focal está consistente dentro do clipe
+- a direção da luz permanece consistente dentro do clipe
+- nenhum elemento importante aparece em um frame e some no outro sem transição
+- o pivot está em estado de transição, não pulando direto para o estado final
+- o release conecta com a âncora do próximo clipe quando houver continuidade
+- gestos com caminho importante têm frame intermediário
+- o número de frames por clipe não estourou `<= 4` para 15s
+- o bloco de ambiente do prompt descreve só o que não muda
+- o estado inicial do prompt alinha com o frame 1
+- o estado final do prompt alinha com o último frame
+- a instrução de câmera do prompt é singular e limpa
+- o prompt dirige movimento em vez de contradizer ou redescrever o frame
+- não existe conflito entre frame e prompt
 - os prompts são self-contained
 - os verbos carregam o shape; não há labels dramáticos no texto final
 - emoção virou comportamento físico visível
