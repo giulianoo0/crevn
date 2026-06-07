@@ -12,7 +12,7 @@ Improve Imagen's image-generation workflows so Classic, Director Classic, Direct
 - Ensure a new Director `create_scene` action creates a new Scenes group instead of overwriting the visible working scene.
 - Enrich image-generation prompts with embedded guidance from the local cinematic angles, environment-generation, and roteiro extraction workflows.
 - Tell agents that image frames are static keyframes intended for later Seedance animation, where the generated frames are used as reference images.
-- Add Seedance cartoon context so the image stage prepares stable inputs for the later `seedance-cartoon` prompt stage.
+- Add Seedance cartoon context so the image stage prepares stable inputs for the later `direcao-de-cena` prompt stage.
 - Improve character consistency by requiring named identity anchors, character sheets, exact wardrobe/proportions, reference re-anchoring, and per-frame performance beats.
 - Collapse Director orchestration status blocks to one latest status per action so progress updates in place and terminal states stop showing a loader.
 

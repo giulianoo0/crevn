@@ -8,3 +8,6 @@
 # Exclude support docs and bundled Codex skill assets from GitHub language stats.
 docs/** linguist-documentation
 resources/codex/** linguist-vendored
+
+# Static UI/media assets should not affect the repository language breakdown.
+src/assets/** linguist-vendored

@@ -635,6 +635,10 @@ function base64ToObjectUrl(bytesBase64: string, mimeType: string) {
   return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
 }
 
+function deriveReferenceAttachmentTitle(name: string) {
+  return name.replace(/\.[^/.]+$/, '').trim() || name.trim() || 'Untitled image';
+}
+
 function getSceneReferenceSignature(references: SceneReferenceAttachment[]) {
   return references
     .map((reference) =>
@@ -718,7 +722,9 @@ function toSavedReferenceImage(reference: ReferenceImageRecord): SavedReferenceI
     id: reference.id,
     name: reference.name,
     title: reference.title,
+    groupTitle: reference.groupTitle ?? undefined,
     description: reference.description ?? undefined,
+    groupDescription: reference.groupDescription ?? undefined,
     mimeType: reference.mimeType,
     bytesBase64: reference.bytesBase64,
     previewUrl: base64ToObjectUrl(reference.bytesBase64, reference.mimeType),
@@ -749,7 +755,9 @@ type ComposerReferenceImage = {
 
 type SavedReferenceImage = ComposerReferenceImage & {
   title: string;
+  groupTitle?: string;
   description?: string;
+  groupDescription?: string;
   createdAt: string;
   category: ReferenceLibraryRoute;
   collectionId?: string;
@@ -770,6 +778,10 @@ function getSavedReferenceMentionGroupId(reference: SavedReferenceImage) {
   return reference.collectionId ?? reference.environmentId ?? reference.id;
 }
 
+function getSharedReferenceTitle(reference: Pick<SavedReferenceImage, 'title' | 'groupTitle'>) {
+  return reference.groupTitle?.trim() || reference.title;
+}
+
 function buildSavedReferenceMentionGroups(savedReferences: SavedReferenceImage[]): SavedReferenceMentionGroup[] {
   const groups = new Map<string, SavedReferenceImage[]>();
 
@@ -788,10 +800,11 @@ function buildSavedReferenceMentionGroups(savedReferences: SavedReferenceImage[]
     const descriptions = references
       .map((reference) => reference.description?.trim())
       .filter((description): description is string => Boolean(description));
+    const sharedTitle = getSharedReferenceTitle(representative);
 
     return {
       id,
-      title: representative.title,
+      title: sharedTitle,
       description:
         references.length > 1
           ? `${references.length} angles${descriptions.length > 0 ? ` · ${descriptions[0]}` : ''}`
@@ -1181,6 +1194,7 @@ export function App() {
     attachments?: Array<{
       id?: string;
       name: string;
+      title?: string;
       mimeType: string;
       bytesBase64: string;
       description?: string;
@@ -2069,22 +2083,24 @@ export function App() {
     title,
     description,
     route,
-    attachmentDescriptions,
+    attachmentMetadata,
   }: {
     files: File[];
     title: string;
     description?: string;
     route: ReferenceLibraryRoute;
-    attachmentDescriptions?: Record<string, string>;
+    attachmentMetadata?: Record<string, { title: string; description: string }>;
   }) => {
     const attachments = await Promise.all(
       files.map(async (file) => {
         const bytes = new Uint8Array(await file.arrayBuffer());
+        const key = `${file.name}-${file.size}-${file.lastModified}`;
         return {
           name: file.name,
+          title: attachmentMetadata?.[key]?.title?.trim() || deriveReferenceAttachmentTitle(file.name),
           mimeType: file.type || 'image/png',
           bytesBase64: bytesToBase64(bytes),
-          description: attachmentDescriptions?.[`${file.name}-${file.size}-${file.lastModified}`]?.trim() || undefined,
+          description: attachmentMetadata?.[key]?.description?.trim() || undefined,
         };
       })
     );
@@ -4724,14 +4740,17 @@ export function App() {
                   category: reference.category,
                   collectionId: reference.collectionId,
                   environmentId: reference.environmentId,
-                  title: reference.title,
-                  description: reference.description,
+                  title: getSharedReferenceTitle(reference),
+                  groupTitle: reference.groupTitle,
+                  previewUrl: reference.previewUrl,
+                  description: reference.groupDescription ?? reference.description,
                   attachments: reference.collectionId
                     ? savedReferences
                         .filter((item) => item.collectionId === reference.collectionId)
                         .map((item) => ({
                           id: item.id,
                           name: item.name,
+                          title: item.title,
                           mimeType: item.mimeType,
                           bytesBase64: item.bytesBase64,
                           description: item.description,
@@ -4742,6 +4761,7 @@ export function App() {
                           .map((item) => ({
                             id: item.id,
                             name: item.name,
+                            title: item.title,
                             mimeType: item.mimeType,
                             bytesBase64: item.bytesBase64,
                             description: item.description,
@@ -9555,13 +9575,13 @@ function ReferencesWorkspace({
                     <div className="relative aspect-[4/3] overflow-hidden bg-[var(--surface2)]">
                       <img
                         src={reference.previewUrl}
-                        alt={reference.title}
+                        alt={getSharedReferenceTitle(reference)}
                         className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:scale-[1.025]"
                       />
                       <div className="absolute right-3 top-3 flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
                         <button
                           type="button"
-                          aria-label={`Edit ${reference.title}`}
+                          aria-label={`Edit ${getSharedReferenceTitle(reference)}`}
                           onClick={() => onEditReference(reference)}
                           className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
                         >
@@ -9569,7 +9589,7 @@ function ReferencesWorkspace({
                         </button>
                         <button
                           type="button"
-                          aria-label={`Delete ${reference.title}`}
+                          aria-label={`Delete ${getSharedReferenceTitle(reference)}`}
                           onClick={() => onDeleteReference(reference)}
                           className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-[rgba(190,58,58,0.8)]"
                         >
@@ -9579,7 +9599,7 @@ function ReferencesWorkspace({
                     </div>
                     <div className="space-y-2 p-4">
                       <h2 className="line-clamp-1 text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
-                        {reference.title}
+                        {getSharedReferenceTitle(reference)}
                       </h2>
                       {reference.description ? (
                         <p className="line-clamp-2 text-[13px] leading-5 text-[var(--muted-foreground)]">
@@ -9640,7 +9660,7 @@ function AddReferenceDialog({
     title: string;
     description?: string;
     route: ReferenceLibraryRoute;
-    attachmentDescriptions?: Record<string, string>;
+    attachmentMetadata?: Record<string, { title: string; description: string }>;
   }) => void | Promise<void>;
   initialRoute: ReferenceLibraryRoute;
   initialFiles?: File[];
@@ -9667,9 +9687,10 @@ function AddReferenceDialog({
   const [isDragActive, setIsDragActive] = useState(false);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [attachmentDescriptions, setAttachmentDescriptions] = useState<Record<string, string>>({});
-  const [isAttachmentDescriptionDialogOpen, setIsAttachmentDescriptionDialogOpen] = useState(false);
+  const [attachmentMetadata, setAttachmentMetadata] = useState<Record<string, { title: string; description: string }>>({});
+  const [isAttachmentMetadataDialogOpen, setIsAttachmentMetadataDialogOpen] = useState(false);
   const [editingAttachmentKey, setEditingAttachmentKey] = useState<string | null>(null);
+  const [attachmentTitleDraft, setAttachmentTitleDraft] = useState('');
   const [attachmentDescriptionDraft, setAttachmentDescriptionDraft] = useState('');
   const [isGeneratingDescriptions, setIsGeneratingDescriptions] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
@@ -9691,9 +9712,10 @@ function AddReferenceDialog({
         setIsDragActive(false);
         setTitle('');
         setDescription('');
-        setAttachmentDescriptions({});
-        setIsAttachmentDescriptionDialogOpen(false);
+        setAttachmentMetadata({});
+        setIsAttachmentMetadataDialogOpen(false);
         setEditingAttachmentKey(null);
+        setAttachmentTitleDraft('');
         setAttachmentDescriptionDraft('');
         setIsGeneratingDescriptions(false);
         return;
@@ -9701,8 +9723,16 @@ function AddReferenceDialog({
 
       if (initialFiles && initialFiles.length > 0) {
         setFiles(initialFiles);
-        setAttachmentDescriptions(
-          Object.fromEntries(initialFiles.map((file) => [`${file.name}-${file.size}-${file.lastModified}`, '']))
+        setAttachmentMetadata(
+          Object.fromEntries(
+            initialFiles.map((file) => [
+              `${file.name}-${file.size}-${file.lastModified}`,
+              {
+                title: deriveReferenceAttachmentTitle(file.name),
+                description: '',
+              },
+            ])
+          )
         );
       }
   }, [initialFiles, initialRoute, open]);
@@ -9736,11 +9766,14 @@ function AddReferenceDialog({
       }
       return [...byKey.values()];
     });
-    setAttachmentDescriptions((current) => {
+    setAttachmentMetadata((current) => {
       const next = { ...current };
       for (const file of nextFiles) {
         const key = buildAttachmentKey(file);
-        next[key] = next[key] ?? '';
+        next[key] = next[key] ?? {
+          title: deriveReferenceAttachmentTitle(file.name),
+          description: '',
+        };
       }
       return next;
     });
@@ -9748,33 +9781,39 @@ function AddReferenceDialog({
 
   function removeSelectedFile(fileKey: string) {
     setFiles((current) => current.filter((file) => buildAttachmentKey(file) !== fileKey));
-    setAttachmentDescriptions((current) => {
+    setAttachmentMetadata((current) => {
       if (!(fileKey in current)) return current;
       const next = { ...current };
       delete next[fileKey];
       return next;
     });
     if (editingAttachmentKey === fileKey) {
-      setIsAttachmentDescriptionDialogOpen(false);
+      setIsAttachmentMetadataDialogOpen(false);
       setEditingAttachmentKey(null);
+      setAttachmentTitleDraft('');
       setAttachmentDescriptionDraft('');
     }
   }
 
-  function openAttachmentDescriptionDialog(fileKey: string) {
+  function openAttachmentMetadataDialog(fileKey: string) {
     setEditingAttachmentKey(fileKey);
-    setAttachmentDescriptionDraft(attachmentDescriptions[fileKey] ?? '');
-    setIsAttachmentDescriptionDialogOpen(true);
+    setAttachmentTitleDraft(attachmentMetadata[fileKey]?.title ?? '');
+    setAttachmentDescriptionDraft(attachmentMetadata[fileKey]?.description ?? '');
+    setIsAttachmentMetadataDialogOpen(true);
   }
 
-  function commitAttachmentDescription() {
+  function commitAttachmentMetadata() {
     if (!editingAttachmentKey) return;
-    setAttachmentDescriptions((current) => ({
+    setAttachmentMetadata((current) => ({
       ...current,
-      [editingAttachmentKey]: attachmentDescriptionDraft.trim(),
+      [editingAttachmentKey]: {
+        title: attachmentTitleDraft.trim() || deriveReferenceAttachmentTitle(files.find((file) => buildAttachmentKey(file) === editingAttachmentKey)?.name ?? ''),
+        description: attachmentDescriptionDraft.trim(),
+      },
     }));
-    setIsAttachmentDescriptionDialogOpen(false);
+    setIsAttachmentMetadataDialogOpen(false);
     setEditingAttachmentKey(null);
+    setAttachmentTitleDraft('');
     setAttachmentDescriptionDraft('');
   }
 
@@ -9787,7 +9826,7 @@ function AddReferenceDialog({
       title: trimmedTitle,
       description: description.trim() || undefined,
       route,
-      attachmentDescriptions,
+      attachmentMetadata,
     });
     onOpenChange(false);
   }
@@ -9814,10 +9853,13 @@ function AddReferenceDialog({
       });
       setTitle((current) => current.trim() || result.title);
       setDescription(result.description);
-      setAttachmentDescriptions((current) => {
+      setAttachmentMetadata((current) => {
         const next = { ...current };
         for (const attachment of result.attachments) {
-          next[attachment.id] = attachment.description;
+          next[attachment.id] = {
+            title: next[attachment.id]?.title ?? deriveReferenceAttachmentTitle(files.find((file) => buildAttachmentKey(file) === attachment.id)?.name ?? ''),
+            description: attachment.description,
+          };
         }
         return next;
       });
@@ -9855,7 +9897,7 @@ function AddReferenceDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         data-testid="add-reference-dialog"
-        className="flex max-h-[calc(100vh-32px)] max-w-[860px] flex-col overflow-hidden p-0"
+        className="flex max-h-[calc(100vh-32px)] max-w-[1180px] flex-col overflow-hidden p-0"
       >
         <DialogHeader className="shrink-0 px-5 pt-5">
           <DialogTitle>Add reference</DialogTitle>
@@ -9863,7 +9905,11 @@ function AddReferenceDialog({
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="mt-5 flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div data-testid="add-reference-dialog-scroll" className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 pb-4">
+          <div
+            data-testid="add-reference-dialog-scroll"
+            className="grid min-h-0 flex-1 gap-5 overflow-y-auto px-5 pb-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]"
+          >
+          <div className="space-y-4">
           <div className="space-y-2">
             <div className="text-[13px] font-medium text-[var(--foreground)]">Type</div>
             <div className="inline-flex rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] p-1">
@@ -10011,14 +10057,16 @@ function AddReferenceDialog({
                             className="h-full w-full object-cover transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:scale-[1.03]"
                           />
                           <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1.5 pt-4">
-                            <div className="line-clamp-1 text-[11px] text-white/92">{file.name}</div>
+                            <div className="line-clamp-1 text-[11px] text-white/92">
+                              {attachmentMetadata[file.key]?.title?.trim() || deriveReferenceAttachmentTitle(file.name)}
+                            </div>
                           </div>
                           <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                             <button
                               type="button"
-                              onClick={() => openAttachmentDescriptionDialog(file.key)}
+                              onClick={() => openAttachmentMetadataDialog(file.key)}
                               className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
-                              aria-label={`Edit description for ${file.name}`}
+                              aria-label={`Edit render metadata for ${file.name}`}
                             >
                               <Pencil className="size-3.5" />
                             </button>
@@ -10033,7 +10081,9 @@ function AddReferenceDialog({
                           </div>
                         </div>
                         <div className="border-t border-[var(--border-soft)] px-2 py-1.5 text-[11px] text-[var(--muted-foreground)]">
-                          {attachmentDescriptions[file.key]?.trim() ? 'Description added' : 'No description yet'}
+                          <div className="line-clamp-2">
+                            {(attachmentMetadata[file.key]?.description ?? '').trim() || 'No description yet'}
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -10042,7 +10092,8 @@ function AddReferenceDialog({
               )}
             </div>
           </div>
-
+          </div>
+          <div className="space-y-4">
           <div className="space-y-2">
             <label htmlFor="reference-title" className="text-[13px] font-medium text-[var(--foreground)]">
               Title
@@ -10069,6 +10120,7 @@ function AddReferenceDialog({
             />
           </div>
           </div>
+          </div>
 
           <div
             data-testid="add-reference-dialog-footer"
@@ -10088,31 +10140,64 @@ function AddReferenceDialog({
           </div>
         </form>
       </DialogContent>
-      <Dialog open={isAttachmentDescriptionDialogOpen} onOpenChange={setIsAttachmentDescriptionDialogOpen}>
+      <Dialog open={isAttachmentMetadataDialogOpen} onOpenChange={setIsAttachmentMetadataDialogOpen}>
         <DialogContent className="max-w-[520px]">
           <DialogHeader>
-            <DialogTitle>Attachment Description</DialogTitle>
-            <DialogDescription>Add image-specific notes for this reference image.</DialogDescription>
+            <DialogTitle>Image render metadata</DialogTitle>
+            <DialogDescription>Edit the per-image title and render description for this reference image.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3 pt-2">
+            <Input
+              data-testid="reference-attachment-title-input"
+              value={attachmentTitleDraft}
+              onChange={(event) => {
+                const nextTitle = event.target.value;
+                setAttachmentTitleDraft(nextTitle);
+                if (editingAttachmentKey) {
+                  setAttachmentMetadata((current) => ({
+                    ...current,
+                    [editingAttachmentKey]: {
+                      title: nextTitle,
+                      description: current[editingAttachmentKey]?.description ?? '',
+                    },
+                  }));
+                }
+              }}
+              placeholder="Image title"
+              autoFocus
+            />
             <textarea
+              data-testid="reference-attachment-description-input"
               value={attachmentDescriptionDraft}
-              onChange={(event) => setAttachmentDescriptionDraft(event.target.value)}
+              onChange={(event) => {
+                const nextDescription = event.target.value;
+                setAttachmentDescriptionDraft(nextDescription);
+                if (editingAttachmentKey) {
+                  setAttachmentMetadata((current) => ({
+                    ...current,
+                    [editingAttachmentKey]: {
+                      title:
+                        current[editingAttachmentKey]?.title ??
+                        deriveReferenceAttachmentTitle(files.find((file) => buildAttachmentKey(file) === editingAttachmentKey)?.name ?? ''),
+                      description: nextDescription,
+                    },
+                  }));
+                }
+              }}
               placeholder="Describe this image's key details, composition, or constraints."
               className="min-h-[140px] w-full resize-none rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] px-4 py-3 text-[14px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[var(--border-strong)]"
-              autoFocus
             />
             <div className="flex items-center justify-end gap-2">
               <Button
                 type="button"
                 variant="surface"
                 className="border-transparent bg-[var(--surface2)] hover:bg-[var(--surface3)]"
-                onClick={() => setIsAttachmentDescriptionDialogOpen(false)}
+                onClick={() => setIsAttachmentMetadataDialogOpen(false)}
               >
                 Cancel
               </Button>
-              <Button type="button" onClick={commitAttachmentDescription}>
-                Save description
+              <Button data-testid="reference-attachment-save-button" type="button" onClick={commitAttachmentMetadata}>
+                Save image metadata
               </Button>
             </div>
           </div>
@@ -10137,9 +10222,12 @@ function EditReferenceDialog({
     environmentId?: string;
     title: string;
     description?: string;
+    groupTitle?: string;
+    previewUrl?: string;
     attachments?: Array<{
       id?: string;
       name: string;
+      title?: string;
       mimeType: string;
       bytesBase64: string;
       description?: string;
@@ -10155,6 +10243,7 @@ function EditReferenceDialog({
     attachments?: Array<{
       id?: string;
       name: string;
+      title?: string;
       mimeType: string;
       bytesBase64: string;
       description?: string;
@@ -10168,6 +10257,7 @@ function EditReferenceDialog({
       localKey: string;
       id?: string;
       name: string;
+      title: string;
       mimeType: string;
       bytesBase64: string;
       description?: string;
@@ -10176,8 +10266,9 @@ function EditReferenceDialog({
     }>
   >([]);
   const [editingAttachmentKey, setEditingAttachmentKey] = useState<string | null>(null);
+  const [attachmentTitleDraft, setAttachmentTitleDraft] = useState('');
   const [attachmentDescriptionDraft, setAttachmentDescriptionDraft] = useState('');
-  const [isAttachmentDescriptionDialogOpen, setIsAttachmentDescriptionDialogOpen] = useState(false);
+  const [isAttachmentMetadataDialogOpen, setIsAttachmentMetadataDialogOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -10216,6 +10307,7 @@ function EditReferenceDialog({
         localKey: attachment.id ?? `${attachment.name}-${index}`,
         id: attachment.id,
         name: attachment.name,
+        title: attachment.title ?? deriveReferenceAttachmentTitle(attachment.name),
         mimeType: attachment.mimeType,
         bytesBase64: attachment.bytesBase64,
         description: attachment.description,
@@ -10234,25 +10326,31 @@ function EditReferenceDialog({
         : 'character';
   const isCollection = (reference?.attachments?.length ?? 0) > 0 || Boolean(reference?.collectionId) || reference?.category === 'environment';
 
-  function openAttachmentDescriptionDialog(localKey: string) {
+  function openAttachmentMetadataDialog(localKey: string) {
     const attachment = attachments.find((item) => item.localKey === localKey);
     if (!attachment) return;
     setEditingAttachmentKey(localKey);
+    setAttachmentTitleDraft(attachment.title);
     setAttachmentDescriptionDraft(attachment.description ?? '');
-    setIsAttachmentDescriptionDialogOpen(true);
+    setIsAttachmentMetadataDialogOpen(true);
   }
 
-  function saveAttachmentDescription() {
+  function saveAttachmentMetadata() {
     if (!editingAttachmentKey) return;
     setAttachments((current) =>
       current.map((attachment) =>
         attachment.localKey === editingAttachmentKey
-          ? { ...attachment, description: attachmentDescriptionDraft.trim() || undefined }
+          ? {
+              ...attachment,
+              title: attachmentTitleDraft.trim() || deriveReferenceAttachmentTitle(attachment.name),
+              description: attachmentDescriptionDraft.trim() || undefined,
+            }
           : attachment
       )
     );
-    setIsAttachmentDescriptionDialogOpen(false);
+    setIsAttachmentMetadataDialogOpen(false);
     setEditingAttachmentKey(null);
+    setAttachmentTitleDraft('');
     setAttachmentDescriptionDraft('');
   }
 
@@ -10277,6 +10375,7 @@ function EditReferenceDialog({
         return {
           localKey: `${file.name}-${file.size}-${file.lastModified}-${Date.now()}-${index}`,
           name: file.name,
+          title: deriveReferenceAttachmentTitle(file.name),
           mimeType: file.type || 'image/png',
           bytesBase64: bytesToBase64(bytes),
           description: '',
@@ -10293,7 +10392,7 @@ function EditReferenceDialog({
       <DialogContent
         className={[
           'flex max-h-[calc(100vh-32px)] flex-col overflow-hidden p-0',
-          isCollection ? 'max-w-[860px]' : 'max-w-[560px]',
+          isCollection ? 'max-w-[1180px]' : 'max-w-[980px]',
         ].join(' ')}
       >
         <DialogHeader className="shrink-0 px-5 pt-5">
@@ -10316,6 +10415,7 @@ function EditReferenceDialog({
                 ? attachments.map((attachment) => ({
                     id: attachment.id,
                     name: attachment.name,
+                    title: attachment.title,
                     mimeType: attachment.mimeType,
                     bytesBase64: attachment.bytesBase64,
                     description: attachment.description,
@@ -10325,7 +10425,8 @@ function EditReferenceDialog({
             onOpenChange(false);
           }}
         >
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 pb-4">
+          <div className={`grid min-h-0 flex-1 gap-5 overflow-y-auto px-5 pb-4 ${isCollection ? 'lg:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]' : 'lg:grid-cols-[minmax(0,1fr)_minmax(340px,0.9fr)]'}`}>
+            <div className="space-y-4">
             {isCollection ? (
               <div className="space-y-2">
                 <div className="text-[13px] font-medium text-[var(--foreground)]">Images</div>
@@ -10360,14 +10461,14 @@ function EditReferenceDialog({
                           <div className="relative aspect-square overflow-hidden">
                             <img src={attachment.previewUrl} alt={attachment.name} className="h-full w-full object-cover" />
                             <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1.5 pt-4">
-                              <div className="line-clamp-1 text-[11px] text-white/92">{attachment.name}</div>
+                              <div className="line-clamp-1 text-[11px] text-white/92">{attachment.title}</div>
                             </div>
                             <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                               <button
                                 type="button"
-                                onClick={() => openAttachmentDescriptionDialog(attachment.localKey)}
+                                onClick={() => openAttachmentMetadataDialog(attachment.localKey)}
                                 className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
-                                aria-label={`Edit description for ${attachment.name}`}
+                                aria-label={`Edit render metadata for ${attachment.name}`}
                               >
                                 <Pencil className="size-3.5" />
                               </button>
@@ -10382,7 +10483,7 @@ function EditReferenceDialog({
                             </div>
                           </div>
                           <div className="border-t border-[var(--border-soft)] px-2 py-1.5 text-[11px] text-[var(--muted-foreground)]">
-                            {attachment.description?.trim() ? 'Description added' : 'No description yet'}
+                            <div className="line-clamp-2">{attachment.description?.trim() || 'No description yet'}</div>
                           </div>
                         </div>
                       ))}
@@ -10394,7 +10495,24 @@ function EditReferenceDialog({
                   )}
                 </div>
               </div>
-            ) : null}
+            ) : (
+              <div className="space-y-2">
+                <div className="text-[13px] font-medium text-[var(--foreground)]">Preview</div>
+                <div className="overflow-hidden rounded-[24px] border border-[var(--border-soft)] bg-[var(--surface2)]">
+                  <div className="aspect-[4/3] overflow-hidden bg-[var(--surface)]">
+                    {reference?.previewUrl ? (
+                      <img
+                        src={reference.previewUrl}
+                        alt={reference.groupTitle?.trim() || reference.title}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            )}
+            </div>
+            <div className="space-y-4">
             <div className="space-y-2">
               <label htmlFor="edit-reference-title" className="text-[13px] font-medium text-[var(--foreground)]">
                 Reference title
@@ -10419,6 +10537,7 @@ function EditReferenceDialog({
                 className="min-h-[120px] w-full resize-none rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] px-4 py-3 text-[14px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[var(--border-strong)]"
               />
             </div>
+            </div>
           </div>
           <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--border-soft)] bg-[color-mix(in_srgb,var(--surface)_96%,transparent)] px-5 py-4 backdrop-blur-xl">
             <Button
@@ -10435,31 +10554,60 @@ function EditReferenceDialog({
           </div>
         </form>
       </DialogContent>
-      <Dialog open={isAttachmentDescriptionDialogOpen} onOpenChange={setIsAttachmentDescriptionDialogOpen}>
+      <Dialog open={isAttachmentMetadataDialogOpen} onOpenChange={setIsAttachmentMetadataDialogOpen}>
         <DialogContent className="max-w-[520px]">
           <DialogHeader>
-            <DialogTitle>Attachment Description</DialogTitle>
-            <DialogDescription>Add image-specific notes for this reference image.</DialogDescription>
+            <DialogTitle>Image render metadata</DialogTitle>
+            <DialogDescription>Edit the per-image title and render description for this reference image.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3 pt-2">
+            <Input
+              data-testid="reference-attachment-title-input"
+              value={attachmentTitleDraft}
+              onChange={(event) => {
+                const nextTitle = event.target.value;
+                setAttachmentTitleDraft(nextTitle);
+                if (editingAttachmentKey) {
+                  setAttachments((current) =>
+                    current.map((attachment) =>
+                      attachment.localKey === editingAttachmentKey ? { ...attachment, title: nextTitle } : attachment
+                    )
+                  );
+                }
+              }}
+              placeholder="Image title"
+              autoFocus
+            />
             <textarea
+              data-testid="reference-attachment-description-input"
               value={attachmentDescriptionDraft}
-              onChange={(event) => setAttachmentDescriptionDraft(event.target.value)}
+              onChange={(event) => {
+                const nextDescription = event.target.value;
+                setAttachmentDescriptionDraft(nextDescription);
+                if (editingAttachmentKey) {
+                  setAttachments((current) =>
+                    current.map((attachment) =>
+                      attachment.localKey === editingAttachmentKey
+                        ? { ...attachment, description: nextDescription || undefined }
+                        : attachment
+                    )
+                  );
+                }
+              }}
               placeholder="Describe this image's key details, composition, or constraints."
               className="min-h-[140px] w-full resize-none rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] px-4 py-3 text-[14px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[var(--border-strong)]"
-              autoFocus
             />
             <div className="flex items-center justify-end gap-2">
               <Button
                 type="button"
                 variant="surface"
                 className="border-transparent bg-[var(--surface2)] hover:bg-[var(--surface3)]"
-                onClick={() => setIsAttachmentDescriptionDialogOpen(false)}
+                onClick={() => setIsAttachmentMetadataDialogOpen(false)}
               >
                 Cancel
               </Button>
-              <Button type="button" onClick={saveAttachmentDescription}>
-                Save description
+              <Button data-testid="reference-attachment-save-button" type="button" onClick={saveAttachmentMetadata}>
+                Save image metadata
               </Button>
             </div>
           </div>

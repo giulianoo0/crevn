@@ -2,7 +2,7 @@ const IMAGE_PRODUCTION_GUIDANCE = [
   'Imagen production guidance:',
   '- These are static image keyframes for later animation in Seedance.',
   '- The generated frames will be used by Seedance as reference images, so each still must be a complete, stable, animatable frame.',
-  '- Prepare outputs so the later seedance-cartoon stage can turn them into video prompts with subject lock, one clear motion beat, camera language, lighting/style, and negative constraints.',
+  '- Prepare outputs so the later direcao-de-cena stage can turn them into Seedance-ready scene plans with subject lock, one clear motion beat, camera language, lighting/style, and negative constraints.',
   '- Preserve environment identity using coverage plates and detail plates: same layout, materials, fixed object positions, door/window placement, lighting direction, palette, and scale.',
   '- Use environment coverage plates and closest detail plates for the visible area instead of redesigning the location.',
   '- Lock character identity with named character-sheet anchors: exact face shape, proportions, wardrobe, hair silhouette, palette, age read, and distinguishing details.',

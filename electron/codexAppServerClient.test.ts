@@ -184,4 +184,55 @@ describe('codex app-server client', () => {
       { id: 4, method: 'turn/interrupt', params: { threadId: 'thread-1', turnId: 'turn-1' } },
     ]);
   });
+
+  it('logs readable assistant, reasoning, and tool notifications', async () => {
+    const fake = new FakeProcess();
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const client = createCodexAppServerClient({ spawnProcess: () => fake });
+
+    const startPromise = client.start();
+    fake.server({ id: 1, result: {} });
+    await startPromise;
+
+    fake.server({
+      method: 'item/agentMessage/delta',
+      params: {
+        threadId: 'thread-1',
+        delta: 'Working through the composition and keeping the framing tight.',
+      },
+    });
+    fake.server({
+      method: 'item/reasoning/delta',
+      params: {
+        threadId: 'thread-1',
+        delta: 'Comparing two layout options before I commit.',
+      },
+    });
+    fake.server({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-1',
+        item: {
+          id: 'call_123',
+          type: 'commandExecution',
+          title: 'rg',
+          command: ['rg', '-n', 'reference', 'src'],
+        },
+      },
+    });
+
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '[crenv:codex-app-server] assistant thread=thread-1 preview="Working through the composition and keeping the framing tight."'
+      )
+    );
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '[crenv:codex-app-server] reasoning thread=thread-1 preview="Comparing two layout options before I commit."'
+      )
+    );
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[crenv:codex-app-server] tool commandExecution thread=thread-1 item=call_123 tool=rg')
+    );
+  });
 });

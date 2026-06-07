@@ -146,8 +146,13 @@ function createCodexAppServerClient(options = {}) {
       return;
     }
 
-    if (message.method && (TRACE_APP_SERVER_EVENTS || !isHighVolumeNotification(message.method))) {
-      console.info(`[crenv:codex-app-server] event: ${message.method}${summarizeNotification(message)}`);
+    if (message.method) {
+      const readableSummary = summarizeReadableNotification(message);
+      if (readableSummary) {
+        console.info(`[crenv:codex-app-server] ${readableSummary}`);
+      } else if (TRACE_APP_SERVER_EVENTS || !isHighVolumeNotification(message.method)) {
+        console.info(`[crenv:codex-app-server] event: ${message.method}${summarizeNotification(message)}`);
+      }
       if (TRACE_APP_SERVER_RAW) {
         console.info(`[crenv:codex-app-server] raw: ${truncate(JSON.stringify(message), 4000)}`);
       }
@@ -289,6 +294,30 @@ function summarizeNotification(message) {
   return parts.length > 0 ? ` ${parts.join(' ')}` : '';
 }
 
+function summarizeReadableNotification(message) {
+  const method = message?.method;
+  const params = message?.params ?? {};
+  const threadPart = params.threadId ? ` thread=${params.threadId}` : '';
+  if (method === 'item/agentMessage/delta') {
+    const preview = summarizePreview(params.delta);
+    return preview ? `assistant${threadPart} preview="${preview}"` : null;
+  }
+  if (method === 'item/reasoning/delta') {
+    const preview = summarizePreview(params.delta);
+    return preview ? `reasoning${threadPart} preview="${preview}"` : null;
+  }
+  if (method === 'item/completed') {
+    const item = params.item ?? params.completedItem ?? params;
+    const itemType = item?.type ?? item?.kind ?? item?.itemType;
+    const itemId = params.itemId ?? item?.id;
+    if (itemType === 'commandExecution' || itemType === 'toolCall' || itemType === 'functionCall' || itemType === 'imageView') {
+      const toolName = extractToolName(item);
+      return `tool ${itemType}${threadPart}${itemId ? ` item=${itemId}` : ''}${toolName ? ` tool=${toolName}` : ''}`;
+    }
+  }
+  return null;
+}
+
 function summarizeError(error) {
   if (!error) {
     return '';
@@ -331,6 +360,30 @@ function getItemTextLength(item) {
         .join('').length
     );
   }, 0);
+}
+
+function summarizePreview(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  const compact = value.replace(/\s+/g, ' ').trim();
+  return compact ? truncate(compact, 160) : '';
+}
+
+function extractToolName(item) {
+  if (!item || typeof item !== 'object') {
+    return '';
+  }
+  const candidates = [
+    item.title,
+    item.toolName,
+    item.name,
+    item.commandName,
+    Array.isArray(item.command) ? item.command[0] : null,
+    item.command,
+  ];
+  const candidate = candidates.find((value) => typeof value === 'string' && value.trim());
+  return candidate ? truncate(candidate.trim(), 80) : '';
 }
 
 function truncate(value, maxLength) {

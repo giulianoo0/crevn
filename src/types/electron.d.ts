@@ -93,7 +93,9 @@ interface ElectronReferenceImageRecord {
   id: string;
   name: string;
   title: string;
+  groupTitle?: string | null;
   description: string | null;
+  groupDescription?: string | null;
   mimeType: string;
   bytesBase64: string;
   createdAt: string;
@@ -116,6 +118,7 @@ interface ElectronCreateEnvironmentReferencePayload {
   description?: string;
   attachments: Array<{
     name: string;
+    title?: string;
     mimeType: string;
     bytesBase64: string;
     description?: string;
@@ -128,6 +131,7 @@ interface ElectronCreateReferenceCollectionPayload {
   description?: string;
   attachments: Array<{
     name: string;
+    title?: string;
     mimeType: string;
     bytesBase64: string;
     description?: string;
@@ -149,6 +153,7 @@ interface ElectronUpdateEnvironmentReferencePayload {
   attachments: Array<{
     id?: string;
     name: string;
+    title?: string;
     mimeType: string;
     bytesBase64: string;
     description?: string;
@@ -163,6 +168,7 @@ interface ElectronUpdateReferenceCollectionPayload {
   attachments: Array<{
     id?: string;
     name: string;
+    title?: string;
     mimeType: string;
     bytesBase64: string;
     description?: string;

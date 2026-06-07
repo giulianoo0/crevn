@@ -197,12 +197,14 @@ vi.mock('./lib/electron-api', () => ({
     ...payload,
   })),
   createEnvironmentReference: vi.fn(async (payload) =>
-    payload.attachments.map((attachment: { name: string; mimeType: string; bytesBase64: string }, index: number) => ({
+    payload.attachments.map((attachment: { name: string; title?: string; mimeType: string; bytesBase64: string }, index: number) => ({
       id: `environment-reference-${index + 1}`,
       collectionId: 'environment-1',
       environmentId: 'environment-1',
-      title: payload.title,
+      title: attachment.title ?? attachment.name,
+      groupTitle: payload.title,
       description: payload.description ?? null,
+      groupDescription: payload.description ?? null,
       name: attachment.name,
       mimeType: attachment.mimeType,
       bytesBase64: attachment.bytesBase64,
@@ -211,12 +213,14 @@ vi.mock('./lib/electron-api', () => ({
     }))
   ),
   createReferenceCollection: vi.fn(async (payload) =>
-    payload.attachments.map((attachment: { name: string; mimeType: string; bytesBase64: string; description?: string }, index: number) => ({
+    payload.attachments.map((attachment: { name: string; title?: string; mimeType: string; bytesBase64: string; description?: string }, index: number) => ({
       id: `${payload.category}-reference-${index + 1}`,
       collectionId: `${payload.category}-collection-1`,
       environmentId: payload.category === 'environment' ? 'environment-1' : null,
-      title: payload.title,
+      title: attachment.title ?? attachment.name,
+      groupTitle: payload.title,
       description: attachment.description ?? payload.description ?? null,
+      groupDescription: payload.description ?? null,
       name: attachment.name,
       mimeType: attachment.mimeType,
       bytesBase64: attachment.bytesBase64,
@@ -237,11 +241,13 @@ vi.mock('./lib/electron-api', () => ({
     category: payload.category,
   })),
   updateEnvironmentReference: vi.fn(async (payload) =>
-    payload.attachments.map((attachment: { id?: string; name: string; mimeType: string; bytesBase64: string; description?: string }, index: number) => ({
+    payload.attachments.map((attachment: { id?: string; name: string; title?: string; mimeType: string; bytesBase64: string; description?: string }, index: number) => ({
       id: attachment.id ?? `environment-reference-${index + 1}`,
       environmentId: payload.environmentId,
-      title: payload.title,
+      title: attachment.title ?? attachment.name,
+      groupTitle: payload.title,
       description: attachment.description ?? payload.description ?? null,
+      groupDescription: payload.description ?? null,
       name: attachment.name,
       mimeType: attachment.mimeType,
       bytesBase64: attachment.bytesBase64,
@@ -250,12 +256,14 @@ vi.mock('./lib/electron-api', () => ({
     }))
   ),
   updateReferenceCollection: vi.fn(async (payload) =>
-    payload.attachments.map((attachment: { id?: string; name: string; mimeType: string; bytesBase64: string; description?: string }, index: number) => ({
+    payload.attachments.map((attachment: { id?: string; name: string; title?: string; mimeType: string; bytesBase64: string; description?: string }, index: number) => ({
       id: attachment.id ?? `${payload.category}-reference-${index + 1}`,
       collectionId: payload.collectionId,
       environmentId: payload.category === 'environment' ? payload.collectionId : null,
-      title: payload.title,
+      title: attachment.title ?? attachment.name,
+      groupTitle: payload.title,
       description: attachment.description ?? payload.description ?? null,
+      groupDescription: payload.description ?? null,
       name: attachment.name,
       mimeType: attachment.mimeType,
       bytesBase64: attachment.bytesBase64,
@@ -2362,7 +2370,7 @@ describe('App header thread title', () => {
     fireEvent.change(screen.getByLabelText('Title'), {
       target: { value: 'Hover bikes' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save reference' }));
+    fireEvent.click(screen.getAllByText('Save reference').at(-1)!);
 
     await act(async () => {
       await vi.runAllTimersAsync();
@@ -3873,7 +3881,7 @@ describe('App header thread title', () => {
     fireEvent.change(screen.getByLabelText('Description'), {
       target: { value: 'Keep the same facial proportions and warm palette.' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save reference' }));
+    fireEvent.click(screen.getAllByText('Save reference').at(-1)!);
 
     await act(async () => {
       await vi.runAllTimersAsync();
@@ -3911,7 +3919,7 @@ describe('App header thread title', () => {
     fireEvent.change(screen.getByLabelText('Title'), {
       target: { value: 'Dropped guide' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save reference' }));
+    fireEvent.click(screen.getAllByText('Save reference').at(-1)!);
 
     await act(async () => {
       await vi.runAllTimersAsync();
@@ -3954,7 +3962,7 @@ describe('App header thread title', () => {
     fireEvent.change(screen.getByLabelText('Description'), {
       target: { value: 'Concrete floor, industrial lighting, steel shelves.' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save reference' }));
+    fireEvent.click(screen.getAllByText('Save reference').at(-1)!);
 
     await act(async () => {
       await vi.runAllTimersAsync();
@@ -4000,10 +4008,87 @@ describe('App header thread title', () => {
     const scrollRegion = screen.getByTestId('add-reference-dialog-scroll');
     const footer = screen.getByTestId('add-reference-dialog-footer');
 
-    expect(dialog.className).toContain('max-h-[calc(100vh-32px)]');
+    expect(dialog.className).toContain('max-w-[1180px]');
     expect(scrollRegion.className).toContain('overflow-y-auto');
+    expect(scrollRegion.className).toContain('lg:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]');
     expect(footer.className).toContain('sticky');
     expect(screen.getByRole('button', { name: 'Save reference' })).toBeInTheDocument();
+  });
+
+  it('edits environment references with the same split layout and saves per-image titles', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'environment-reference-1',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-1.png',
+        title: 'Dock angle',
+        groupTitle: 'Warehouse',
+        description: 'Old note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+      {
+        id: 'environment-reference-2',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-2.png',
+        title: 'Office corner',
+        groupTitle: 'Warehouse',
+        description: 'Existing second note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Warehouse' }));
+
+    const editDialog = screen.getByRole('dialog', { name: 'Edit environment' });
+    expect(editDialog.className).toContain('max-w-[1180px]');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit render metadata for env-1.png' }));
+    fireEvent.change(screen.getAllByTestId('reference-attachment-title-input').at(-1)!, {
+      target: { value: 'Primary dock angle' },
+    });
+    fireEvent.change(screen.getAllByTestId('reference-attachment-description-input').at(-1)!, {
+      target: { value: 'Updated dock note' },
+    });
+    fireEvent.click(screen.getAllByTestId('reference-attachment-save-button').at(-1)!);
+
+    fireEvent.click(screen.getAllByText('Save changes').at(-1)!);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.updateReferenceCollection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        collectionId: 'environment-1',
+        category: 'environment',
+        title: 'Warehouse',
+        attachments: expect.arrayContaining([
+          expect.objectContaining({
+            id: 'environment-reference-1',
+            title: 'Primary dock angle',
+            description: 'Updated dock note',
+          }),
+        ]),
+      })
+    );
   });
 
   it('filters reference mentions after @ and inserts the selected name', async () => {

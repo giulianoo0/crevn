@@ -9,6 +9,125 @@ const IMAGE_READY_PREFIX = 'CRENV_IMAGE_READY ';
 const IMAGE_READY_SCHEMA = 'crenv.image.ready.v1';
 const TRACE_IMAGE_RUNTIME = process.env.CRENV_CODEX_APP_SERVER_TRACE === '1';
 const READY_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+const MIME_TYPE_TO_EXTENSION = {
+  'image/jpeg': '.jpg',
+  'image/jpg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+};
+
+function extractCompletedAssistantText(item) {
+  if (!item || typeof item !== 'object') {
+    return '';
+  }
+
+  const type = item.type ?? item.kind ?? item.itemType;
+  if (type && type !== 'agentMessage' && type !== 'assistantMessage' && type !== 'message') {
+    return '';
+  }
+
+  const directText = firstString(item.text, item.contentMarkdown, item.markdown, item.outputText, item.message);
+  if (directText) {
+    return directText;
+  }
+
+  if (Array.isArray(item.content)) {
+    return item.content
+      .map((part) =>
+        typeof part === 'string'
+          ? part
+          : firstString(part?.text, part?.content, part?.markdown, part?.outputText)
+      )
+      .filter(Boolean)
+      .join('');
+  }
+
+  return '';
+}
+
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.length > 0) {
+      return value;
+    }
+  }
+  return '';
+}
+
+function extractCompletedImageGenerationOutputs(item) {
+  const results = [];
+  const seenObjects = new Set();
+
+  visit(item);
+  return results;
+
+  function visit(value) {
+    if (!value || typeof value !== 'object') {
+      return;
+    }
+    if (seenObjects.has(value)) {
+      return;
+    }
+    seenObjects.add(value);
+
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        visit(entry);
+      }
+      return;
+    }
+
+    const pathValue = firstString(value.path, value.filePath, value.localPath);
+    if (pathValue && looksLikeImagePath(pathValue)) {
+      results.push({
+        kind: 'path',
+        path: pathValue,
+        imageId: firstString(value.imageId, value.id, value.providerImageId),
+        mimeType: normalizeMimeType(firstString(value.mimeType, value.mediaType, value.contentType)),
+      });
+    }
+
+    const base64Value = firstString(value.bytesBase64, value.base64, value.b64_json);
+    if (base64Value) {
+      results.push({
+        kind: 'base64',
+        bytesBase64: base64Value,
+        imageId: firstString(value.imageId, value.id, value.providerImageId),
+        mimeType: normalizeMimeType(firstString(value.mimeType, value.mediaType, value.contentType)),
+      });
+    }
+
+    for (const nested of Object.values(value)) {
+      visit(nested);
+    }
+  }
+}
+
+function looksLikeImagePath(value) {
+  const extension = path.extname(String(value ?? '')).toLowerCase();
+  return READY_IMAGE_EXTENSIONS.has(extension);
+}
+
+function normalizeMimeType(value) {
+  if (!value) {
+    return null;
+  }
+  const normalized = String(value).toLowerCase();
+  return Object.prototype.hasOwnProperty.call(MIME_TYPE_TO_EXTENSION, normalized) ? normalized : null;
+}
+
+function extensionForImageOutput(candidate) {
+  if (candidate.kind === 'path') {
+    const extension = path.extname(candidate.path).toLowerCase();
+    if (READY_IMAGE_EXTENSIONS.has(extension)) {
+      return extension;
+    }
+  }
+  if (candidate.mimeType && MIME_TYPE_TO_EXTENSION[candidate.mimeType]) {
+    return MIME_TYPE_TO_EXTENSION[candidate.mimeType];
+  }
+  return '.png';
+}
 
 function parseCrenvImageReadyLine(line) {
   const text = String(line ?? '').trim();
@@ -78,16 +197,17 @@ function isPathInside(candidatePath, parentPath) {
 
 function buildCrenvImageReadyPromptContract({ jobId, outputDirectory, requestedCount }) {
   return [
-    'Direct image registration contract:',
+    'Streaming image registration contract:',
     `- Job id: ${jobId}`,
     `- Output directory: ${outputDirectory}`,
     `- Requested accepted image count: ${requestedCount}`,
-    '- Save each accepted final image directly under output/ready.',
-    '- Do not create output/tmp candidates.',
-    '- Do not write sidecar JSON files, events.jsonl, or final manifests.',
-    '- Do not perform iterative self-review or regeneration unless an image is missing, corrupt, wrong-count, or unusable.',
+    '- Write in-progress candidates under output/tmp.',
+    '- Review or regenerate each candidate before exposing it.',
+    '- Move only accepted images into output/ready.',
+    '- For every accepted image, write output/ready/<imageId>.json with the same JSON object you emit.',
+    '- Append each accepted-image JSON object to output/events.jsonl.',
     '- In every event, set path to a relative forward-slash path like output/ready/000.png, never a Windows backslash path.',
-    '- Print exactly one single-line event immediately after each final image file exists:',
+    '- Print exactly one single-line event for each accepted image:',
     `CRENV_IMAGE_READY {"schema":"${IMAGE_READY_SCHEMA}","jobId":"${jobId}","imageId":"unique-image-id","outputIndex":0,"path":"output/ready/000.png","reviewStatus":"accepted"}`,
     '- No final manifest is required.',
   ].join('\n');
@@ -219,10 +339,12 @@ async function runCodexImageAppServerJob({
   let readyCount = 0;
   let hasDispatchedScenePlan = false;
   let cancelableRunRegistered = false;
+  const completedItemIds = new Set();
   const seenImageIds = new Set();
   const seenAbsolutePaths = new Set();
   const readyEventPromises = [];
   const textBuffer = { value: '' };
+  let synthesizedReadyEventIndex = 0;
   let settle;
   let reject;
   const completionPromise = new Promise((resolve, rejectPromise) => {
@@ -274,6 +396,58 @@ async function runCodexImageAppServerJob({
       providerTurnId,
     });
     readyCount += 1;
+  }
+
+  async function materializeImageGenerationOutputs(item) {
+    const candidates = extractCompletedImageGenerationOutputs(item);
+    if (candidates.length === 0) {
+      return false;
+    }
+
+    const readyDirectory = path.join(outputDirectory, 'ready');
+    await fsp.mkdir(readyDirectory, { recursive: true });
+
+    let importedAny = false;
+    for (const candidate of candidates) {
+      synthesizedReadyEventIndex += 1;
+      const outputIndex = synthesizedReadyEventIndex - 1;
+      const extension = extensionForImageOutput(candidate);
+      const fileName = `${String(outputIndex).padStart(3, '0')}${extension}`;
+      const absolutePath = path.join(readyDirectory, fileName);
+
+      if (candidate.kind === 'path') {
+        const sourcePath = path.resolve(candidate.path);
+        try {
+          await fsp.copyFile(sourcePath, absolutePath);
+        } catch {
+          continue;
+        }
+      } else {
+        try {
+          const bytes = Buffer.from(candidate.bytesBase64, 'base64');
+          if (bytes.length === 0) {
+            continue;
+          }
+          await fsp.writeFile(absolutePath, bytes);
+        } catch {
+          continue;
+        }
+      }
+
+      const event = {
+        schema: IMAGE_READY_SCHEMA,
+        jobId,
+        imageId: candidate.imageId || `generated-${outputIndex + 1}`,
+        outputIndex,
+        path: `output/ready/${fileName}`,
+        reviewStatus: 'accepted',
+      };
+      const promise = processReadyEvent(event).catch(reject);
+      readyEventPromises.push(promise);
+      importedAny = true;
+    }
+
+    return importedAny;
   }
 
   function processOutputLine(line) {
@@ -340,6 +514,41 @@ async function runCodexImageAppServerJob({
             ingestText(encoded);
           }
         }
+        return;
+      }
+
+      if (method === 'item/completed') {
+        const item = params.item ?? params.completedItem ?? params;
+        const itemId = item?.id ?? params.itemId ?? null;
+        if (itemId && completedItemIds.has(itemId)) {
+          if (TRACE_IMAGE_RUNTIME) {
+            console.info(`[crenv:codex:${jobId}] ignored duplicate completed item item=${itemId}`);
+          }
+          return;
+        }
+        const itemType = item?.type ?? item?.kind ?? item?.itemType;
+        if (itemId) {
+          completedItemIds.add(itemId);
+        }
+        if (itemType === 'imageGeneration') {
+          const promise = materializeImageGenerationOutputs(item).catch(reject);
+          readyEventPromises.push(promise);
+        }
+        const completedText = extractCompletedAssistantText(item);
+        if (!completedText || textBuffer.value.includes(completedText)) {
+          if (TRACE_IMAGE_RUNTIME) {
+            console.info(
+              `[crenv:codex:${jobId}] ignored completed item item=${itemId ?? 'unknown'} textChars=${completedText.length} duplicate=${completedText ? 'yes' : 'no'}`
+            );
+          }
+          return;
+        }
+        if (TRACE_IMAGE_RUNTIME) {
+          console.info(
+            `[crenv:codex:${jobId}] completed item text item=${itemId ?? 'unknown'} textChars=${completedText.length}`
+          );
+        }
+        ingestText(completedText);
         return;
       }
 

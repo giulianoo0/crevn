@@ -41,17 +41,17 @@ describe('generation codex runner environment', () => {
     const bundledSkillsDir = path.join(rootDir, 'bundled-skills');
     const codexHomeDir = path.join(rootDir, 'codex-home');
 
-    await fsp.mkdir(path.join(bundledSkillsDir, 'seedance-cartoon'), { recursive: true });
-    await fsp.writeFile(path.join(bundledSkillsDir, 'seedance-cartoon', 'SKILL.md'), 'bundled skill');
-    await fsp.mkdir(path.join(codexHomeDir, 'skills', 'seedance-cartoon'), { recursive: true });
-    await fsp.writeFile(path.join(codexHomeDir, 'skills', 'seedance-cartoon', 'SKILL.md'), 'local edit');
+    await fsp.mkdir(path.join(bundledSkillsDir, 'direcao-de-cena'), { recursive: true });
+    await fsp.writeFile(path.join(bundledSkillsDir, 'direcao-de-cena', 'SKILL.md'), 'bundled skill');
+    await fsp.mkdir(path.join(codexHomeDir, 'skills', 'direcao-de-cena'), { recursive: true });
+    await fsp.writeFile(path.join(codexHomeDir, 'skills', 'direcao-de-cena', 'SKILL.md'), 'local edit');
 
     await generationModule.__test__.seedBundledCodexSkills({
       bundledSkillsDir,
       codexHomeDir,
     });
 
-    await expect(fsp.readFile(path.join(codexHomeDir, 'skills', 'seedance-cartoon', 'SKILL.md'), 'utf8')).resolves.toBe(
+    await expect(fsp.readFile(path.join(codexHomeDir, 'skills', 'direcao-de-cena', 'SKILL.md'), 'utf8')).resolves.toBe(
       'local edit'
     );
   });
@@ -165,13 +165,10 @@ describe('generation codex runner environment', () => {
     expect(prompt).toContain('Print that JSON line directly to stdout yourself.');
     expect(prompt).toContain('Do not use shell commands, exec, tool calls, or helper scripts to emit the scene plan.');
     expect(prompt).toContain('These are static image keyframes for later animation in Seedance.');
-    expect(prompt).toContain('seedance-cartoon');
+    expect(prompt).toContain('direcao-de-cena');
     expect(prompt).toContain('Preserve environment identity using coverage plates and detail plates');
     expect(prompt).toContain('Lock character identity with named character-sheet anchors');
-    expect(prompt).toContain('Use Codex image generation directly and keep the workflow short.');
-    expect(prompt).toContain('Prefer one batched image generation call when Codex supports the requested count.');
-    expect(prompt).toContain('Reference lock checklist:');
-    expect(prompt).toContain('References win over prompt text for identity, layout, materials, palette, and fixed prop placement.');
+    expect(prompt).toContain('Use Codex image generation capabilities to create image files for the following prompt.');
   });
 
   it('builds a strict JSON prompt for scene structuring', () => {
@@ -211,10 +208,7 @@ describe('generation codex runner environment', () => {
     expect(tasks[1]?.prompt).toContain('Use only the scene continuity brief, attached references, and this target frame prompt.');
     expect(tasks[1]?.prompt).toContain('Target frame prompt: Closer shot on Tito.');
     expect(tasks[1]?.prompt).toContain('This output is a static keyframe for later animation in Seedance.');
-    expect(tasks[1]?.prompt).toContain('seedance-cartoon');
-    expect(tasks[1]?.prompt).toContain('Reference discipline:');
-    expect(tasks[1]?.prompt).toContain('References are authoritative anchors, not loose inspiration.');
-    expect(tasks[1]?.prompt).toContain('If text conflicts with references, references win for identity, layout, materials, palette, and fixed prop placement.');
+    expect(tasks[1]?.prompt).toContain('direcao-de-cena');
     expect(tasks[1]?.prompt).toContain('Keep visible character identity locked to character sheets');
     expect(tasks[1]?.prompt).toContain('Use environment coverage plates and closest detail plates');
     expect(tasks[1]?.prompt).not.toContain('Previous frame context:');
@@ -315,9 +309,9 @@ describe('generation codex runner environment', () => {
     expect(prompt).toContain('When reviewing generated outputs');
     expect(prompt).toContain('Give visible characters natural performance beats');
     expect(prompt).toContain('Every frame you prepare is a static image keyframe for later Seedance animation');
-    expect(prompt).toContain('seedance-cartoon');
+    expect(prompt).toContain('direcao-de-cena');
     expect(prompt).toContain('Treat every create_scene action as a Seedance multishot blueprint');
-    expect(prompt).toContain('Loaded seedance-cartoon skill contract:');
+    expect(prompt).toContain('Loaded direcao-de-cena skill contract:');
     expect(prompt).toContain('Use Shot 1:, Shot 2:, and Hard cut to labels');
     expect(prompt).toContain('Duration: 12-15s for multishot, 16:9.');
     expect(prompt).toContain('Audio: no music, no background score. Sound effects and ambient only');

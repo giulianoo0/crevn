@@ -45,8 +45,8 @@ const IMAGE_PRODUCTION_GUIDANCE_LINES = [
   'Imagen production guidance:',
   '- These are static image keyframes for later animation in Seedance.',
   '- The generated frames will be used by Seedance as reference images, so each still must be a complete, stable, animatable frame.',
-  '- Prepare outputs so the later seedance-cartoon skill can turn them into video prompts with subject lock, one clear motion beat, camera language, lighting/style, and negative constraints.',
-  '- When planning Seedance/video-ready output, apply the seedance-cartoon rules too: English prompts, 16:9, polished 3D feature-animation look, and no music, only sound effects and ambient audio.',
+  '- Prepare outputs so the later direcao-de-cena skill can turn them into Seedance-ready scene plans with subject lock, one clear motion beat, camera language, lighting/style, and negative constraints.',
+  '- When planning Seedance/video-ready output, apply the direcao-de-cena rules too: cartoon DreamWorks look, reference-image-first continuity, multishot structure, and music disabled.',
   '- Preserve environment identity using coverage plates and detail plates: same layout, materials, fixed object positions, door/window placement, lighting direction, palette, and scale.',
   '- Use environment coverage plates and closest detail plates for the visible area instead of redesigning the location.',
   '- Lock character identity with named character-sheet anchors: exact face shape, proportions, wardrobe, hair silhouette, palette, age read, and distinguishing details.',
@@ -60,12 +60,12 @@ const IMAGE_PRODUCTION_GUIDANCE_LINES = [
 const IMAGE_PRODUCTION_GUIDANCE = IMAGE_PRODUCTION_GUIDANCE_LINES.join('\n');
 
 const DIRECTOR_SEEDANCE_CARTOON_CONTRACT_LINES = [
-  'Loaded seedance-cartoon skill contract:',
+  'Loaded direcao-de-cena skill contract:',
   '- Treat every create_scene action as a Seedance multishot blueprint: each frame is one shot/keyframe in a single future Seedance sequence, not an unrelated still-image batch.',
-  '- When the user asks for a scene, video, animation, multishot, cartoon motion prompt, or Seedance-ready output, apply this contract even if the user does not say "seedance-cartoon".',
+  '- When the user asks for a scene, video, animation, multishot, cartoon motion prompt, or Seedance-ready output, apply this contract even if the user does not say "direcao-de-cena".',
   '- Keep the video prompt copy in English. Explanations may be in the user language, but copy-ready Seedance prompt blocks must be English.',
   '- Always target landscape 16:9.',
-  '- Use a polished 3D feature-animation look: semi-realistic proportions, tactile materials, detailed hair, soft subsurface skin, expressive eyes, motivated cinematic lighting, and faint volumetric atmosphere.',
+  '- Use a cartoon DreamWorks look: polished 3D feature-animation proportions, tactile materials, detailed hair, soft subsurface skin, expressive eyes, motivated cinematic lighting, and faint volumetric atmosphere.',
   '- Never name animation studios in the prompt text; describe visual qualities instead.',
   '- Use Shot 1:, Shot 2:, and Hard cut to labels for multishot prompts. Limit to five shots unless the user explicitly asks otherwise.',
   '- Keep one clear action beat per shot. Do not stack multiple major actions inside one shot block.',
@@ -143,7 +143,7 @@ function buildSceneFramePrompt({
     `Generate only this target frame: ${targetOverride?.title || targetFrame.title}.`,
     'Use only the scene continuity brief, attached references, and this target frame prompt.',
     'This output is a static keyframe for later animation in Seedance.',
-    'The later seedance-cartoon stage will use this frame as a reference image, so make identity, environment, pose, lighting, and composition stable enough for video prompt generation.',
+    'The later direcao-de-cena stage will use this frame as a reference image, so make identity, environment, pose, lighting, and composition stable enough for Seedance-ready planning.',
     'Reference discipline:',
     '- References are authoritative anchors, not loose inspiration.',
     '- If text conflicts with references, references win for identity, layout, materials, palette, and fixed prop placement.',
@@ -605,8 +605,8 @@ function buildDirectorChatPrompt({
     'When changing camera angle or shot size, rotate or reframe within the same environment instead of redesigning the location.',
     'Every frame you prepare is a static image keyframe for later Seedance animation, not a final video prompt.',
     'These generated still frames are later used in Seedance as reference images.',
-    'Add enough stable visual specificity that the later seedance-cartoon skill can create video prompts using subject lock, one action beat, one camera instruction, lighting/style, and negative constraints.',
-    'When the user asks for Seedance, video, animation, multishot, or cartoon motion prompts, use the seedance-cartoon skill standards too: write the video prompt in English, keep it 16:9, use a polished 3D feature-animation look, and specify no music, only sound effects and ambient audio.',
+    'Add enough stable visual specificity that the later direcao-de-cena skill can create Seedance-ready prompts using subject lock, one action beat, one camera instruction, lighting/style, and negative constraints.',
+    'When the user asks for Seedance, video, animation, multishot, or cartoon motion prompts, use the direcao-de-cena skill standards too: write the video prompt in English, keep it 16:9, use a cartoon DreamWorks look, and keep music disabled.',
     'Use consistent character names, exact wardrobe, proportions, face shape, hair silhouette, palette, and distinguishing details across Classic and Scenes actions.',
     'If a character appears across multiple frames, repeat the identity lock in every frame prompt and re-anchor to the character sheet or strongest approved keyframe.',
     'Only provide the references and continuity constraints needed for the requested shot or frame; avoid stuffing unrelated references into the payload.',
@@ -785,6 +785,7 @@ const characterReferenceAttachmentsTable = sqliteTable('character_reference_atta
     .notNull()
     .references(() => characterReferenceCollectionsTable.id),
   name: text('name').notNull(),
+  title: text('title'),
   mimeType: text('mime_type').notNull(),
   bytesBase64: text('bytes_base64').notNull(),
   description: text('description'),
@@ -804,6 +805,7 @@ const objectReferenceAttachmentsTable = sqliteTable('object_reference_attachment
     .notNull()
     .references(() => objectReferenceCollectionsTable.id),
   name: text('name').notNull(),
+  title: text('title'),
   mimeType: text('mime_type').notNull(),
   bytesBase64: text('bytes_base64').notNull(),
   description: text('description'),
@@ -823,6 +825,7 @@ const environmentReferenceAttachmentsTable = sqliteTable('environment_reference_
     .notNull()
     .references(() => environmentReferencesTable.id),
   name: text('name').notNull(),
+  title: text('title'),
   mimeType: text('mime_type').notNull(),
   bytesBase64: text('bytes_base64').notNull(),
   description: text('description'),
@@ -1037,6 +1040,7 @@ const CREATE_CHARACTER_REFERENCE_ATTACHMENTS_TABLE_SQL = `
     id TEXT PRIMARY KEY,
     collection_id TEXT NOT NULL,
     name TEXT NOT NULL,
+    title TEXT,
     mime_type TEXT NOT NULL,
     bytes_base64 TEXT NOT NULL,
     description TEXT,
@@ -1059,6 +1063,7 @@ const CREATE_OBJECT_REFERENCE_ATTACHMENTS_TABLE_SQL = `
     id TEXT PRIMARY KEY,
     collection_id TEXT NOT NULL,
     name TEXT NOT NULL,
+    title TEXT,
     mime_type TEXT NOT NULL,
     bytes_base64 TEXT NOT NULL,
     description TEXT,
@@ -1081,6 +1086,7 @@ const CREATE_ENVIRONMENT_REFERENCE_ATTACHMENTS_TABLE_SQL = `
     id TEXT PRIMARY KEY,
     environment_id TEXT NOT NULL,
     name TEXT NOT NULL,
+    title TEXT,
     mime_type TEXT NOT NULL,
     bytes_base64 TEXT NOT NULL,
     description TEXT,
@@ -1647,6 +1653,7 @@ async function createGenerationStore(userDataDir, options = {}) {
   await db.run(sql.raw(CREATE_DIRECTOR_MESSAGES_TABLE_SQL));
   await migrateLegacyReferencesTable(db);
   await ensureEnvironmentAttachmentDescriptionColumn(db);
+  await ensureReferenceAttachmentTitleColumns(db);
   await ensureProjectSettingsColumns(db);
   await ensureGenerationJobsThreadColumn(db);
   await ensureGenerationJobMetadataColumns(db);
@@ -2515,24 +2522,26 @@ async function createGenerationStore(userDataDir, options = {}) {
     return category === 'objects' ? 'objects' : 'characters';
   }
 
-  function mapReferenceCollectionAttachment({
-    attachment,
-    category,
+function mapReferenceCollectionAttachment({
+  attachment,
+  category,
+  collectionId,
+  collectionTitle,
+  collectionDescription,
+  timestamp,
+}) {
+  return {
+    id: attachment.id ?? nanoid(),
     collectionId,
-    collectionTitle,
-    collectionDescription,
-    timestamp,
-  }) {
-    return {
-      id: attachment.id ?? nanoid(),
-      collectionId,
-      name: attachment.name,
-      title: collectionTitle,
-      description: attachment.description?.trim() || collectionDescription || null,
-      mimeType: attachment.mimeType || 'image/png',
-      bytesBase64: attachment.bytesBase64,
-      createdAt: timestamp,
-      category,
+    name: attachment.name,
+    title: attachment.title?.trim() || attachment.name,
+    groupTitle: collectionTitle,
+    description: attachment.description?.trim() || collectionDescription || null,
+    groupDescription: collectionDescription,
+    mimeType: attachment.mimeType || 'image/png',
+    bytesBase64: attachment.bytesBase64,
+    createdAt: timestamp,
+    category,
       environmentId: category === 'environment' ? collectionId : null,
     };
   }
@@ -2567,6 +2576,7 @@ async function createGenerationStore(userDataDir, options = {}) {
       id: nanoid(),
       collectionId,
       name: attachment.name,
+      title: attachment.title?.trim() || attachment.name,
       mimeType: attachment.mimeType || 'image/png',
       bytesBase64: attachment.bytesBase64,
       description: attachment.description?.trim() || null,
@@ -2604,6 +2614,7 @@ async function createGenerationStore(userDataDir, options = {}) {
       id: nanoid(),
       environmentId,
       name: attachment.name,
+      title: attachment.title?.trim() || attachment.name,
       mimeType: attachment.mimeType || 'image/png',
       bytesBase64: attachment.bytesBase64,
       description: attachment.description?.trim() || null,
@@ -2618,8 +2629,10 @@ async function createGenerationStore(userDataDir, options = {}) {
       collectionId: environmentId,
       environmentId,
       name: attachment.name,
-      title: payload.title.trim(),
+      title: attachment.title?.trim() || attachment.name,
+      groupTitle: payload.title.trim(),
       description: attachment.description?.trim() || payload.description?.trim() || null,
+      groupDescription: payload.description?.trim() || null,
       mimeType: attachment.mimeType,
       bytesBase64: attachment.bytesBase64,
       createdAt: attachment.createdAt,
@@ -2710,6 +2723,7 @@ async function createGenerationStore(userDataDir, options = {}) {
       id: attachment.id ?? nanoid(),
       environmentId,
       name: attachment.name,
+      title: attachment.title?.trim() || attachment.name,
       mimeType: attachment.mimeType || 'image/png',
       bytesBase64: attachment.bytesBase64,
       description: attachment.description?.trim() || null,
@@ -2725,8 +2739,10 @@ async function createGenerationStore(userDataDir, options = {}) {
       collectionId: environmentId,
       environmentId,
       name: attachment.name,
-      title,
+      title: attachment.title?.trim() || attachment.name,
+      groupTitle: title,
       description: attachment.description ?? description,
+      groupDescription: description,
       mimeType: attachment.mimeType,
       bytesBase64: attachment.bytesBase64,
       createdAt: attachment.createdAt,
@@ -2768,6 +2784,7 @@ async function createGenerationStore(userDataDir, options = {}) {
       id: attachment.id ?? nanoid(),
       collectionId,
       name: attachment.name,
+      title: attachment.title?.trim() || attachment.name,
       mimeType: attachment.mimeType || 'image/png',
       bytesBase64: attachment.bytesBase64,
       description: attachment.description?.trim() || null,
@@ -2834,7 +2851,8 @@ async function createGenerationStore(userDataDir, options = {}) {
           id: characterReferenceAttachmentsTable.id,
           collectionId: characterReferenceAttachmentsTable.collectionId,
           name: characterReferenceAttachmentsTable.name,
-          title: characterReferenceCollectionsTable.title,
+          title: characterReferenceAttachmentsTable.title,
+          groupTitle: characterReferenceCollectionsTable.title,
           collectionDescription: characterReferenceCollectionsTable.description,
           description: characterReferenceAttachmentsTable.description,
           mimeType: characterReferenceAttachmentsTable.mimeType,
@@ -2852,7 +2870,8 @@ async function createGenerationStore(userDataDir, options = {}) {
           id: objectReferenceAttachmentsTable.id,
           collectionId: objectReferenceAttachmentsTable.collectionId,
           name: objectReferenceAttachmentsTable.name,
-          title: objectReferenceCollectionsTable.title,
+          title: objectReferenceAttachmentsTable.title,
+          groupTitle: objectReferenceCollectionsTable.title,
           collectionDescription: objectReferenceCollectionsTable.description,
           description: objectReferenceAttachmentsTable.description,
           mimeType: objectReferenceAttachmentsTable.mimeType,
@@ -2870,7 +2889,8 @@ async function createGenerationStore(userDataDir, options = {}) {
           id: environmentReferenceAttachmentsTable.id,
           environmentId: environmentReferenceAttachmentsTable.environmentId,
           name: environmentReferenceAttachmentsTable.name,
-          title: environmentReferencesTable.title,
+          title: environmentReferenceAttachmentsTable.title,
+          groupTitle: environmentReferencesTable.title,
           environmentDescription: environmentReferencesTable.description,
           description: environmentReferenceAttachmentsTable.description,
           mimeType: environmentReferenceAttachmentsTable.mimeType,
@@ -2904,6 +2924,9 @@ async function createGenerationStore(userDataDir, options = {}) {
         collectionId: reference.collectionId,
         environmentId: null,
         description: reference.description ?? reference.collectionDescription ?? null,
+        title: reference.title ?? reference.name,
+        groupTitle: reference.groupTitle ?? null,
+        groupDescription: reference.collectionDescription ?? null,
       })),
       ...groupedObjects.map((reference) => ({
         ...reference,
@@ -2911,12 +2934,18 @@ async function createGenerationStore(userDataDir, options = {}) {
         collectionId: reference.collectionId,
         environmentId: null,
         description: reference.description ?? reference.collectionDescription ?? null,
+        title: reference.title ?? reference.name,
+        groupTitle: reference.groupTitle ?? null,
+        groupDescription: reference.collectionDescription ?? null,
       })),
       ...environments.map((reference) => ({
         ...reference,
         category: 'environment',
         collectionId: reference.environmentId,
         description: reference.description ?? reference.environmentDescription ?? null,
+        title: reference.title ?? reference.name,
+        groupTitle: reference.groupTitle ?? null,
+        groupDescription: reference.environmentDescription ?? null,
       })),
     ];
 
@@ -5588,6 +5617,28 @@ async function ensureEnvironmentAttachmentDescriptionColumn(db) {
   }
 }
 
+async function ensureReferenceAttachmentTitleColumns(db) {
+  const tables = [
+    'character_reference_attachments',
+    'object_reference_attachments',
+    'environment_reference_attachments',
+  ];
+  for (const tableName of tables) {
+    const tableInfo = await db.all(sql.raw(`PRAGMA table_info('${tableName}')`));
+    const columnNames = new Set(tableInfo.map((column) => column.name));
+    if (!columnNames.has('title')) {
+      await db.run(sql.raw(`ALTER TABLE ${tableName} ADD COLUMN title TEXT`));
+    }
+    await db.run(
+      sql.raw(
+        `UPDATE ${tableName}
+         SET title = COALESCE(NULLIF(title, ''), name)
+         WHERE title IS NULL OR title = ''`
+      )
+    );
+  }
+}
+
 async function migrateLegacyReferencesTable(db) {
   const tables = await db.all(sql.raw("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reference_images'"));
   if (tables.length === 0) {
@@ -5722,14 +5773,6 @@ function buildProviderImageGenerationPrompt(input, providerLabel, capabilityInst
     '',
     IMAGE_PRODUCTION_GUIDANCE,
     '',
-    'Reference lock checklist:',
-    '- References win over prompt text for identity, layout, materials, palette, and fixed prop placement.',
-    '- Do not use references as loose inspiration unless their role is explicitly style-only.',
-    '- When multiple references are attached, do not average or blend identities; assign each filename/title a specific role.',
-    '- Preserve exact scene geometry, character identity, prop silhouette, material finish, lighting direction, and scale for every anchor reference.',
-    '- Change only the requested camera, framing, expression, pose, action beat, or localized edit.',
-    '- The final image should pass a reference review for geometry, identity, props, and style continuity.',
-    '',
     ...(input.referenceImages.length > 0
       ? [
           'Reference image files:',
@@ -5758,7 +5801,6 @@ function buildProviderImageGenerationPrompt(input, providerLabel, capabilityInst
           'If a master scene is useful, create it first and then derive additional views from it.',
           'If existing references already define the scene strongly, reuse them as the anchor instead of creating a new master image.',
           'Use the attached references to decide whether this is a continuation/edit of an existing scene or a fresh scene that only borrows style/material cues.',
-          'Treat references as strict scene and subject locks; do not redesign the environment, characters, props, or material language between frames.',
           'Preserve environment identity, materials, layout, lighting direction, palette, and spatial continuity whenever the request calls for the same scene.',
           'Choose camera coverage yourself and hide explicit angle-selection logic from the final output behavior.',
           'If you choose a scene-coverage workflow, the final output must contain at least 4 image files total.',
@@ -5834,13 +5876,7 @@ function buildCodexImageGenerationPrompt(input) {
   return buildProviderImageGenerationPrompt(
     input,
     'Codex',
-    [
-      'Use Codex image generation directly and keep the workflow short.',
-      'Prefer one batched image generation call when Codex supports the requested count.',
-      'Do not run shell commands, helper scripts, package scripts, tests, or project automation for generation.',
-      'Do not perform iterative self-review or regeneration unless an image is missing, corrupt, wrong-count, or visibly unusable.',
-      'Treat attached localImage items and the listed reference file paths as the same strict visual anchors.',
-    ].join('\n')
+    'Use Codex image generation capabilities to create image files for the following prompt.'
   );
 }
 
