@@ -341,9 +341,11 @@ describe('generation codex runner environment', () => {
     expect(prompt).toContain('Seedance accepts at most 15 seconds per generation');
     expect(prompt).toContain('Dialogue coverage:');
     expect(prompt).toContain('Image/keyframe budget:');
+    expect(prompt).toContain('This guidance can be relaxed when needed, but in general tend toward more scenes, frames, and beats rather than fewer');
     expect(prompt).toContain('must preserve / may change');
     expect(prompt).toContain('You may still emit the imagen-action in the same response after the plan');
     expect(prompt).toContain('Use consistent character names, exact wardrobe, proportions, face shape, hair silhouette, palette, and distinguishing details');
+    expect(prompt).toContain('If an environment reference contains multiple images, pick the single attachment that best suits the current frame and do not pass the whole group to the imagen-action unless the full set is genuinely required');
   });
 
   it('parses Director action blocks for Classic generation', () => {

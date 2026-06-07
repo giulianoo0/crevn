@@ -6,6 +6,8 @@ const IMAGE_PRODUCTION_GUIDANCE = [
   '- Prepare outputs so the later direcao-de-cena stage can turn them into Seedance-ready scene plans with subject lock, one clear motion beat, camera language, lighting/style, and negative constraints.',
   '- Treat each 15s clip as about 4 clear beats max. If the scene needs more, split it.',
   '- In the scenes table, show the beat count for each scene and keep it at 4 beats max before splitting.',
+  '- This guidance can be relaxed when needed, but in general tend toward more scenes, frames, and beats rather than fewer when coverage or clarity benefits from it.',
+  '- If an environment reference contains multiple images, pick the single attachment that best suits the current frame and do not pass the whole group to the imagen-action unless the full set is genuinely required.',
   '- A frame or shot in image generation is a single image. A beat should usually be represented by one image, because it is one action.',
   '- Beat is a story unit and frame is an image unit: use beats to measure scene complexity, and use frames to build the visual sequence.',
   '- One beat can expand into multiple frames when the action is complex; a simple beat can stay as one frame.',

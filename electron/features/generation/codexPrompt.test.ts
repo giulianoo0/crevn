@@ -64,12 +64,14 @@ describe('buildCodexImageGenerationPrompt', () => {
     expect(prompt).toContain('{"type":"CRENV_SCENE_PLAN","count":6,"applyToShimmers":true}');
     expect(prompt).toContain('Set applyToShimmers to true only when the UI should expand its loading shimmer placeholders to match count.');
     expect(prompt).toContain('at least 4 image files total');
+    expect(prompt).toContain('This guidance can be relaxed when needed, but in general tend toward more scenes, frames, and beats rather than fewer');
     expect(prompt).toContain('4 clear beats max');
     expect(prompt).toContain('show the beat count for each scene');
     expect(prompt).toContain('A frame or shot in image generation is a single image');
     expect(prompt).toContain('A beat should usually be represented by one image, because it is one action.');
     expect(prompt).toContain('Beat is a story unit and frame is an image unit');
     expect(prompt).toContain('One beat can expand into multiple frames');
+    expect(prompt).toContain('If an environment reference contains multiple images, pick the single attachment that best suits the current frame and do not pass the whole group to the imagen-action unless the full set is genuinely required');
     expect(prompt).toContain('Use the Imagen toolkit to generate the reference images that make a later Seedance plan possible; do not try to generate Seedance itself here.');
   });
 
