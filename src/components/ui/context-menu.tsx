@@ -29,11 +29,11 @@ export const ContextMenuContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.Popup>
 >(({ className, ...props }, ref) => (
     <ContextMenuPrimitive.Portal>
-    <ContextMenuPrimitive.Positioner sideOffset={8} className="z-[80]">
+    <ContextMenuPrimitive.Positioner sideOffset={8} className="z-[120]">
       <ContextMenuPrimitive.Popup
         ref={ref}
         className={cn(
-          'z-[80] min-w-[180px] overflow-hidden rounded-[18px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] p-1.5 text-[13px] text-[var(--foreground)] shadow-[0_20px_48px_rgba(0,0,0,0.38)] backdrop-blur-2xl outline-none',
+          'z-[120] min-w-[180px] overflow-hidden rounded-[18px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] p-1.5 text-[13px] text-[var(--foreground)] shadow-[0_20px_48px_rgba(0,0,0,0.38)] backdrop-blur-2xl outline-none',
           className
         )}
         {...props}

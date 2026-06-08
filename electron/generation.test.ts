@@ -301,6 +301,8 @@ describe('generation codex runner environment', () => {
     expect(prompt).toContain('Treat character sheets as locked identity anchors');
     expect(prompt).toContain('Every imagen-action payload must include the relevant environment and character @Reference names');
     expect(prompt).toContain('Use the closest environment detail reference for the visible area of each frame');
+    expect(prompt).toContain('Only references listed under Attached reference images in this turn are available for visual inspection.');
+    expect(prompt).toContain('Plain names without @ are ordinary text and do not grant saved-reference access.');
     expect(prompt).toContain('inspect every provided reference image and every image in a multi-image environment set');
     expect(prompt).toContain('treat all attachments with the same environment title as one context set');
     expect(prompt).toContain('When a saved reference has multiple attachments, choose the exact attachment needed for each frame');
@@ -987,6 +989,105 @@ describe('generation codex runner environment', () => {
           references: [],
         }),
       ]);
+    } finally {
+      client.close();
+      store.close();
+    }
+  });
+
+  it('does not resolve Director action references from the global library when they were not explicitly attached', async () => {
+    const userDataDir = await makeTempUserDataDir();
+    const store = await generationModule.createGenerationStore(userDataDir, {
+      seedCodexSkills: false,
+      warmCodexAppServer: false,
+    });
+    const client = createClient({ url: `file:${path.join(userDataDir, 'crenv.sqlite')}` });
+
+    try {
+      const workspace = await store.createProject('Storyboard');
+      await store.createReference({
+        name: 'secret.png',
+        title: 'Secret Reference',
+        description: 'This should stay out of Director unless mentioned in the composer.',
+        mimeType: 'image/png',
+        bytesBase64: Buffer.from('secret').toString('base64'),
+        category: 'characters',
+      });
+      let sceneGroup = await store.createSceneGroup(workspace.thread.id, {
+        title: 'Existing Scene',
+        prompt: 'Keep this scene editable.',
+        tocOrder: 1,
+      });
+      sceneGroup = await store.createSceneFrame(sceneGroup.id, {
+        title: 'Frame 1',
+        prompt: 'Existing frame.',
+        frameOrder: 1,
+      });
+      const frame = sceneGroup.frames[0];
+      const chat = await store.createDirectorChat(workspace.thread.id);
+      const action = {
+        version: 1,
+        action: 'update_scene',
+        summary: 'Try to attach an unmentioned reference.',
+        payload: {
+          sceneGroupId: sceneGroup.id,
+          generate: false,
+          frames: [
+            {
+              id: frame.id,
+              title: frame.title,
+              prompt: frame.prompt,
+              references: ['@Secret Reference'],
+            },
+          ],
+        },
+      };
+
+      await client.execute({
+        sql: `
+          INSERT INTO director_messages (
+            id,
+            chat_id,
+            role,
+            content_markdown,
+            status,
+            model_id,
+            model_label,
+            fast_mode,
+            reference_images_json,
+            message_order,
+            provider_turn_id,
+            provider_item_id,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        args: [
+          'director-action-unattached-reference',
+          chat.id,
+          'assistant',
+          `Ready.\n\n\`\`\`imagen-action\n${JSON.stringify(action)}\n\`\`\``,
+          'completed',
+          'codex-gpt-5-4-mini',
+          'Codex / GPT-5.4 Mini',
+          1,
+          '[]',
+          1,
+          null,
+          null,
+          '2026-06-01T12:00:00.000Z',
+          '2026-06-01T12:00:00.000Z',
+        ],
+      });
+
+      await store.approveDirectorAction({
+        messageId: 'director-action-unattached-reference',
+        actionIndex: 0,
+      });
+
+      const [updatedSceneGroup] = await store.listSceneGroups(workspace.thread.id);
+      expect(updatedSceneGroup.frames[0].references).toEqual([]);
     } finally {
       client.close();
       store.close();

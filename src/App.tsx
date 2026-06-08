@@ -696,6 +696,24 @@ function deriveReferenceAttachmentTitle(name: string) {
   return name.replace(/\.[^/.]+$/, '').trim() || name.trim() || 'Untitled image';
 }
 
+function getUniqueAttachmentName(name: string, occupiedNames: Iterable<string>) {
+  const trimmedName = name.trim() || 'image';
+  const extensionMatch = /\.([^.]+)$/.exec(trimmedName);
+  const extension = extensionMatch ? `.${extensionMatch[1]}` : '';
+  const baseName = extension ? trimmedName.slice(0, -extension.length) : trimmedName;
+  const normalizedBaseName = baseName.trim() || 'image';
+  const taken = new Set(Array.from(occupiedNames, (value) => value.toLowerCase()));
+  let candidate = `${normalizedBaseName}${extension}`;
+  let suffix = 2;
+
+  while (taken.has(candidate.toLowerCase())) {
+    candidate = `${normalizedBaseName}-${suffix}${extension}`;
+    suffix += 1;
+  }
+
+  return candidate;
+}
+
 function getSceneReferenceSignature(references: SceneReferenceAttachment[]) {
   return references
     .map((reference) =>
@@ -876,13 +894,13 @@ function slugifyReferenceSelectorValue(value: string) {
     .trim();
 }
 
-function extractReferenceSelectorMatches(promptText: string, mentionTitle: string) {
+function extractReferenceSelectorMatches(promptText: string, mentionTitle: string, allowPlainMention = false) {
   if (!promptText.trim() || !mentionTitle.trim()) {
     return [];
   }
 
   const pattern = new RegExp(
-    `(^|[\\s([{'"\`])@?(${escapeRegExp(mentionTitle)})([#/:][^\\s.,!?;:()\\[\\]{}'"\\\`]+)`,
+    `(^|[\\s([{'"\`])${allowPlainMention ? '@?' : '@'}(${escapeRegExp(mentionTitle)})([#/:][^\\s.,!?;:()\\[\\]{}'"\\\`]+)`,
     'gi',
   );
   const matches: Array<{ matchText: string; selectorText: string }> = [];
@@ -909,7 +927,7 @@ function promptContainsReferenceMention(promptText: string, mentionTitle: string
   }
 
   const pattern = new RegExp(
-    `(^|[\\s([{'"\`])@?${escapeRegExp(mentionTitle)}(?=$|[\\s.,!?;:)\\[\\]{}'"\\\`#/:])`,
+    `(^|[\\s([{'"\`])@${escapeRegExp(mentionTitle)}(?=$|[\\s.,!?;:)\\[\\]{}'"\\\`#/:])`,
     'i',
   );
   return pattern.test(promptText);
@@ -1053,14 +1071,17 @@ function resolveSavedReferenceSelections(
   for (const [groupId, references] of groups.entries()) {
     const exactSelections = references.filter((reference) => selectedIds.has(reference.id));
     const mentionTitle = getSharedReferenceTitle(references[0]);
+    const isGroupSelectedById = selectedIds.has(groupId);
     const isGroupSelected =
-      selectedIds.has(groupId) || promptContainsReferenceMention(promptText, mentionTitle);
+      isGroupSelectedById || promptContainsReferenceMention(promptText, mentionTitle);
 
     if (!isGroupSelected && exactSelections.length === 0) {
       continue;
     }
 
-    const selectorMatches = isGroupSelected ? extractReferenceSelectorMatches(promptText, mentionTitle) : [];
+    const selectorMatches = isGroupSelected
+      ? extractReferenceSelectorMatches(promptText, mentionTitle, isGroupSelectedById)
+      : [];
     const matchedBySelector = new Map<string, { reference: SavedReferenceImage; matchText: string }>();
 
     for (const selectorMatch of selectorMatches) {
@@ -2954,12 +2975,17 @@ export function App() {
       return;
     }
 
+    const existingNames = referenceImagesRef.current.map((reference) => reference.name);
+    const nextNames: string[] = [];
+
     const nextReferenceImages = await Promise.all(
       imageFiles.map(async (file, index) => {
         const bytes = new Uint8Array(await file.arrayBuffer());
+        const uniqueName = getUniqueAttachmentName(file.name, [...existingNames, ...nextNames]);
+        nextNames.push(uniqueName);
         return {
           id: `${file.name}-${file.size}-${Date.now()}-${index}`,
-          name: file.name,
+          name: uniqueName,
           mimeType: file.type || 'image/png',
           bytesBase64: bytesToBase64(bytes),
           previewUrl: URL.createObjectURL(file),
@@ -4126,12 +4152,17 @@ export function App() {
       return;
     }
 
+    const existingNames = playerSession?.characterReferences.map((reference) => reference.name) ?? [];
+    const nextNames: string[] = [];
+
     const nextReferenceImages = await Promise.all(
       imageFiles.map(async (file, index) => {
         const bytes = new Uint8Array(await file.arrayBuffer());
+        const uniqueName = getUniqueAttachmentName(file.name, [...existingNames, ...nextNames]);
+        nextNames.push(uniqueName);
         return {
           id: `${file.name}-${file.size}-${Date.now()}-${index}`,
-          name: file.name,
+          name: uniqueName,
           mimeType: file.type || 'image/png',
           bytesBase64: bytesToBase64(bytes),
           previewUrl: URL.createObjectURL(file),
@@ -9944,40 +9975,64 @@ function InlineAttachmentsRow({
         ].join(' ')}
       >
         {referenceImages.map((referenceImage) => (
-          <div
-            key={referenceImage.id}
-            className="group relative h-20 w-20 shrink-0 overflow-hidden rounded-[24px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] backdrop-blur-xl transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
-            title={referenceImage.name}
-          >
-            <button
-              type="button"
-              aria-label={`Open ${referenceImage.name}`}
-              onPointerDown={(event) => {
-                event.preventDefault();
-                onKeepOpen();
-              }}
-              onClick={() => onOpenReference(referenceImage)}
-              className="h-full w-full"
-            >
-              <img
-                src={referenceImage.previewUrl}
-                alt={referenceImage.name}
-                className="h-full w-full object-cover"
-              />
-            </button>
-            <button
-              type="button"
-              aria-label={`Remove ${referenceImage.name}`}
-              onPointerDown={(event) => {
-                event.preventDefault();
-                onKeepOpen();
-              }}
-              onClick={() => onRemoveReference(referenceImage.id)}
-              className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/55 text-white opacity-100 transition-colors hover:bg-black/70"
-            >
-              <X className="size-3" />
-            </button>
-          </div>
+          <ContextMenu key={referenceImage.id}>
+            <ContextMenuTrigger asChild>
+              <div
+                className="group relative h-20 w-20 shrink-0 overflow-hidden rounded-[24px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] backdrop-blur-xl transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+                title={referenceImage.name}
+              >
+                <button
+                  type="button"
+                  aria-label={`Open ${referenceImage.name}`}
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    onKeepOpen();
+                  }}
+                  onDoubleClick={() => onOpenReference(referenceImage)}
+                  onClick={() => onOpenReference(referenceImage)}
+                  className="h-full w-full"
+                >
+                  <img
+                    src={referenceImage.previewUrl}
+                    alt={referenceImage.name}
+                    className="h-full w-full object-cover"
+                  />
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Remove ${referenceImage.name}`}
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    onKeepOpen();
+                  }}
+                  onClick={() => onRemoveReference(referenceImage.id)}
+                  className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/55 text-white opacity-100 transition-colors hover:bg-black/70"
+                >
+                  <X className="size-3" />
+                </button>
+              </div>
+            </ContextMenuTrigger>
+            <ContextMenuContent className="min-w-[160px]">
+              <ContextMenuItem
+                onClick={() => {
+                  onKeepOpen();
+                  onOpenReference(referenceImage);
+                }}
+              >
+                Open
+              </ContextMenuItem>
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                onClick={() => {
+                  onKeepOpen();
+                  onRemoveReference(referenceImage.id);
+                }}
+                className="text-red-400 focus:text-red-300"
+              >
+                Remove
+              </ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
         ))}
       </div>
     </div>
@@ -10881,6 +10936,7 @@ function EditReferenceDialog({
   const [attachmentDescriptionDraft, setAttachmentDescriptionDraft] = useState('');
   const [isAttachmentMetadataDialogOpen, setIsAttachmentMetadataDialogOpen] = useState(false);
   const [activeImageTab, setActiveImageTab] = useState<ReferenceImageBucket>('primary');
+  const [previewAttachmentKey, setPreviewAttachmentKey] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const attachmentPreviewUrlsRef = useRef<string[]>([]);
@@ -10919,6 +10975,7 @@ function EditReferenceDialog({
         }
         return [];
       });
+      setPreviewAttachmentKey(null);
       return;
     }
     setTitle(reference.title);
@@ -10993,6 +11050,7 @@ function EditReferenceDialog({
       });
       return next;
     });
+    setPreviewAttachmentKey((current) => (current === localKey ? null : current));
   }
 
   async function appendFiles(fileList: FileList | File[]) {
@@ -11034,8 +11092,73 @@ function EditReferenceDialog({
     );
   }
 
+  async function copyAttachmentToClipboard(attachment: {
+    previewUrl: string;
+    mimeType: string;
+  }) {
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+      throw new Error('Clipboard image copy is not available in this environment.');
+    }
+
+    const response = await fetch(attachment.previewUrl);
+    const blob = await response.blob();
+    const mimeType = blob.type || attachment.mimeType || 'image/png';
+    await navigator.clipboard.write([new ClipboardItem({ [mimeType]: blob })]);
+  }
+
+  function handleCopyAttachment(attachment: {
+    previewUrl: string;
+    mimeType: string;
+  }) {
+    void copyAttachmentToClipboard(attachment)
+      .then(() => {
+        toast.success('Image copied');
+      })
+      .catch((error) => {
+        console.error('Failed to copy reference attachment', error);
+        toast.error(getErrorMessage(error, 'Failed to copy image.'));
+      });
+  }
+
+  function renderAttachmentContextMenuItems(attachment: (typeof attachments)[number]) {
+    return (
+      <>
+        <ContextMenuItem onClick={() => handleCopyAttachment(attachment)}>
+          <Copy className="mr-2 size-3.5" />
+          Copy
+        </ContextMenuItem>
+        <ContextMenuItem onClick={() => setPreviewAttachmentKey(attachment.localKey)}>
+          Open
+        </ContextMenuItem>
+        <ContextMenuItem onClick={() => openAttachmentMetadataDialog(attachment.localKey)}>
+          Edit image metadata
+        </ContextMenuItem>
+        <ContextMenuItem
+          onClick={() =>
+            moveAttachmentToBucket(
+              attachment.localKey,
+              attachment.bucket === 'primary' ? 'angles' : 'primary',
+            )
+          }
+        >
+          {attachment.bucket === 'primary' ? `Move to Ângulos` : `Move to ${primaryTabLabel}`}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
+          onClick={() => removeAttachment(attachment.localKey)}
+        >
+          Remove
+        </ContextMenuItem>
+      </>
+    );
+  }
+
   const primaryTabLabel = getReferencePrimaryTabLabel(reference?.category ?? 'environment');
   const visibleAttachments = attachments.filter((attachment) => attachment.bucket === activeImageTab);
+  const previewAttachment = previewAttachmentKey
+    ? attachments.find((attachment) => attachment.localKey === previewAttachmentKey) ?? null
+    : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -11144,51 +11267,63 @@ function EditReferenceDialog({
                     visibleAttachments.length > 0 ? (
                       <div className="grid max-h-[min(44vh,420px)] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
                         {visibleAttachments.map((attachment) => (
-                          <div
-                            key={attachment.localKey}
-                            className="group relative overflow-hidden rounded-[16px] border border-[var(--border-soft)] bg-[var(--surface)]"
-                          >
-                            <div className="relative aspect-square overflow-hidden">
-                              <img src={attachment.previewUrl} alt={attachment.name} className="h-full w-full object-cover" />
-                              <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1.5 pt-4">
-                                <div className="line-clamp-1 text-[11px] text-white/92">{attachment.title}</div>
-                              </div>
-                              <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                          <ContextMenu key={attachment.localKey}>
+                            <div className="group relative overflow-hidden rounded-[16px] border border-[var(--border-soft)] bg-[var(--surface)]">
+                              <ContextMenuTrigger asChild>
                                 <button
                                   type="button"
-                                  onClick={() =>
-                                    moveAttachmentToBucket(
-                                      attachment.localKey,
-                                      attachment.bucket === 'primary' ? 'angles' : 'primary',
-                                    )
-                                  }
-                                  className="inline-flex h-7 items-center justify-center rounded-full border border-white/20 bg-black/55 px-2 text-[10px] text-white transition-colors hover:bg-black/70"
-                                  aria-label={`Move ${attachment.name} to ${attachment.bucket === 'primary' ? 'Ângulos' : primaryTabLabel}`}
+                                  aria-label={`Open ${attachment.name}`}
+                                  onClick={() => setPreviewAttachmentKey(attachment.localKey)}
+                                  onDoubleClick={() => setPreviewAttachmentKey(attachment.localKey)}
+                                  className="block w-full text-left"
                                 >
-                                  {attachment.bucket === 'primary' ? 'Ângulos' : primaryTabLabel}
+                                  <div className="relative aspect-square overflow-hidden">
+                                    <img src={attachment.previewUrl} alt={attachment.name} className="h-full w-full object-cover" />
+                                    <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1.5 pt-4">
+                                      <div className="line-clamp-1 text-[11px] text-white/92">{attachment.title}</div>
+                                    </div>
+                                  </div>
                                 </button>
-                                <button
-                                  type="button"
-                                  onClick={() => openAttachmentMetadataDialog(attachment.localKey)}
-                                  className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
-                                  aria-label={`Edit render metadata for ${attachment.name}`}
-                                >
-                                  <Pencil className="size-3.5" />
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => removeAttachment(attachment.localKey)}
-                                  className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-[rgba(190,58,58,0.65)]"
-                                  aria-label={`Remove ${attachment.name}`}
-                                >
-                                  <X className="size-3.5" />
-                                </button>
-                              </div>
+                              </ContextMenuTrigger>
+                                <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      moveAttachmentToBucket(
+                                        attachment.localKey,
+                                        attachment.bucket === 'primary' ? 'angles' : 'primary',
+                                      )
+                                    }
+                                    className="inline-flex h-7 items-center justify-center rounded-full border border-white/20 bg-black/55 px-2 text-[10px] text-white transition-colors hover:bg-black/70"
+                                    aria-label={`Move ${attachment.name} to ${attachment.bucket === 'primary' ? 'Ângulos' : primaryTabLabel}`}
+                                  >
+                                    {attachment.bucket === 'primary' ? 'Ângulos' : primaryTabLabel}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => openAttachmentMetadataDialog(attachment.localKey)}
+                                    className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
+                                    aria-label={`Edit render metadata for ${attachment.name}`}
+                                  >
+                                    <Pencil className="size-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => removeAttachment(attachment.localKey)}
+                                    className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-[rgba(190,58,58,0.65)]"
+                                    aria-label={`Remove ${attachment.name}`}
+                                  >
+                                    <X className="size-3.5" />
+                                  </button>
+                                </div>
+                                <div className="border-t border-[var(--border-soft)] px-2 py-1.5 text-[11px] text-[var(--muted-foreground)]">
+                                  <div className="line-clamp-2">{attachment.description?.trim() || 'No description yet'}</div>
+                                </div>
                             </div>
-                            <div className="border-t border-[var(--border-soft)] px-2 py-1.5 text-[11px] text-[var(--muted-foreground)]">
-                              <div className="line-clamp-2">{attachment.description?.trim() || 'No description yet'}</div>
-                            </div>
-                          </div>
+                            <ContextMenuContent className="min-w-[180px]">
+                              {renderAttachmentContextMenuItems(attachment)}
+                            </ContextMenuContent>
+                          </ContextMenu>
                         ))}
                       </div>
                     ) : (
@@ -11318,6 +11453,36 @@ function EditReferenceDialog({
                 Save image metadata
               </Button>
             </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={Boolean(previewAttachment)} onOpenChange={(open) => !open && setPreviewAttachmentKey(null)}>
+        <DialogContent className="max-w-[min(92vw,980px)] overflow-hidden p-0">
+          <DialogHeader className="px-5 pt-5">
+            <DialogTitle>{previewAttachment?.name ?? 'Image preview'}</DialogTitle>
+            <DialogDescription>{previewAttachment?.title ?? 'Reference image preview'}</DialogDescription>
+          </DialogHeader>
+          <div className="px-5 pb-5 pt-3">
+            {previewAttachment ? (
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label={`Preview ${previewAttachment.name}`}
+                    className="block w-full overflow-hidden rounded-[24px] border border-[var(--border-soft)] bg-[var(--surface2)] text-left"
+                  >
+                    <img
+                      src={previewAttachment.previewUrl}
+                      alt={`${previewAttachment.name} preview`}
+                      className="max-h-[72vh] w-full object-contain bg-[var(--surface)]"
+                    />
+                  </button>
+                </ContextMenuTrigger>
+                <ContextMenuContent className="min-w-[180px]">
+                  {renderAttachmentContextMenuItems(previewAttachment)}
+                </ContextMenuContent>
+              </ContextMenu>
+            ) : null}
           </div>
         </DialogContent>
       </Dialog>

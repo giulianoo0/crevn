@@ -1894,6 +1894,61 @@ describe('App header thread title', () => {
     expect(screen.getByRole('img', { name: 'reference.png preview' })).toBeInTheDocument();
   });
 
+  it('opens the player on double click for an attached reference image in the classic composer row', async () => {
+    const referenceImage = new File(['stub-image'], 'reference.png', { type: 'image/png' });
+
+    Object.defineProperty(referenceImage, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([1, 2, 3, 4]).buffer),
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('composer-reference-input'), {
+        target: { files: [referenceImage] },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.doubleClick(screen.getByRole('button', { name: 'Open reference.png' }));
+
+    expect(screen.getByRole('dialog', { name: 'reference.png' })).toBeInTheDocument();
+  });
+
+  it('shows a context menu for an attached reference image in the classic composer row', async () => {
+    const referenceImage = new File(['stub-image'], 'reference.png', { type: 'image/png' });
+
+    Object.defineProperty(referenceImage, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([1, 2, 3, 4]).buffer),
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('composer-reference-input'), {
+        target: { files: [referenceImage] },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    const attachmentButton = screen.getByRole('button', { name: 'Open reference.png' });
+    fireEvent.contextMenu(attachmentButton);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Open' }));
+    });
+
+    expect(screen.getByRole('dialog', { name: 'reference.png' })).toBeInTheDocument();
+  });
+
   it('submits a pinpoint generation from the player and closes back into a single shimmer', async () => {
     vi.mocked(electronApi.listGeneratedImages).mockResolvedValue([
       {
@@ -2514,6 +2569,111 @@ describe('App header thread title', () => {
         referenceImages: [
           expect.objectContaining({
             name: 'pasted.png',
+            mimeType: 'image/png',
+            bytesBase64: 'BQYHCA==',
+          }),
+        ],
+      })
+    );
+  });
+
+  it('renames duplicate composer attachments added from the picker', async () => {
+    const firstImage = new File(['first-image'], 'image.png', { type: 'image/png' });
+    const secondImage = new File(['second-image'], 'image.png', { type: 'image/png' });
+
+    Object.defineProperty(firstImage, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([1, 2, 3, 4]).buffer),
+    });
+    Object.defineProperty(secondImage, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([5, 6, 7, 8]).buffer),
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('composer-reference-input'), {
+        target: { files: [firstImage, secondImage] },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Open image.png' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open image-2.png' })).toBeInTheDocument();
+  });
+
+  it('renames duplicate pasted composer attachments before generation', async () => {
+    const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
+      jobId: 'job-1',
+      assets: [],
+    });
+    generateImagesMock.mockClear();
+    const firstImage = new File(['first-image'], 'image.png', { type: 'image/png' });
+    const secondImage = new File(['second-image'], 'image.png', { type: 'image/png' });
+
+    Object.defineProperty(firstImage, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([1, 2, 3, 4]).buffer),
+    });
+    Object.defineProperty(secondImage, 'arrayBuffer', {
+      value: vi.fn(async () => Uint8Array.from([5, 6, 7, 8]).buffer),
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Use duplicate pasted images' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.paste(composerInput, {
+        clipboardData: {
+          files: [firstImage],
+          items: [],
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.paste(composerInput, {
+        clipboardData: {
+          files: [secondImage],
+          items: [],
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Open image.png' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open image-2.png' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(generateImagesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        referenceImages: [
+          expect.objectContaining({
+            name: 'image.png',
+            mimeType: 'image/png',
+            bytesBase64: 'AQIDBA==',
+          }),
+          expect.objectContaining({
+            name: 'image-2.png',
             mimeType: 'image/png',
             bytesBase64: 'BQYHCA==',
           }),
@@ -4143,6 +4303,78 @@ describe('App header thread title', () => {
     );
   });
 
+  it('opens an environment attachment preview on double click while editing', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'environment-reference-1',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-1.png',
+        title: 'Dock angle',
+        groupTitle: 'Warehouse',
+        description: 'Old note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Warehouse' }));
+
+    fireEvent.doubleClick(screen.getByRole('button', { name: 'Open env-1.png' }));
+
+    expect(screen.getByRole('img', { name: 'env-1.png preview', hidden: true })).toBeInTheDocument();
+  });
+
+  it('shows a context menu for an environment attachment while editing', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'environment-reference-1',
+        collectionId: 'environment-1',
+        environmentId: 'environment-1',
+        name: 'env-1.png',
+        title: 'Dock angle',
+        groupTitle: 'Warehouse',
+        description: 'Old note',
+        groupDescription: 'Shared warehouse continuity.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Warehouse' }));
+
+    fireEvent.contextMenu(screen.getByRole('button', { name: 'Open env-1.png' }));
+
+    expect(screen.getByRole('menuitem', { name: 'Copy' })).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Open' }));
+    });
+
+    expect(screen.getByRole('img', { name: 'env-1.png preview', hidden: true })).toBeInTheDocument();
+  });
+
   it('shows primary and angle tabs in add reference and moves files between them', async () => {
     const primary = new File(['env-1'], 'env-1.png', { type: 'image/png' });
     const angle = new File(['env-2'], 'env-2.png', { type: 'image/png' });
@@ -5223,6 +5455,100 @@ describe('App header thread title', () => {
 
     expect(generateImagesMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
+        referenceImages: [],
+      })
+    );
+  });
+
+  it('does not attach saved library references when Director text names them without an explicit @ mention', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'reference-tito',
+        name: 'tito.png',
+        title: 'Tito',
+        description: 'Primary character sheet.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'characters',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const directorInput = screen.getAllByRole('textbox').at(-1)!;
+    fireEvent.focus(directorInput);
+    await act(async () => {
+      fireEvent.change(directorInput, {
+        target: { value: 'olha tito descreve ele' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(vi.mocked(electronApi.sendDirectorMessage)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: 'olha tito descreve ele',
+        referenceImages: [],
+      })
+    );
+  });
+
+  it('does not attach saved library references when Classic prompt names them without an explicit @ mention', async () => {
+    const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
+      jobId: 'job-1',
+      assets: [],
+    });
+    generateImagesMock.mockClear();
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'reference-tito',
+        name: 'tito.png',
+        title: 'Tito',
+        description: 'Primary character sheet.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'characters',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByRole('textbox'), {
+        target: { value: 'cria uma pose do tito sorrindo' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(generateImagesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining('cria uma pose do tito sorrindo'),
         referenceImages: [],
       })
     );

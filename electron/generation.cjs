@@ -635,6 +635,8 @@ function buildDirectorChatPrompt({
     'Use consistent character names, exact wardrobe, proportions, face shape, hair silhouette, palette, and distinguishing details across Classic and Scenes actions.',
     'If a character appears across multiple frames, repeat the identity lock in every frame prompt and re-anchor to the character sheet or strongest approved keyframe.',
     'Only provide the references and continuity constraints needed for the requested shot or frame; avoid stuffing unrelated references into the payload.',
+    'Only references listed under Attached reference images in this turn are available for visual inspection.',
+    'Plain names without @ are ordinary text and do not grant saved-reference access. If the user names a saved reference without @, ask them to mention it with @Reference or attach it before claiming to inspect it.',
     'When referring to a known character, environment, prop, or saved visual anchor, write it as an @Reference mention using the exact human-facing reference title when available, for example @Tito, @Base, or @HoverBike.',
     'When you produce a shot list, frame plan, production plan, asset manifesto, or any structured output the user may paste into another composer, include a copyable markdown code block after the readable explanation.',
     'Use this fence for copyable production blocks: ```markdown',
@@ -3118,19 +3120,7 @@ function mapReferenceCollectionAttachment({
         .map((selector) => selector.referenceName)
     );
     const specificSelectors = requestedSelectors.filter((selector) => selector.attachmentSelector);
-    const savedReferences = await listReferences();
     const candidates = [
-      ...savedReferences.map((reference) => ({
-        id: reference.id,
-        collectionId: reference.collectionId,
-        environmentId: reference.environmentId,
-        category: reference.category,
-        name: reference.name,
-        title: reference.title,
-        description: reference.description,
-        mimeType: reference.mimeType,
-        bytesBase64: reference.bytesBase64,
-      })),
       ...attachedReferenceImages.map((reference) => ({
         id: reference.id,
         collectionId: reference.collectionId,
