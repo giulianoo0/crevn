@@ -133,6 +133,21 @@ const createWindow = () => {
   mainWindow.setMenuBarVisibility(false);
   mainWindow.removeMenu();
 
+  // `removeMenu()` strips the default reload accelerator, so wire up
+  // Ctrl+R / Cmd+R (and F5) to reload the renderer explicitly.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') {
+      return;
+    }
+    const key = input.key?.toLowerCase();
+    const isReloadCombo = (input.control || input.meta) && key === 'r';
+    const isFunctionReload = key === 'f5';
+    if (isReloadCombo || isFunctionReload) {
+      event.preventDefault();
+      mainWindow?.webContents.reload();
+    }
+  });
+
   if (process.env.NODE_ENV === 'development') {
     mainWindow.loadURL('http://127.0.0.1:5173');
   } else {

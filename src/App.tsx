@@ -5820,19 +5820,24 @@ export function App() {
             initial={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.4, ease: 'easeOut' }}
-            className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-6 bg-[var(--background)]"
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-[var(--background)]"
           >
-            <motion.img
-              src={logo}
-              alt="crevn logo"
-              className="h-10 w-auto"
+            <motion.div
+              className="relative inline-block"
               initial={{ opacity: 0, scale: 0.96 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.5, ease: 'easeOut' }}
-            />
-            <TextShimmer className="text-sm" duration={1.4}>
-              Loading…
-            </TextShimmer>
+            >
+              <img src={logo} alt="crevn logo" className="block h-10 w-auto" />
+              <span
+                aria-hidden
+                className="logo-shimmer"
+                style={{
+                  maskImage: `url(${logo})`,
+                  WebkitMaskImage: `url(${logo})`,
+                }}
+              />
+            </motion.div>
           </motion.div>
         ) : null}
       </AnimatePresence>
