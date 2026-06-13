@@ -117,6 +117,7 @@ import wideEstablishingPreview from './assets/angle-previews/wide-establishing.p
 import wormsEyePreview from './assets/angle-previews/worms-eye.png';
 import geminiIcon from './assets/gemini.svg';
 import logo from './assets/logo.svg';
+import { ImageGeneration } from 'img-fx';
 import { ConfirmDeleteDialog } from './components/confirm-delete-dialog';
 import { CreateProjectDialog } from './components/create-project-dialog';
 import { EntityNameDialog } from './components/entity-name-dialog';
@@ -1793,6 +1794,12 @@ export function App() {
   const [isFastModeEnabled, setIsFastModeEnabled] = useState(true);
   const [selectedModelId, setSelectedModelId] = useState(getDefaultModelOption('image').id);
   const [generatedImages, setGeneratedImages] = useState<GeneratedImageRecord[]>([]);
+  const [isAppReady, setIsAppReady] = useState(false);
+  // Pre-warm the img-fx WebGL renderer + shader once at startup (during idle,
+  // behind the splash) so the first image generation doesn't pay the
+  // synchronous Three.js renderer creation + shader compile cost — which was
+  // freezing the main thread when the first loading tile mounted.
+  const [shouldWarmImageFx, setShouldWarmImageFx] = useState(false);
   const [isCreateProjectDialogOpen, setIsCreateProjectDialogOpen] = useState(false);
   const [sidebarEntityAction, setSidebarEntityAction] = useState<SidebarEntityAction>(null);
   const [isSidebarEntityDialogOpen, setIsSidebarEntityDialogOpen] = useState(false);
@@ -4740,6 +4747,20 @@ export function App() {
     const currentReferenceFolders = [...referenceFolders];
     const currentSelectedPromptReferenceIds = [...selectedPromptReferenceIds];
 
+    // Show the loading state immediately so the first generation feels instant,
+    // before any (potentially slow) reference rehydration/encoding work runs.
+    registerActiveRun({
+      clientRunId,
+      threadId: activeThreadId,
+      mode: 'manual',
+      count: currentShotCount,
+      provider: selectedProviderId,
+      modelId: selectedModel.id,
+      modelLabel: selectedModel.label,
+    });
+    clearComposerAfterSubmit();
+    toast.message('Generation started');
+
     try {
       const attachedSourceImageIds = new Set(
         currentReferenceImages.map((image) => image.sourceImageId).filter((id): id is string => Boolean(id))
@@ -4849,18 +4870,6 @@ export function App() {
       }));
 
       const generationPrompt = [mappedPrompt, '', `Aspect ratio: ${currentSelectedAspectRatio}`].join('\n');
-
-      registerActiveRun({
-        clientRunId,
-        threadId: activeThreadId,
-        mode: 'manual',
-        count: currentShotCount,
-        provider: selectedProviderId,
-        modelId: selectedModel.id,
-        modelLabel: selectedModel.label,
-      });
-      clearComposerAfterSubmit();
-      toast.message('Generation started');
 
       const result = await generateImages({
         clientRunId,
@@ -5367,6 +5376,10 @@ export function App() {
         }
       } catch (error) {
         console.error('Failed to load workspace', error);
+      } finally {
+        if (!cancelled) {
+          setIsAppReady(true);
+        }
       }
     }
 
@@ -5376,6 +5389,18 @@ export function App() {
       cancelled = true;
     };
   }, [setSelectedThreadIdImmediately, syncVisibleThreadImages]);
+
+  // Warm up the img-fx shared renderer once the app has settled, while the
+  // browser is idle, so the GPU/shader init happens off the critical path.
+  useEffect(() => {
+    const idle = window.requestIdleCallback?.bind(window);
+    if (idle) {
+      const handle = idle(() => setShouldWarmImageFx(true), { timeout: 2000 });
+      return () => window.cancelIdleCallback?.(handle);
+    }
+    const timer = window.setTimeout(() => setShouldWarmImageFx(true), 600);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     if (!selectedThreadId) {
@@ -5788,6 +5813,55 @@ export function App() {
   return (
     <TooltipProvider>
       <main className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
+      <AnimatePresence>
+        {!isAppReady ? (
+          <motion.div
+            key="app-splash"
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.4, ease: 'easeOut' }}
+            className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-6 bg-[var(--background)]"
+          >
+            <motion.img
+              src={logo}
+              alt="crevn logo"
+              className="h-10 w-auto"
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.5, ease: 'easeOut' }}
+            />
+            <TextShimmer className="text-sm" duration={1.4}>
+              Loading…
+            </TextShimmer>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+      {shouldWarmImageFx ? (
+        <div
+          aria-hidden
+          style={{
+            position: 'fixed',
+            top: -9999,
+            left: -9999,
+            width: 8,
+            height: 8,
+            opacity: 0,
+            pointerEvents: 'none',
+          }}
+        >
+          <ImageGeneration
+            preset="pixels-organic"
+            theme="dark"
+            paused
+            strength={1}
+            cardBg="rgb(32, 32, 33)"
+            borderRadius={0}
+            className="h-full w-full"
+          >
+            <div className="h-full w-full" />
+          </ImageGeneration>
+        </div>
+      ) : null}
       <Toaster position="bottom-right" />
       <CreateProjectDialog
         open={isCreateProjectDialogOpen}

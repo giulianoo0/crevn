@@ -872,6 +872,10 @@ vi.mock('@number-flow/react', () => ({
   default: ({ value }: { value: number }) => <span>{value}</span>,
 }));
 
+vi.mock('img-fx', () => ({
+  ImageGeneration: ({ children }: { children: unknown }) => <>{children}</>,
+}));
+
 vi.mock('./components/generated-image-grid', () => ({
   GeneratedImageGrid: ({
     images,
