@@ -1,12 +1,13 @@
 import type { SyntheticEvent } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
 
-import antigravityIcon from '@/assets/antigravity.webp';
-import codexIcon from '@/assets/codex.webp';
+import codexIcon from '@/assets/codex.svg';
+import geminiIcon from '@/assets/gemini.svg';
 import {
   getModelsForProvider,
+  getProviderOptions,
   getProviderOptionById,
-  MODEL_PROVIDER_OPTIONS,
+  type GenerationCapability,
   type GenerationProviderId,
   type ModelOption,
 } from '@/lib/model-catalog';
@@ -14,10 +15,11 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 
 const providerIcons: Record<GenerationProviderId, string> = {
   codex: codexIcon,
-  antigravity: antigravityIcon,
+  google: geminiIcon,
 };
 
 type ModelPickerProps = {
+  capability: GenerationCapability;
   isOpen: boolean;
   selectedModel: ModelOption;
   selectedProviderId: GenerationProviderId;
@@ -28,6 +30,7 @@ type ModelPickerProps = {
 };
 
 export function ModelPicker({
+  capability,
   isOpen,
   selectedModel,
   selectedProviderId,
@@ -37,7 +40,8 @@ export function ModelPicker({
   onKeepOpen,
 }: ModelPickerProps) {
   const provider = getProviderOptionById(selectedProviderId);
-  const models = getModelsForProvider(selectedProviderId);
+  const providers = getProviderOptions(capability);
+  const models = getModelsForProvider(selectedProviderId, capability);
 
   return (
     <Popover open={isOpen} onOpenChange={onOpenChange}>
@@ -54,7 +58,7 @@ export function ModelPicker({
             aria-hidden="true"
             className="size-4 shrink-0 rounded-[4px] object-contain"
           />
-          <span className="max-w-[148px] truncate">{selectedModel.label}</span>
+          <span className="max-w-[172px] truncate">{selectedModel.label}</span>
           <ChevronDown className="size-3.5 text-[var(--muted-foreground)]" />
         </button>
       </PopoverTrigger>
@@ -67,9 +71,9 @@ export function ModelPicker({
         onOpenAutoFocus={(event) => event.preventDefault()}
         onMouseDown={onKeepOpen}
       >
-        <div className="flex min-h-[292px]">
+        <div className="flex min-h-[220px]">
           <div className="flex w-[68px] flex-col items-center gap-2 border-r border-white/6 bg-[rgba(255,255,255,0.02)] px-2 py-3">
-            {MODEL_PROVIDER_OPTIONS.map((entry) => {
+            {providers.map((entry) => {
               const isSelected = entry.id === selectedProviderId;
               return (
                 <button

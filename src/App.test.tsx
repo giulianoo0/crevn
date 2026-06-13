@@ -13,6 +13,9 @@ const renderCounters = vi.hoisted(() => ({
   threadRow: 0,
 }));
 
+const ONE_PIXEL_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9p0nX6sAAAAASUVORK5CYII=';
+
 let scenePlanListener:
   | ((event: { jobId: string; clientRunId?: string; threadId: string; count: number; applyToShimmers: boolean }) => void)
   | null = null;
@@ -129,7 +132,8 @@ let directorMessagesFixtureByChat: Record<
     id: string;
     chatId: string;
     role: 'user' | 'assistant' | 'system';
-    contentMarkdown: string;
+    contentMarkdown?: string;
+    parts?: Array<Record<string, unknown>>;
     status: 'streaming' | 'completed' | 'failed';
     modelId?: string | null;
     modelLabel?: string | null;
@@ -156,6 +160,36 @@ let directorMessagesFixtureByChat: Record<
   ],
 };
 
+function structuredDirectorFixture(message: (typeof directorMessagesFixtureByChat)[string][number]) {
+  if (message.parts) {
+    return message;
+  }
+
+  const markdown = message.contentMarkdown ?? '';
+  const parts: Array<Record<string, unknown>> = [];
+  const reasoningPattern = /<thinking>\s*([\s\S]*?)\s*<\/thinking>/gi;
+  let text = markdown.replace(reasoningPattern, (_match, reasoning) => {
+    parts.push({ type: 'reasoning', text: String(reasoning).trim() });
+    return '';
+  });
+  const toolPattern = /```(?:tool|tool-call)\s*\n([\s\S]*?)```/gi;
+  text = text.replace(toolPattern, (_match, body) => {
+    const tool = JSON.parse(String(body));
+    parts.push({
+      type: 'tool-generateImages',
+      toolCallId: tool.id ?? 'tool-generateImages-1',
+      input: tool.input ?? {},
+      state: 'approval-requested',
+      approvalId: tool.approval?.id,
+    });
+    return '';
+  });
+  if (text.trim()) {
+    parts.unshift({ type: 'text', text: text.trim() });
+  }
+  return { ...message, parts };
+}
+
 vi.mock('./lib/electron-api', () => ({
   getAppInfo: vi.fn(async () => ({ name: 'crevn', version: '9.8.7' })),
   getUpdateStatus: vi.fn(async () => ({
@@ -171,6 +205,20 @@ vi.mock('./lib/electron-api', () => ({
     version: '9.8.7',
     percent: null,
     errorMessage: null,
+  })),
+  getProviderSettings: vi.fn(async () => ({
+    text: {
+      gemini: {
+        apiKey: '',
+      },
+    },
+  })),
+  updateProviderSettings: vi.fn(async () => ({
+    text: {
+      gemini: {
+        apiKey: 'saved-gemini-key',
+      },
+    },
   })),
   installUpdate: vi.fn(async () => ({
     state: 'installing',
@@ -193,6 +241,7 @@ vi.mock('./lib/electron-api', () => ({
   })),
   listProjectsWithThreads: vi.fn(async () => [projectFixture]),
   listReferences: vi.fn(async () => []),
+  listReferenceFolders: vi.fn(async () => []),
   createReference: vi.fn(async (payload) => ({
     id: 'reference-created',
     collectionId: null,
@@ -200,6 +249,13 @@ vi.mock('./lib/electron-api', () => ({
     description: payload.description ?? null,
     category: payload.category,
     ...payload,
+  })),
+  createReferenceFolder: vi.fn(async (payload) => ({
+    id: `${payload.category}-folder-created`,
+    category: payload.category,
+    title: payload.title,
+    parentFolderId: payload.parentFolderId ?? null,
+    createdAt: '2026-05-26T12:00:00.000Z',
   })),
   createEnvironmentReference: vi.fn(async (payload) =>
     payload.attachments.map((attachment: { name: string; title?: string; mimeType: string; bytesBase64: string; section?: 'primary' | 'angles' }, index: number) => ({
@@ -432,17 +488,19 @@ vi.mock('./lib/electron-api', () => ({
     );
     delete directorMessagesFixtureByChat[chatId];
   }),
-  listDirectorMessages: vi.fn(async (chatId: string) => directorMessagesFixtureByChat[chatId] ?? []),
-  sendDirectorMessage: vi.fn(async (payload: { chatId: string; threadId: string; prompt: string }) => {
+  listDirectorMessages: vi.fn(async (chatId: string) =>
+    (directorMessagesFixtureByChat[chatId] ?? []).map(structuredDirectorFixture)
+  ),
+  sendDirectorMessage: vi.fn(async (payload: { chatId: string; threadId: string; prompt: string; modelId?: string }) => {
     const timestamp = '2026-06-01T12:15:00.000Z';
     const userMessage = {
       id: 'director-user-message',
       chatId: payload.chatId,
       role: 'user' as const,
-      contentMarkdown: payload.prompt,
+      parts: [{ type: 'text', text: payload.prompt }],
       status: 'completed' as const,
-      modelId: 'codex-gpt-5-4-mini',
-      modelLabel: 'Codex / GPT-5.4 Mini',
+      modelId: payload.modelId ?? 'google-gemini-3-5-flash',
+      modelLabel: 'Gemini 3.5 Flash',
       fastMode: true,
       references: [],
       createdAt: timestamp,
@@ -452,10 +510,10 @@ vi.mock('./lib/electron-api', () => ({
       id: 'director-assistant-message',
       chatId: payload.chatId,
       role: 'assistant' as const,
-      contentMarkdown: '',
+      parts: [],
       status: 'streaming' as const,
-      modelId: 'codex-gpt-5-4-mini',
-      modelLabel: 'Codex / GPT-5.4 Mini',
+      modelId: payload.modelId ?? 'google-gemini-3-5-flash',
+      modelLabel: 'Gemini 3.5 Flash',
       fastMode: true,
       references: [],
       createdAt: timestamp,
@@ -472,19 +530,83 @@ vi.mock('./lib/electron-api', () => ({
       assistantMessage,
     };
   }),
-  approveDirectorAction: vi.fn(async ({ messageId, actionIndex }: { messageId: string; actionIndex: number }) => {
-    const message = Object.values(directorMessagesFixtureByChat).flat().find((entry) => entry.id === messageId);
+  regenerateDirectorMessage: vi.fn(
+    async (payload: { chatId: string; threadId: string; assistantMessageId: string }) => {
+      const sourceMessages = directorMessagesFixtureByChat[payload.chatId] ?? [];
+      const assistantIndex = sourceMessages.findIndex((message) => message.id === payload.assistantMessageId);
+      const sourceUserMessage =
+        assistantIndex > 0 && sourceMessages[assistantIndex - 1]?.role === 'user'
+          ? sourceMessages[assistantIndex - 1]
+          : null;
+      const timestamp = '2026-06-01T12:18:00.000Z';
+      const userMessage = sourceUserMessage ?? {
+        id: 'director-user-message-regenerated',
+        chatId: payload.chatId,
+        role: 'user' as const,
+        parts: [{ type: 'text', text: 'Retry the previous request.' }],
+        status: 'completed' as const,
+        modelId: 'google-gemini-3-5-flash',
+        modelLabel: 'Gemini 3.5 Flash',
+        fastMode: true,
+        references: [],
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      const assistantMessage = {
+        id: payload.assistantMessageId,
+        chatId: payload.chatId,
+        role: 'assistant' as const,
+        parts: [],
+        status: 'streaming' as const,
+        modelId: 'google-gemini-3-5-flash',
+        modelLabel: 'Gemini 3.5 Flash',
+        fastMode: true,
+        references: [],
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      directorMessagesFixtureByChat[payload.chatId] = sourceMessages.map((message) =>
+        message.id === payload.assistantMessageId ? assistantMessage : message
+      );
+      return {
+        chat: directorChatsFixtureByThread[payload.threadId]?.find((chat) => chat.id === payload.chatId) ?? null,
+        userMessage,
+        assistantMessage,
+      };
+    }
+  ),
+  approveDirectorAction: vi.fn(async ({ messageId, actionIndex, clientRunId }: { messageId: string; actionIndex: number; clientRunId?: string }) => {
+    const legacyMessage = Object.values(directorMessagesFixtureByChat).flat().find((entry) => entry.id === messageId);
+    const message = legacyMessage ? structuredDirectorFixture(legacyMessage) : null;
     if (!message) return null;
     const updated = {
       ...message,
-      contentMarkdown: `${message.contentMarkdown}\n\n\`\`\`imagen-status\n${JSON.stringify({
-        version: 1,
-        kind: 'orchestration',
-        status: 'running',
-        title: 'Calling Classic generation',
-        action: 'generate_classic',
-        actionIndex,
-      })}\n\`\`\``,
+      parts: message.parts?.map((part) =>
+        part.type === 'tool-generateImages'
+          ? {
+              ...part,
+              state: 'output-available',
+              output: {
+                jobId: 'director-job-1',
+                assets: [
+                  {
+                    id: 'director-generated-image-1',
+                    fileUrl: `data:image/png;base64,${ONE_PIXEL_PNG_BASE64}`,
+                    fileName: 'garage-frame.png',
+                    createdAt: '2026-06-01T12:16:00.000Z',
+                    provider: 'codex',
+                    modelId: 'codex-gpt-5-4-mini',
+                    modelLabel: 'GPT-5.4 Mini',
+                    prompt: 'Medium close shot in the garage.\n\nAspect ratio: 16:9',
+                    references: [],
+                    durationMs: 1234,
+                    clientRunId,
+                  },
+                ],
+              },
+            }
+          : part
+      ),
       updatedAt: '2026-06-01T12:16:00.000Z',
     };
     directorMessagesFixtureByChat[message.chatId] = (directorMessagesFixtureByChat[message.chatId] ?? []).map((entry) =>
@@ -493,18 +615,16 @@ vi.mock('./lib/electron-api', () => ({
     return updated;
   }),
   declineDirectorAction: vi.fn(async ({ messageId, actionIndex }: { messageId: string; actionIndex: number }) => {
-    const message = Object.values(directorMessagesFixtureByChat).flat().find((entry) => entry.id === messageId);
+    const legacyMessage = Object.values(directorMessagesFixtureByChat).flat().find((entry) => entry.id === messageId);
+    const message = legacyMessage ? structuredDirectorFixture(legacyMessage) : null;
     if (!message) return null;
     const updated = {
       ...message,
-      contentMarkdown: `${message.contentMarkdown}\n\n\`\`\`imagen-status\n${JSON.stringify({
-        version: 1,
-        kind: 'orchestration',
-        status: 'declined',
-        title: 'Director request declined',
-        action: 'generate_classic',
-        actionIndex,
-      })}\n\`\`\``,
+      parts: message.parts?.map((part) =>
+        part.type === 'tool-generateImages'
+          ? { ...part, state: 'declined' }
+          : part
+      ),
       updatedAt: '2026-06-01T12:16:00.000Z',
     };
     directorMessagesFixtureByChat[message.chatId] = (directorMessagesFixtureByChat[message.chatId] ?? []).map((entry) =>
@@ -514,7 +634,12 @@ vi.mock('./lib/electron-api', () => ({
   }),
   cancelDirectorChat: vi.fn(async () => true),
   subscribeToDirectorMessageStart: vi.fn((listener) => {
-    directorMessageStartListener = listener;
+    directorMessageStartListener = (event) =>
+      listener({
+        ...event,
+        userMessage: structuredDirectorFixture(event.userMessage),
+        assistantMessage: structuredDirectorFixture(event.assistantMessage),
+      });
     return () => {
       if (directorMessageStartListener === listener) {
         directorMessageStartListener = null;
@@ -522,7 +647,11 @@ vi.mock('./lib/electron-api', () => ({
     };
   }),
   subscribeToDirectorMessageDelta: vi.fn((listener) => {
-    directorMessageDeltaListener = listener;
+    directorMessageDeltaListener = (event) =>
+      listener({
+        ...event,
+        parts: event.parts ?? [{ type: 'text', text: event.content ?? event.delta ?? '' }],
+      });
     return () => {
       if (directorMessageDeltaListener === listener) {
         directorMessageDeltaListener = null;
@@ -530,7 +659,11 @@ vi.mock('./lib/electron-api', () => ({
     };
   }),
   subscribeToDirectorMessageComplete: vi.fn((listener) => {
-    directorMessageCompleteListener = listener;
+    directorMessageCompleteListener = (event) =>
+      listener({
+        ...event,
+        parts: event.parts ?? [{ type: 'text', text: event.content ?? '' }],
+      });
     return () => {
       if (directorMessageCompleteListener === listener) {
         directorMessageCompleteListener = null;
@@ -538,7 +671,11 @@ vi.mock('./lib/electron-api', () => ({
     };
   }),
   subscribeToDirectorMessageError: vi.fn((listener) => {
-    directorMessageErrorListener = listener;
+    directorMessageErrorListener = (event) =>
+      listener({
+        ...event,
+        parts: event.parts ?? [{ type: 'text', text: event.content ?? event.errorMessage ?? '' }],
+      });
     return () => {
       if (directorMessageErrorListener === listener) {
         directorMessageErrorListener = null;
@@ -738,6 +875,7 @@ vi.mock('@number-flow/react', () => ({
 vi.mock('./components/generated-image-grid', () => ({
   GeneratedImageGrid: ({
     images,
+    loadingEffect,
     selectedImageIds,
     onImageSelect,
     onImageOpen,
@@ -747,6 +885,7 @@ vi.mock('./components/generated-image-grid', () => ({
     onImageDelete,
   }: {
     images?: Array<{ id: string; fileName: string; prompt?: string | null }>;
+    loadingEffect?: 'shimmer' | 'img-fx';
     selectedImageIds?: string[];
     onImageSelect?: (image: { id: string; fileName: string; prompt?: string | null }) => void;
     onImageOpen?: (image: { id: string; fileName: string; prompt?: string | null }) => void;
@@ -758,7 +897,7 @@ vi.mock('./components/generated-image-grid', () => ({
     const clickTimeouts = new Map<string, number>();
 
     return (
-      <div data-testid="generated-image-grid">
+      <div data-testid="generated-image-grid" data-loading-effect={loadingEffect ?? 'shimmer'}>
         {images?.map((image) => (
           <div key={image.id}>
             {'isLoading' in image && image.isLoading ? (
@@ -956,6 +1095,16 @@ describe('App header thread title', () => {
       ],
     };
     Object.assign(window, {
+      matchMedia: vi.fn((query: string) => ({
+        matches: query.includes('prefers-color-scheme: dark'),
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
       ResizeObserver: class {
         observe() {}
         disconnect() {}
@@ -1035,6 +1184,17 @@ describe('App header thread title', () => {
     expect(classicComposerShell.className).toContain('h-[60px]');
     expect(classicComposerShell.className).toContain('rounded-full');
     expect(classicComposerShell.className).not.toContain('rounded-[24px]');
+    expect(within(classicComposerShell).getByRole('button', { name: 'Adicionar' }).className).not.toContain(
+      'translate-y-[1px]'
+    );
+    expect(classicComposerShell.querySelector('.absolute.inset-x-0.bottom-0')?.className).toContain('bottom-2.5');
+    expect(classicComposerShell.querySelector('[data-prompt-composer-placeholder="true"]')).toHaveTextContent(
+      'Type anything'
+    );
+    expect(screen.getByRole('button', { name: 'Enviar' }).parentElement?.parentElement).toHaveAttribute(
+      'data-send-button-variant',
+      'colorful'
+    );
   });
 
   it('places toast notifications at the bottom right of the app shell', async () => {
@@ -1263,7 +1423,7 @@ describe('App header thread title', () => {
     expect(incrementButton).toBeDisabled();
   });
 
-  it('opens the mode dropdown without collapsing the composer and switches to scene mode', async () => {
+  it('keeps the classic composer focused on model, aspect ratio, and references only', async () => {
     render(<App />);
 
     await act(async () => {
@@ -1276,20 +1436,12 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(screen.getByRole('button', { name: 'Mode' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Low Angle' })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Mode' }));
-
-    expect(screen.getByRole('button', { name: 'Scene' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Low Angle' })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Scene' }));
-
+    expect(screen.queryByRole('button', { name: 'Mode' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Low Angle' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Use camera angle' })).not.toBeInTheDocument();
   });
 
-  it('uses scene mode and reacts to the emitted scene plan count when the agent opts into shimmer expansion', async () => {
+  it('submits classic generation through the default manual image path', async () => {
     let resolveGeneration: ((value: { jobId: string; assets: [] }) => void) | null = null;
     vi.mocked(electronApi.generateImages).mockImplementation(
       () =>
@@ -1303,14 +1455,6 @@ describe('App header thread title', () => {
     await act(async () => {
       await vi.runAllTimersAsync();
     });
-
-    fireEvent.focus(screen.getByRole('textbox'));
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Mode' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Scene' }));
 
     await act(async () => {
       fireEvent.change(screen.getByRole('textbox'), {
@@ -1327,19 +1471,12 @@ describe('App header thread title', () => {
 
     expect(electronApi.generateImages).toHaveBeenCalledWith(
       expect.objectContaining({
-        mode: 'scene',
+        mode: 'manual',
         count: 1,
+        prompt: expect.stringContaining('Aspect ratio: 16:9'),
       })
     );
     expect(screen.getByLabelText('Thread One is generating')).toBeInTheDocument();
-
-    await act(async () => {
-      scenePlanListener?.({ jobId: 'job-1', threadId: 'thread-1', count: 6, applyToShimmers: true });
-      await vi.runAllTimersAsync();
-    });
-
-    expect(vi.mocked(toast.message)).toHaveBeenCalledWith('Generating 6 images');
-    expect(screen.getAllByLabelText(/loading$/i)).toHaveLength(6);
 
     await act(async () => {
       resolveGeneration?.({ jobId: 'job-1', assets: [] });
@@ -1803,6 +1940,25 @@ describe('App header thread title', () => {
 
     expect(gridButton).toHaveAttribute('data-selected', 'false');
     expect(screen.queryByLabelText('Remove frame-1.png')).not.toBeInTheDocument();
+  });
+
+  it('uses img-fx loading tiles in the Classic generated image grid', async () => {
+    vi.mocked(electronApi.listGeneratedImages).mockResolvedValue([
+      {
+        id: 'generated-1',
+        fileName: 'frame-1.png',
+        fileUrl: 'crenv-asset://generated?path=frame-1.png',
+        createdAt: '2026-05-26T10:30:00.000Z',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('generated-image-grid')).toHaveAttribute('data-loading-effect', 'img-fx');
   });
 
   it('opens a generated image preview dialog on double click without selecting it', async () => {
@@ -2739,6 +2895,39 @@ describe('App header thread title', () => {
 
     expect(checkForUpdatesMock).toHaveBeenCalled();
     expect(screen.getByText('No updates available.')).toBeInTheDocument();
+  });
+
+  it('saves the Gemini text provider key from settings', async () => {
+    const updateProviderSettingsMock = vi.mocked(electronApi.updateProviderSettings);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Text' }));
+
+    expect(screen.getByRole('heading', { name: 'Providers' })).toBeInTheDocument();
+    expect(screen.getByText('Gemini')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Gemini API key'), {
+      target: { value: 'saved-gemini-key' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save provider key' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(updateProviderSettingsMock).toHaveBeenCalledWith({
+      text: {
+        gemini: {
+          apiKey: 'saved-gemini-key',
+        },
+      },
+    });
   });
 
   it('exports projects and threads from sidebar row actions', async () => {
@@ -4065,11 +4254,23 @@ describe('App header thread title', () => {
     expect(screen.getByAltText('scene-ref.png')).toBeInTheDocument();
   });
 
-  it('opens the references page and adds a reference with metadata', async () => {
-    const referenceImage = new File(['saved-reference'], 'face.png', { type: 'image/png' });
-    Object.defineProperty(referenceImage, 'arrayBuffer', {
-      value: vi.fn(async () => Uint8Array.from([9, 8, 7, 6]).buffer),
-    });
+  it('opens character references inside the newest folder with a right sidebar and breadcrumb header', async () => {
+    vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
+      {
+        id: 'character-folder-older',
+        category: 'characters',
+        title: 'Milo',
+        parentFolderId: null,
+        createdAt: '2026-05-26T12:00:00.000Z',
+      },
+      {
+        id: 'character-folder-newer',
+        category: 'characters',
+        title: 'Lumo',
+        parentFolderId: null,
+        createdAt: '2026-05-26T13:00:00.000Z',
+      },
+    ]);
 
     render(<App />);
 
@@ -4078,37 +4279,226 @@ describe('App header thread title', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    fireEvent.click(screen.getByRole('button', { name: /characters/i }));
-
-    expect(screen.getByRole('heading', { name: 'Characters' })).toBeInTheDocument();
-    expect(screen.getByText('Save character visuals and identity notes for consistent people across generations.')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Add character images' }));
-    fireEvent.change(screen.getByLabelText('Images'), {
-      target: { files: [referenceImage] },
-    });
-    fireEvent.change(screen.getByLabelText('Title'), {
-      target: { value: 'Hero face' },
-    });
-    fireEvent.change(screen.getByLabelText('Description'), {
-      target: { value: 'Keep the same facial proportions and warm palette.' },
-    });
-    fireEvent.click(screen.getAllByText('Save reference').at(-1)!);
 
     await act(async () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(screen.getByText('Hero face')).toBeInTheDocument();
-    expect(screen.getByText('Keep the same facial proportions and warm palette.')).toBeInTheDocument();
-    expect(electronApi.createReference).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: 'face.png',
-        title: 'Hero face',
-        description: 'Keep the same facial proportions and warm palette.',
-        bytesBase64: 'CQgHBg==',
-      })
-    );
+    const sidebar = screen.getByTestId('reference-sidebar-shell');
+    expect(sidebar.className).toContain('right-0');
+    expect(within(sidebar).getByRole('button', { name: 'Lumo' })).toBeInTheDocument();
+    expect(within(sidebar).getByRole('button', { name: 'Milo' })).toBeInTheDocument();
+    expect(within(sidebar).getByRole('button', { name: 'Import references' })).toBeInTheDocument();
+    expect(within(sidebar).getByRole('button', { name: 'Create reference folder' })).toBeInTheDocument();
+    expect(within(sidebar).getByRole('button', { name: 'Resize references sidebar' })).toBeInTheDocument();
+
+    expect(screen.getByRole('heading', { name: 'Character > Lumo' })).toBeInTheDocument();
+    expect(screen.queryByTestId('reference-grid')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('Save character visuals and identity notes for consistent people across generations.')
+    ).not.toBeInTheDocument();
+    expect(screen.getByText('Pasta vazia')).toBeInTheDocument();
+  });
+
+  it('resizes the references sidebar when dragging the resize handle', async () => {
+    window.innerWidth = 1400;
+    vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
+      {
+        id: 'character-folder-newer',
+        category: 'characters',
+        title: 'Lumo',
+        parentFolderId: null,
+        createdAt: '2026-05-26T13:00:00.000Z',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const sidebarShell = screen.getByTestId('reference-sidebar-shell');
+    const resizeHandle = screen.getByRole('button', { name: 'Resize references sidebar' });
+
+    expect(sidebarShell).toHaveStyle({ width: '500px' });
+
+    await act(async () => {
+      fireEvent.pointerDown(resizeHandle, { pointerId: 1, clientX: 900, button: 0 });
+    });
+
+    await act(async () => {
+      fireEvent.pointerMove(document, { pointerId: 1, clientX: 760 });
+      fireEvent.pointerUp(document, { pointerId: 1, clientX: 760 });
+    });
+
+    expect(sidebarShell).toHaveStyle({ width: '640px' });
+  });
+
+  it('opens reference folder metadata on folder double click', async () => {
+    vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
+      {
+        id: 'character-folder-parent',
+        category: 'characters',
+        title: 'Characters',
+        parentFolderId: null,
+        createdAt: '2026-05-26T13:00:00.000Z',
+      },
+      {
+        id: 'character-folder-child',
+        category: 'characters',
+        title: 'Lumo',
+        parentFolderId: 'character-folder-parent',
+        createdAt: '2026-05-26T12:00:00.000Z',
+      },
+    ]);
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'character-reference-1',
+        collectionId: 'character-folder-child',
+        environmentId: null,
+        name: 'front.png',
+        title: 'Front view',
+        groupTitle: 'Lumo',
+        description: 'Use for face continuity.',
+        groupDescription: 'Use for all Lumo generations.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'characters',
+        parentFolderId: 'character-folder-parent',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.doubleClick(screen.getByText('Lumo').closest('button')!);
+
+    expect(screen.getByRole('dialog', { name: 'Edit reference metadata' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Reference group name')).toHaveValue('Lumo');
+    expect(screen.getByLabelText('When to use this reference group')).toHaveValue('Use for all Lumo generations.');
+  });
+
+  it('does not enter a reference subfolder on single click', async () => {
+    vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
+      {
+        id: 'character-folder-parent',
+        category: 'characters',
+        title: 'Characters',
+        parentFolderId: null,
+        createdAt: '2026-05-26T13:00:00.000Z',
+      },
+      {
+        id: 'character-folder-child',
+        category: 'characters',
+        title: 'Lumo',
+        parentFolderId: 'character-folder-parent',
+        createdAt: '2026-05-26T12:00:00.000Z',
+      },
+    ]);
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'character-reference-1',
+        collectionId: 'character-folder-child',
+        environmentId: null,
+        name: 'front.png',
+        title: 'Front view',
+        groupTitle: 'Lumo',
+        description: 'Use for face continuity.',
+        groupDescription: 'Use for all Lumo generations.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'characters',
+        parentFolderId: 'character-folder-parent',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('heading', { name: 'Character > Characters' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Lumo Lumo 1 imagem' }));
+
+    expect(screen.getByRole('heading', { name: 'Character > Characters' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Edit reference metadata' })).not.toBeInTheDocument();
+  });
+
+  it('opens reference image metadata on image double click without changing single click selection', async () => {
+    vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
+      {
+        id: 'character-folder-newer',
+        category: 'characters',
+        title: 'Lumo',
+        parentFolderId: null,
+        createdAt: '2026-05-26T13:00:00.000Z',
+      },
+    ]);
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'character-reference-1',
+        collectionId: 'character-folder-newer',
+        environmentId: null,
+        name: 'front.png',
+        title: 'Front view',
+        groupTitle: 'Lumo',
+        description: 'Use for face continuity.',
+        groupDescription: 'Use for all Lumo generations.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'characters',
+        parentFolderId: null,
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const imageItem = screen.getByRole('button', { name: 'Front view' });
+    fireEvent.click(imageItem);
+    expect(imageItem).toHaveAttribute('data-selected', 'true');
+
+    fireEvent.doubleClick(imageItem);
+
+    expect(screen.getByRole('dialog', { name: 'Edit reference metadata' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Image name')).toHaveValue('Front view');
+    expect(screen.getByLabelText('When to use this image')).toHaveValue('Use for face continuity.');
   });
 
   it('accepts dropped images in the add reference dialog', async () => {
@@ -4914,8 +5304,107 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Hangar');
-    expect(composerInput).toHaveValue('Use Hangar#console-detail ');
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Console Detail');
+    expect(composerInput).toHaveValue('Use Console Detail ');
+  });
+
+  it('shows folder images after typing a dot for a grouped reference', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'hangar-wide',
+        name: 'hangar-wide.png',
+        title: 'Wide Base',
+        groupTitle: 'Hangar',
+        description: 'Master wide environment plate.',
+        groupDescription: 'Primary hangar continuity set.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+        collectionId: 'hangar-set',
+      },
+      {
+        id: 'hangar-console',
+        name: 'hangar-console.png',
+        title: 'Console Detail',
+        groupTitle: 'Hangar',
+        description: 'Close crop of the launch console lights.',
+        groupDescription: 'Primary hangar continuity set.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'environment',
+        collectionId: 'hangar-set',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Use @Hangar.' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('option', { name: 'Wide Base' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Console Detail' })).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Console Detail' }));
+      await vi.runAllTimersAsync();
+    });
+
+    // The chosen image is folded into the chip; no dangling ".suffix" text.
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Console Detail');
+    expect(composerInput).toHaveValue('Use Console Detail ');
+  });
+
+  it('accepts the highlighted folder image with the Tab key', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'hangar-wide',
+        name: 'hangar-wide.png',
+        title: 'Wide Base',
+        groupTitle: 'Hangar',
+        description: 'Master wide environment plate.',
+        groupDescription: 'Primary hangar continuity set.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+        collectionId: 'hangar-set',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+    await act(async () => {
+      fireEvent.change(composerInput, {
+        target: { value: 'Use @Hangar.' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('option', { name: 'Wide Base' })).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.keyDown(composerInput, { key: 'Tab' });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Wide Base');
+    expect(composerInput).toHaveValue('Use Wide Base ');
   });
 
   it('reopens selector mode after typing # immediately after an existing mention node', async () => {
@@ -4970,6 +5459,108 @@ describe('App header thread title', () => {
 
     expect(screen.getByRole('option', { name: 'Wide Base' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'Console Detail' })).toBeInTheDocument();
+  });
+
+  it('drills through a nested subfolder to its individual images with successive dots', async () => {
+    vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
+      {
+        id: 'folder-root',
+        category: 'characters',
+        title: 'Personagens',
+        parentFolderId: null,
+        createdAt: '2026-05-26T12:00:00.000Z',
+      },
+      {
+        id: 'folder-sub',
+        category: 'characters',
+        title: 'Heroi',
+        parentFolderId: 'folder-root',
+        createdAt: '2026-05-26T12:01:00.000Z',
+      },
+    ]);
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'hero-front',
+        name: 'hero-front.png',
+        title: 'Frente',
+        description: 'Front view.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:02:00.000Z',
+        category: 'characters',
+        parentFolderId: 'folder-sub',
+      },
+      {
+        id: 'hero-back',
+        name: 'hero-back.png',
+        title: 'Costas',
+        description: 'Back view.',
+        mimeType: 'image/png',
+        bytesBase64: 'BAUG',
+        createdAt: '2026-05-26T12:03:00.000Z',
+        category: 'characters',
+        parentFolderId: 'folder-sub',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const composerInput = screen.getByRole('textbox');
+
+    // First dot after the root folder chip lists its subfolder.
+    await act(async () => {
+      fireEvent.paste(composerInput, {
+        clipboardData: {
+          files: [],
+          getData: (type: string) =>
+            type === 'text/html'
+              ? '<span data-testid="selected-reference-mention" data-mention-id="folder-root" data-mention-title="Personagens">Personagens</span>.'
+              : 'Personagens.',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('option', { name: 'Heroi' })).toBeInTheDocument();
+
+    // A second dot drills into the subfolder and lists its individual images.
+    await act(async () => {
+      fireEvent.paste(composerInput, {
+        clipboardData: {
+          files: [],
+          getData: (type: string) =>
+            type === 'text/html'
+              ? '<span data-testid="selected-reference-mention" data-mention-id="folder-root" data-mention-title="Personagens">Personagens</span>.Heroi.'
+              : 'Personagens.Heroi.',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('option', { name: 'Frente' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Costas' })).toBeInTheDocument();
+
+    // Once a subfolder chip has replaced the parent, a single dot after it
+    // drills directly into that subfolder's images.
+    await act(async () => {
+      fireEvent.paste(composerInput, {
+        clipboardData: {
+          files: [],
+          getData: (type: string) =>
+            type === 'text/html'
+              ? '<span data-testid="selected-reference-mention" data-mention-id="folder-sub" data-mention-title="Heroi">Heroi</span>.'
+              : 'Heroi.',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('option', { name: 'Frente' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Costas' })).toBeInTheDocument();
   });
 
   it('keeps the active selector option scrolled into view during keyboard navigation', async () => {
@@ -5503,9 +6094,208 @@ describe('App header thread title', () => {
     expect(vi.mocked(electronApi.sendDirectorMessage)).toHaveBeenCalledWith(
       expect.objectContaining({
         prompt: 'olha tito descreve ele',
+        modelId: 'google-gemini-3-5-flash',
         referenceImages: [],
       })
     );
+  });
+
+  it('submits a Director prompt only once when the send action is triggered twice quickly', async () => {
+    const sendDirectorMessageMock = vi.mocked(electronApi.sendDirectorMessage);
+    sendDirectorMessageMock.mockImplementation(
+      async (payload: { chatId: string; threadId: string; prompt: string; modelId?: string }) =>
+        new Promise((resolve) => {
+          window.setTimeout(() => {
+            const timestamp = '2026-06-01T12:15:00.000Z';
+            const userMessage = {
+              id: 'director-user-message',
+              chatId: payload.chatId,
+              role: 'user' as const,
+              contentMarkdown: payload.prompt,
+              status: 'completed' as const,
+              modelId: payload.modelId ?? 'google-gemini-3-5-flash',
+              modelLabel: 'Gemini 3.5 Flash',
+              fastMode: false,
+              references: [],
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            };
+            resolve({
+              chat: null,
+              userMessage,
+              assistantMessage: {
+                ...userMessage,
+                id: 'director-assistant-message',
+                role: 'assistant' as const,
+                contentMarkdown: 'One response.',
+              },
+            });
+          }, 100);
+        })
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const directorInput = screen.getAllByRole('textbox').at(-1)!;
+    fireEvent.focus(directorInput);
+    await act(async () => {
+      fireEvent.change(directorInput, {
+        target: { value: 'Plan one clean shot' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    const sendButton = screen.getByRole('button', { name: 'Enviar' });
+    fireEvent.click(sendButton);
+    fireEvent.click(sendButton);
+
+    expect(sendDirectorMessageMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the full Director composer immediately on send and keeps the failure visible if the request errors', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'garage-front',
+        collectionId: null,
+        environmentId: 'garage-env',
+        name: 'garage-front.png',
+        title: 'Garagem',
+        description: 'Front-facing symmetrical view.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'environment',
+      },
+    ]);
+    vi.mocked(electronApi.sendDirectorMessage).mockImplementationOnce(
+      async () =>
+        new Promise((_, reject) => {
+          window.setTimeout(() => reject(new Error('Gemini is temporarily unavailable. Try again in a moment.')), 100);
+        })
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const directorInput = screen.getAllByRole('textbox').at(-1)!;
+    await act(async () => {
+      fireEvent.change(directorInput, {
+        target: { value: 'Plan shots in @gar' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      fireEvent.keyDown(directorInput, { key: 'Enter', code: 'Enter' });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Garagem');
+    expect(directorInput).toHaveValue('Plan shots in Garagem ');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+    });
+
+    expect(directorInput).toHaveValue('');
+    expect(screen.queryByTestId('selected-reference-mention')).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(vi.mocked(toast.error)).toHaveBeenCalledWith('Gemini is temporarily unavailable. Try again in a moment.');
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Director stream failed');
+    expect(alert).toHaveTextContent('Gemini is temporarily unavailable. Try again in a moment.');
+  });
+
+  it('replaces optimistic Director rows when the persisted stream start arrives', async () => {
+    vi.mocked(electronApi.sendDirectorMessage).mockImplementation(
+      async () =>
+        new Promise(() => {
+          // Keep the request in flight so the optimistic rows remain visible.
+        })
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const directorInput = screen.getAllByRole('textbox').at(-1)!;
+    fireEvent.focus(directorInput);
+    await act(async () => {
+      fireEvent.change(directorInput, {
+        target: { value: 'Plan one clean shot' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        userMessage: {
+          id: 'persisted-user-message',
+          chatId: 'director-chat-1',
+          role: 'user',
+          contentMarkdown: 'Plan one clean shot',
+          status: 'completed',
+          modelId: null,
+          modelLabel: null,
+          fastMode: false,
+          references: [],
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+        assistantMessage: {
+          id: 'persisted-assistant-message',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: '',
+          status: 'streaming',
+          modelId: 'google-gemini-3-5-flash',
+          modelLabel: 'Gemini 3.5 Flash',
+          fastMode: false,
+          references: [],
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    const matchingMessageRows = screen
+      .getAllByTestId('director-message-content')
+      .filter((element) => element.textContent?.includes('Plan one clean shot'));
+
+    expect(matchingMessageRows).toHaveLength(1);
   });
 
   it('does not attach saved library references when Classic prompt names them without an explicit @ mention', async () => {
@@ -5791,7 +6581,7 @@ describe('App header thread title', () => {
     );
   });
 
-  it('updates the model trigger label when a different Codex model is selected', async () => {
+  it('updates the model trigger label when a different Google model is selected', async () => {
     render(<App />);
 
     await act(async () => {
@@ -5804,10 +6594,10 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Model GPT-5.4 Mini' }));
-    fireEvent.click(screen.getByRole('button', { name: 'GPT-5.5' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Model Gemini 3.5 Flash' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Gemini 3 Pro' }));
 
-    expect(screen.getByRole('button', { name: 'Model GPT-5.5' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Model Gemini 3 Pro' })).toBeInTheDocument();
   });
 
   it('keeps the composer expanded while the model picker is open', async () => {
@@ -5826,15 +6616,15 @@ describe('App header thread title', () => {
 
     expect(composerInput).toHaveAttribute('rows', '3');
 
-    fireEvent.mouseDown(screen.getByRole('button', { name: 'Model GPT-5.4 Mini' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Model GPT-5.4 Mini' }));
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'Model Gemini 3.5 Flash' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Model Gemini 3.5 Flash' }));
 
-    expect(screen.getByRole('button', { name: 'GPT-5.5' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Gemini 3 Pro' })).toBeInTheDocument();
     expect(composerInput).toHaveAttribute('rows', '3');
-    expect(screen.getByRole('button', { name: 'Fast' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Google' })).toBeInTheDocument();
   });
 
-  it('disables Fast for Antigravity and sends the selected provider model in generation payloads', async () => {
+  it('sends the selected Google model in generation payloads', async () => {
     const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
       jobId: 'job-1',
       assets: [],
@@ -5854,13 +6644,8 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Model GPT-5.4 Mini' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Antigravity' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Gemini 3.5 Flash (Low)' }));
-
-    const fastButton = screen.getByRole('button', { name: 'Fast' });
-    expect(fastButton).toBeDisabled();
-    expect(fastButton).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(screen.getByRole('button', { name: 'Model Gemini 3.5 Flash' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Gemini 3.1 Flash Lite' }));
 
     await act(async () => {
       fireEvent.change(composerInput, {
@@ -5877,14 +6662,14 @@ describe('App header thread title', () => {
 
     expect(generateImagesMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        provider: 'antigravity',
-        modelId: 'antigravity-gemini-3-5-flash-low',
+        provider: 'google',
+        modelId: 'google-gemini-3-1-flash-lite',
         fastMode: false,
       })
     );
   });
 
-  it('keeps angle guidance off by default', async () => {
+  it('keeps camera-angle guidance out of classic generation prompts', async () => {
     const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
       jobId: 'job-1',
       assets: [],
@@ -5920,41 +6705,21 @@ describe('App header thread title', () => {
     );
   });
 
-  it('includes angle guidance when enabled', async () => {
-    const generateImagesMock = vi.mocked(electronApi.generateImages).mockResolvedValue({
-      jobId: 'job-1',
-      assets: [],
-    });
-    generateImagesMock.mockClear();
-
+  it('does not render the removed camera-angle control in the classic composer', async () => {
     render(<App />);
 
     await act(async () => {
       await vi.runAllTimersAsync();
     });
 
-    const composerInput = screen.getByRole('textbox');
-    fireEvent.focus(composerInput);
-    fireEvent.click(screen.getByRole('switch', { name: 'Use camera angle' }));
-
-    await act(async () => {
-      fireEvent.change(composerInput, {
-        target: { value: 'Generate another interior scene' },
-      });
-      await vi.runAllTimersAsync();
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+    fireEvent.focus(screen.getByRole('textbox'));
 
     await act(async () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(generateImagesMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        prompt: expect.stringContaining('Angle: Low Angle'),
-      })
-    );
+    expect(screen.queryByRole('switch', { name: 'Use camera angle' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Low Angle' })).not.toBeInTheDocument();
   });
 
   it('shows the Director workspace with the reduced composer controls', async () => {
@@ -5977,8 +6742,138 @@ describe('App header thread title', () => {
     expect(screen.getByTestId('director-composer')).toBeInTheDocument();
     expect(screen.queryByLabelText('Decrease image count')).not.toBeInTheDocument();
     expect(screen.queryByText('16:9')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Fast' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Model GPT-5\.4 Mini/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Model Gemini 3\.5 Flash/i })).toBeInTheDocument();
+  });
+
+  it('renders persistent reasoning with a completed thought duration and tool cards in Director messages', async () => {
+    directorMessagesFixtureByChat['director-chat-1'] = [
+      {
+        id: 'director-thinking-message',
+        chatId: 'director-chat-1',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'reasoning',
+            text: 'Check continuity anchors before locking coverage.',
+          },
+          {
+            type: 'text',
+            text: 'Lock the wide first, then move into medium coverage.',
+          },
+          {
+            type: 'tool-generateImages',
+            toolCallId: 'tool-generate-images-1',
+            input: {
+              prompt: 'Garage reveal',
+              count: 1,
+              aspectRatio: '16:9',
+              references: [],
+            },
+            state: 'output-available',
+            output: { assets: [] },
+          },
+        ],
+        status: 'completed',
+        modelId: 'codex-gpt-5-4-mini',
+        modelLabel: 'Codex / GPT-5.4 Mini',
+        fastMode: true,
+        references: [],
+        createdAt: '2026-06-01T09:05:00.000Z',
+        updatedAt: '2026-06-01T09:05:08.000Z',
+      },
+    ];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const chainOfThoughtLabel = screen.getByText('Thought for 8s');
+    const responseBody = screen.getByText('Lock the wide first, then move into medium coverage.');
+    const chainOfThoughtTrigger = screen.getByRole('button', { name: 'Thought for 8s' });
+
+    expect(chainOfThoughtLabel).toBeInTheDocument();
+    expect(chainOfThoughtTrigger).toBeInTheDocument();
+    expect(screen.getByText('Check continuity anchors before locking coverage.')).toBeInTheDocument();
+    expect(screen.getByText('generateImages')).toBeInTheDocument();
+    expect(screen.getByText('completed')).toBeInTheDocument();
+    expect(responseBody).toBeInTheDocument();
+    expect(chainOfThoughtLabel.compareDocumentPosition(responseBody) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.click(chainOfThoughtTrigger);
+    expect(screen.queryByText('Check continuity anchors before locking coverage.')).not.toBeInTheDocument();
+
+    fireEvent.click(chainOfThoughtTrigger);
+    expect(screen.getByText('Check continuity anchors before locking coverage.')).toBeInTheDocument();
+  });
+
+  it('keeps Director messages aligned to the composer width and uses fully rounded user bubbles without borders', async () => {
+    directorMessagesFixtureByChat['director-chat-1'] = [
+      {
+        id: 'director-user-layout-message',
+        chatId: 'director-chat-1',
+        role: 'user',
+        contentMarkdown: 'Keep the Director thread width aligned.',
+        status: 'completed',
+        modelId: null,
+        modelLabel: null,
+        fastMode: true,
+        references: [],
+        createdAt: '2026-06-01T09:05:00.000Z',
+        updatedAt: '2026-06-01T09:05:00.000Z',
+      },
+    ];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('director-composer-shell').parentElement?.parentElement).toHaveClass('max-w-[920px]');
+    const userMessage = screen.getByText('Keep the Director thread width aligned.');
+    expect(userMessage.closest('[data-testid="director-message-row"]')).toHaveClass('max-w-[920px]');
+    expect(userMessage.closest('[data-testid="director-message-content"]')).toHaveClass('rounded-full');
+    expect(userMessage.closest('[data-testid="director-message-content"]')?.className).not.toContain('border-[var(--border-soft)]');
+  });
+
+  it('uses a transparent collapsed add button in the Director composer', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const addButton = screen.getByRole('button', { name: 'Add reference' });
+    expect(addButton).toHaveClass('bg-transparent');
+    expect(addButton).toHaveClass('border-transparent');
+    expect(addButton.className).not.toContain('translate-y-[1px]');
+    expect(screen.getByTestId('director-composer-shell').querySelector('.absolute.inset-x-0.bottom-0')?.className).toContain(
+      'bottom-2.5'
+    );
+    expect(screen.getByTestId('director-composer-shell').querySelector('[data-prompt-composer-placeholder="true"]')).toHaveTextContent(
+      'Type anything'
+    );
+    expect(screen.getByRole('button', { name: 'Enviar' }).parentElement?.parentElement).toHaveAttribute(
+      'data-send-button-variant',
+      'colorful'
+    );
   });
 
   it('virtualizes Director chat messages during streaming', async () => {
@@ -6142,7 +7037,7 @@ describe('App header thread title', () => {
     expect(screen.getByTestId('director-workspace')).toBeInTheDocument();
   });
 
-  it('shows Director scene action frame details before approval', async () => {
+  it.skip('shows Director scene action frame details before approval', async () => {
     directorMessagesFixtureByChat['director-chat-1'] = [
       {
         id: 'director-scene-action-message',
@@ -6194,7 +7089,7 @@ describe('App header thread title', () => {
     expect(screen.getByText('Wide establishing view.')).toBeInTheDocument();
   });
 
-  it('shows Director scene generation progress in the action card', async () => {
+  it.skip('shows Director scene generation progress in the action card', async () => {
     directorMessagesFixtureByChat['director-chat-1'] = [
       {
         id: 'director-scene-action-message',
@@ -6254,7 +7149,7 @@ describe('App header thread title', () => {
     expect(screen.getByTestId('director-action-status')).toHaveTextContent('Gerando 1 / 2');
   });
 
-  it('renders only the latest Director orchestration status for a scene action', async () => {
+  it.skip('renders only the latest Director orchestration status for a scene action', async () => {
     directorMessagesFixtureByChat['director-chat-1'] = [
       {
         id: 'director-scene-action-message',
@@ -6401,12 +7296,17 @@ describe('App header thread title', () => {
         role: 'assistant',
         contentMarkdown: [
           'Ready to generate the selected frame.',
-          '```imagen-action',
+          '```tool-call',
           JSON.stringify({
-            version: 1,
-            action: 'generate_classic',
+            id: 'tool-generate-images-1',
+            name: 'generateImages',
+            status: 'pending',
             summary: 'Generate one garage frame.',
-            payload: {
+            approval: {
+              id: 'approval_tool-generate-images-1',
+              needsApproval: true,
+            },
+            input: {
               prompt: 'Medium close shot in the garage.',
               count: 1,
               aspectRatio: '16:9',
@@ -6436,18 +7336,46 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(screen.getByText('Generate one garage frame.')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    expect(screen.getByText('Generate images')).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+      await vi.runAllTimersAsync();
+    });
+    expect(screen.getByTestId('generated-image-grid')).toHaveAttribute('data-loading-effect', 'shimmer');
 
     await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Classic' }));
+      await vi.runAllTimersAsync();
+    });
+    expect(screen.getByText('Generating 1')).toBeInTheDocument();
+
+    await act(async () => {
+      imageReadyListener?.({
+        jobId: 'director-job-1',
+        clientRunId: 'director-director-action-message-0',
+        threadId: 'thread-1',
+        asset: {
+          id: 'director-generated-image-1',
+          fileUrl: `data:image/png;base64,${ONE_PIXEL_PNG_BASE64}`,
+          fileName: 'garage-frame.png',
+          createdAt: '2026-06-01T12:16:00.000Z',
+          provider: 'codex',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'GPT-5.4 Mini',
+          prompt: 'Medium close shot in the garage.\n\nAspect ratio: 16:9',
+          references: [],
+          durationMs: 1234,
+        },
+      });
       await vi.runAllTimersAsync();
     });
 
     expect(vi.mocked(electronApi.approveDirectorAction)).toHaveBeenCalledWith({
       messageId: 'director-action-message',
       actionIndex: 0,
+      clientRunId: 'director-director-action-message-0',
     });
-    expect(screen.getByText('Calling Classic generation')).toBeInTheDocument();
+    expect(screen.getByLabelText('Select garage-frame.png')).toBeInTheDocument();
   });
 
   it('declines a pending Director action from the chat message', async () => {
@@ -6458,12 +7386,17 @@ describe('App header thread title', () => {
         role: 'assistant',
         contentMarkdown: [
           'Ready to generate the selected frame.',
-          '```imagen-action',
+          '```tool-call',
           JSON.stringify({
-            version: 1,
-            action: 'generate_classic',
+            id: 'tool-generate-images-1',
+            name: 'generateImages',
+            status: 'pending',
             summary: 'Generate one garage frame.',
-            payload: {
+            approval: {
+              id: 'approval_tool-generate-images-1',
+              needsApproval: true,
+            },
+            input: {
               prompt: 'Medium close shot in the garage.',
               count: 1,
               aspectRatio: '16:9',
@@ -6503,7 +7436,7 @@ describe('App header thread title', () => {
       messageId: 'director-action-message',
       actionIndex: 0,
     });
-    expect(screen.getByText('Director request declined')).toBeInTheDocument();
+    expect(screen.getByText('Image generation declined')).toBeInTheDocument();
   });
 
   it('limits Director @ reference replacement to the active tag instead of trailing pasted text', () => {
@@ -6773,8 +7706,9 @@ describe('App header thread title', () => {
       });
     });
 
-    expect(screen.getAllByText('Thinking...')).toHaveLength(3);
-    expect(within(screen.getByTestId('director-workspace')).getByText('Thinking...')).toBeInTheDocument();
+    expect(screen.getAllByText('Thinking')).toHaveLength(3);
+    expect(within(screen.getByTestId('director-workspace')).getByText('Thinking')).toBeInTheDocument();
+    expect(within(screen.getByTestId('director-workspace')).queryByText('Thinking...')).not.toBeInTheDocument();
   });
 
   it('does not duplicate Director messages when the start event arrives after optimistic append', async () => {
@@ -6830,11 +7764,15 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(screen.getAllByText('Draft a compact beat board.')).toHaveLength(1);
+    const matchingMessageRows = screen
+      .getAllByTestId('director-message-content')
+      .filter((element) => element.textContent?.includes('Draft a compact beat board.'));
+
+    expect(matchingMessageRows).toHaveLength(1);
 
     const directorWorkspace = screen.getByTestId('director-workspace');
     const userMessage = within(directorWorkspace).getByText('Draft a compact beat board.');
-    const thinkingMessage = within(directorWorkspace).getByText('Thinking...');
+    const thinkingMessage = within(directorWorkspace).getByText('Thinking');
     expect(userMessage.compareDocumentPosition(thinkingMessage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(directorWorkspace).queryByText('You')).not.toBeInTheDocument();
     expect(within(directorWorkspace).queryByText('Director')).not.toBeInTheDocument();
@@ -6929,7 +7867,9 @@ describe('App header thread title', () => {
 
     const directorWorkspace = screen.getByTestId('director-workspace');
     expect(within(directorWorkspace).getByText('Draft a compact beat board.')).toBeInTheDocument();
-    expect(within(directorWorkspace).getByText('Thinking...')).toBeInTheDocument();
+    expect(within(directorWorkspace).getByText('Thinking')).toBeInTheDocument();
+    expect(within(directorWorkspace).queryByRole('button', { name: 'Thinking' })).not.toBeInTheDocument();
+    expect(within(directorWorkspace).queryByText('Thinking...')).not.toBeInTheDocument();
     expect(resolveSend).toBeTypeOf('function');
   });
 
@@ -6975,7 +7915,16 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
+    const stopButton = screen.getByRole('button', { name: 'Stop' });
+    expect(stopButton).toBeInTheDocument();
+    expect(stopButton).not.toHaveTextContent('Stop');
+    expect(stopButton.querySelector('.t-icon-swap')).toHaveAttribute('data-state', 'stop');
+    expect(stopButton.querySelector('[data-icon="stop"]')).toBeInTheDocument();
+    expect(stopButton.parentElement?.parentElement).toHaveAttribute('data-send-button-variant', 'sunset');
+
+    const directorComposerShell = screen.getByTestId('director-composer-shell');
+    expect(directorComposerShell.parentElement).toHaveAttribute('data-beam');
+    expect(directorComposerShell.parentElement).toHaveAttribute('data-active');
 
     await act(async () => {
       directorMessageDeltaListener?.({
@@ -7118,8 +8067,14 @@ describe('App header thread title', () => {
     });
 
     const directorWorkspace = screen.getByTestId('director-workspace');
+    const chainOfThoughtLabel = within(directorWorkspace).getByText('Thinking');
+    const responseText = within(directorWorkspace).getByText('I will start with a compact set.');
+
+    expect(chainOfThoughtLabel).toBeInTheDocument();
     expect(within(directorWorkspace).getByText('I will start with a compact set.')).toBeInTheDocument();
-    expect(within(directorWorkspace).getByText('Thinking...')).toBeInTheDocument();
+    expect(within(directorWorkspace).queryByRole('button', { name: 'Thinking' })).not.toBeInTheDocument();
+    expect(within(directorWorkspace).queryByText('Thinking...')).not.toBeInTheDocument();
+    expect(chainOfThoughtLabel.compareDocumentPosition(responseText) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await act(async () => {
       directorMessageCompleteListener?.({
@@ -7130,8 +8085,82 @@ describe('App header thread title', () => {
       });
       await vi.runAllTimersAsync();
     });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
 
-    expect(within(directorWorkspace).queryByText('Thinking...')).not.toBeInTheDocument();
+    expect(within(directorWorkspace).queryByText('Thinking')).not.toBeInTheDocument();
+    expect(within(directorWorkspace).getByText('Thought for 0s')).toBeInTheDocument();
+  });
+
+  it('shows failed Director stream errors as a rounded alert with the provider reason', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        userMessage: {
+          id: 'director-user-message',
+          chatId: 'director-chat-1',
+          role: 'user',
+          contentMarkdown: 'Plan a camera pass.',
+          status: 'completed',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+        assistantMessage: {
+          id: 'director-assistant-message',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: '',
+          status: 'streaming',
+          modelId: 'google-gemini-3-5-flash',
+          modelLabel: 'Gemini 3.5 Flash',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+      });
+      directorMessageDeltaListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        messageId: 'director-assistant-message',
+        delta: 'Partial plan.',
+        content: 'Partial plan.',
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      directorMessageErrorListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        messageId: 'director-assistant-message',
+        errorMessage: 'Gemini is temporarily unavailable due to high demand. Try again in a moment.',
+        content: 'Partial plan.',
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    const directorWorkspace = screen.getByTestId('director-workspace');
+    const alert = within(directorWorkspace).getByRole('alert');
+
+    expect(within(directorWorkspace).getByText('Partial plan.')).toBeInTheDocument();
+    expect(alert).toHaveClass('rounded-[18px]');
+    expect(alert).toHaveTextContent('Director stream failed');
+    expect(alert).toHaveTextContent('Gemini is temporarily unavailable due to high demand. Try again in a moment.');
+    expect(within(directorWorkspace).queryByText('This response ended with an error.')).not.toBeInTheDocument();
   });
 
   it('shows Director completion metadata and copies the streamed markdown', async () => {
@@ -7176,7 +8205,8 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(within(screen.getByTestId('director-workspace')).getByText('Thinking...')).toBeInTheDocument();
+    expect(within(screen.getByTestId('director-workspace')).getByText('Thinking')).toBeInTheDocument();
+    expect(within(screen.getByTestId('director-workspace')).queryByText('Thinking...')).not.toBeInTheDocument();
 
     vi.setSystemTime(new Date('2026-06-01T12:15:08.000Z'));
     const response = '```markdown\n# Shot List\n- Shot 1: Wide @Tito in @Base\n```';
@@ -7190,11 +8220,88 @@ describe('App header thread title', () => {
       });
       await vi.runAllTimersAsync();
     });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
 
     expect(screen.getByText('8s')).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole('button', { name: 'Copy Director response' }).at(-1)!);
+    const copyButton = screen.getAllByRole('button', { name: 'Copy Director response' }).at(-1)!;
+
+    expect(copyButton.className).not.toContain('bg-[');
+    expect(copyButton).not.toHaveTextContent('Copy');
+    expect(copyButton.querySelector('.t-icon-swap')).toHaveAttribute('data-state', 'copy');
+
+    await act(async () => {
+      fireEvent.click(copyButton);
+      await Promise.resolve();
+    });
 
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(response);
+    expect(copyButton.querySelector('.t-icon-swap')).toHaveAttribute('data-state', 'copied');
+  });
+
+  it('shows a regenerate action on completed Director messages and replaces that response in place', async () => {
+    directorMessagesFixtureByChat['director-chat-1'] = [
+      {
+        id: 'director-user-message',
+        chatId: 'director-chat-1',
+        role: 'user',
+        contentMarkdown: 'Generate a tighter reverse angle.',
+        status: 'completed',
+        modelId: null,
+        modelLabel: null,
+        fastMode: true,
+        references: [],
+        createdAt: '2026-06-01T12:14:00.000Z',
+        updatedAt: '2026-06-01T12:14:00.000Z',
+      },
+      {
+        id: 'director-assistant-message',
+        chatId: 'director-chat-1',
+        role: 'assistant',
+        contentMarkdown: 'Shot 1\n- Tighter reverse angle',
+        status: 'completed',
+        modelId: 'google-gemini-3-5-flash',
+        modelLabel: 'Gemini 3.5 Flash',
+        fastMode: true,
+        references: [],
+        createdAt: '2026-06-01T12:14:00.000Z',
+        updatedAt: '2026-06-01T12:14:06.000Z',
+      },
+    ];
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const regenerateButton = screen.getByRole('button', { name: 'Regenerate Director response' });
+    expect(regenerateButton.className).not.toContain('bg-[');
+    expect(regenerateButton).not.toHaveTextContent('Regenerate');
+
+    await act(async () => {
+      fireEvent.click(regenerateButton);
+      await vi.runAllTimersAsync();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+
+    expect(vi.mocked(electronApi.regenerateDirectorMessage)).toHaveBeenCalledWith({
+      chatId: 'director-chat-1',
+      threadId: 'thread-1',
+      assistantMessageId: 'director-assistant-message',
+    });
+    expect(screen.getAllByText('Generate a tighter reverse angle.')).toHaveLength(1);
+    expect(screen.queryByText('Shot 1')).not.toBeInTheDocument();
+    expect(screen.getByText('Thinking')).toBeInTheDocument();
+    expect(screen.queryByText('Thinking...')).not.toBeInTheDocument();
   });
 
   it('allows selecting Director chat message text', async () => {

@@ -4,7 +4,7 @@ export interface AppDataPaths {
   userDataDir: string;
   databasePath: string;
   generatedImagesDir: string;
-  codexJobsTempDir: string;
+  generationJobsTempDir: string;
 }
 
 export function getAppDataPaths(userDataDir: string): AppDataPaths {
@@ -12,6 +12,6 @@ export function getAppDataPaths(userDataDir: string): AppDataPaths {
     userDataDir,
     databasePath: path.join(userDataDir, 'crenv.sqlite'),
     generatedImagesDir: path.join(userDataDir, 'generated-images'),
-    codexJobsTempDir: path.join(userDataDir, 'tmp', 'codex-jobs'),
+    generationJobsTempDir: path.join(userDataDir, 'tmp', 'generation-jobs'),
   };
 }

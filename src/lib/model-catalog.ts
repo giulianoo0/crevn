@@ -1,21 +1,25 @@
-export type GenerationProviderId = 'codex' | 'antigravity';
+export type GenerationCapability = 'image' | 'text';
+
+export type GenerationProviderId = 'codex' | 'google';
 
 export type ModelProviderOption = {
   id: GenerationProviderId;
   label: string;
+  capabilities: GenerationCapability[];
 };
 
 export type ModelOption = {
   id: string;
   label: string;
   providerId: GenerationProviderId;
-  codexCliModel?: string;
-  antigravitySettingModel?: string;
+  tanstackModel?: string;
+  runtimeModel?: string;
+  capabilities: GenerationCapability[];
 };
 
 export const MODEL_PROVIDER_OPTIONS: ModelProviderOption[] = [
-  { id: 'codex', label: 'Codex' },
-  { id: 'antigravity', label: 'Antigravity' },
+  { id: 'codex', label: 'Codex', capabilities: ['image'] },
+  { id: 'google', label: 'Google', capabilities: ['text'] },
 ];
 
 export const MODEL_OPTIONS: ModelOption[] = [
@@ -23,65 +27,35 @@ export const MODEL_OPTIONS: ModelOption[] = [
     id: 'codex-gpt-5-4-mini',
     label: 'GPT-5.4 Mini',
     providerId: 'codex',
-    codexCliModel: 'gpt-5.4-mini',
+    runtimeModel: 'gpt-5.4',
+    capabilities: ['image'],
   },
   {
-    id: 'codex-gpt-5-4',
-    label: 'GPT-5.4',
-    providerId: 'codex',
-    codexCliModel: 'gpt-5.4',
-  },
-  {
-    id: 'codex-gpt-5-5',
-    label: 'GPT-5.5',
-    providerId: 'codex',
-    codexCliModel: 'gpt-5.5',
-  },
-  {
-    id: 'codex-gpt-5-3-codex',
-    label: 'GPT-5.3 Codex',
-    providerId: 'codex',
-    codexCliModel: 'gpt-5.3-codex',
-  },
-  {
-    id: 'codex-gpt-5-2-codex',
-    label: 'GPT-5.2 Codex',
-    providerId: 'codex',
-    codexCliModel: 'gpt-5.2-codex',
-  },
-  {
-    id: 'antigravity-gemini-3-5-flash-low',
-    label: 'Gemini 3.5 Flash (Low)',
-    providerId: 'antigravity',
-    antigravitySettingModel: 'Gemini 3.5 Flash (Low)',
-  },
-  {
-    id: 'antigravity-gemini-3-5-flash',
+    id: 'google-gemini-3-5-flash',
     label: 'Gemini 3.5 Flash',
-    providerId: 'antigravity',
-    antigravitySettingModel: 'Gemini 3.5 Flash',
+    providerId: 'google',
+    tanstackModel: 'gemini-3.5-flash',
+    capabilities: ['text'],
   },
   {
-    id: 'antigravity-claude-sonnet-4-6',
-    label: 'Claude Sonnet 4.6',
-    providerId: 'antigravity',
-    antigravitySettingModel: 'Claude Sonnet 4.6',
+    id: 'google-gemini-3-1-flash-lite',
+    label: 'Gemini 3.1 Flash Lite',
+    providerId: 'google',
+    tanstackModel: 'gemini-3.1-flash-lite-preview',
+    capabilities: ['text'],
   },
   {
-    id: 'antigravity-claude-opus-4-6',
-    label: 'Claude Opus 4.6',
-    providerId: 'antigravity',
-    antigravitySettingModel: 'Claude Opus 4.6',
-  },
-  {
-    id: 'antigravity-gpt-oss-120b',
-    label: 'GPT-OSS-120b',
-    providerId: 'antigravity',
-    antigravitySettingModel: 'GPT-OSS-120b',
+    id: 'google-gemini-3-pro',
+    label: 'Gemini 3 Pro',
+    providerId: 'google',
+    tanstackModel: 'gemini-3-pro-preview',
+    capabilities: ['text'],
   },
 ];
 
-export const DEFAULT_MODEL_ID = 'codex-gpt-5-4-mini';
+export const DEFAULT_IMAGE_MODEL_ID = 'codex-gpt-5-4-mini';
+export const DEFAULT_TEXT_MODEL_ID = 'google-gemini-3-5-flash';
+export const DEFAULT_MODEL_ID = DEFAULT_IMAGE_MODEL_ID;
 
 export function getModelOptionById(modelId: string) {
   return MODEL_OPTIONS.find((option) => option.id === modelId) ?? null;
@@ -91,10 +65,24 @@ export function getProviderOptionById(providerId: GenerationProviderId) {
   return MODEL_PROVIDER_OPTIONS.find((option) => option.id === providerId) ?? null;
 }
 
-export function getModelsForProvider(providerId: GenerationProviderId) {
-  return MODEL_OPTIONS.filter((option) => option.providerId === providerId);
+export function getProviderOptions(capability?: GenerationCapability) {
+  if (!capability) {
+    return MODEL_PROVIDER_OPTIONS;
+  }
+  return MODEL_PROVIDER_OPTIONS.filter((option) => option.capabilities.includes(capability));
 }
 
-export function getDefaultModelOption() {
-  return getModelOptionById(DEFAULT_MODEL_ID) ?? MODEL_OPTIONS[0];
+export function getModelsForProvider(providerId: GenerationProviderId, capability?: GenerationCapability) {
+  return MODEL_OPTIONS.filter(
+    (option) => option.providerId === providerId && (!capability || option.capabilities.includes(capability))
+  );
+}
+
+export function getDefaultModelOption(capability: GenerationCapability = 'image') {
+  const defaultId = capability === 'text' ? DEFAULT_TEXT_MODEL_ID : DEFAULT_IMAGE_MODEL_ID;
+  return (
+    getModelOptionById(defaultId) ??
+    MODEL_OPTIONS.find((option) => option.capabilities.includes(capability)) ??
+    MODEL_OPTIONS[0]
+  );
 }

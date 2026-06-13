@@ -1,8 +1,6 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
-const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 
@@ -13,116 +11,191 @@ const { drizzle } = require('drizzle-orm/libsql');
 const { sqliteTable, text, integer } = require('drizzle-orm/sqlite-core');
 const yazl = require('yazl');
 const yauzl = require('yauzl');
-
-const { buildCodexAppServerSpawnEnv, createCodexAppServerClient } = require('./codexAppServerClient.cjs');
-const { runDirectorAppServerTurn } = require('./directorAppServerRuntime.cjs');
+const { runImageGenerationBatch } = require('./features/generation/codexOutput.cjs');
 const {
-  buildCrenvImageReadyPromptContract,
-  runCodexImageAppServerJob,
-} = require('./codexImageJobRuntime.cjs');
+  createAiSdkDirectorPartStream,
+  getTextFromParts,
+  toDirectorModelMessages,
+} = require('./features/generation/directorAiSdk.cjs');
 
 const DEFAULT_PROJECT_NAME = 'Documents';
 const DEFAULT_THREAD_NAME = 'New Thread';
 const MANUAL_PROJECT_NAME = 'New Project';
-const DEFAULT_GENERATION_PROVIDER = 'codex';
-const DEFAULT_CODEX_MODEL_ID = 'codex-gpt-5-4-mini';
-const DEFAULT_ANTIGRAVITY_MODEL_ID = 'antigravity-gemini-3-5-flash-low';
-const CODEX_DEEP_TRACE_ENABLED = process.env.CRENV_CODEX_TRACE === '1';
-const CANCEL_EXIT_GRACE_MS = 2000;
 const DEFAULT_SCENE_FRAME_CONCURRENCY = 3;
 const MAX_SCENE_FRAME_CONCURRENCY = 6;
-const DIRECTOR_DELTA_PERSIST_INTERVAL_MS = 250;
+const DIRECTOR_MODEL_OPTIONS = [
+  {
+    id: 'google-gemini-3-5-flash',
+    label: 'Gemini 3.5 Flash',
+    providerId: 'google',
+    runtimeModel: 'gemini-3.5-flash',
+  },
+  {
+    id: 'google-gemini-3-1-flash-lite',
+    label: 'Gemini 3.1 Flash Lite',
+    providerId: 'google',
+    runtimeModel: 'gemini-3.1-flash-lite-preview',
+  },
+  {
+    id: 'google-gemini-3-pro',
+    label: 'Gemini 3 Pro',
+    providerId: 'google',
+    runtimeModel: 'gemini-3-pro-preview',
+  },
+];
+const DEFAULT_DIRECTOR_MODEL_ID = 'google-gemini-3-5-flash';
 
-const CODEX_MODEL_BY_ID = {
-  'codex-gpt-5-4-mini': 'gpt-5.4-mini',
-  'codex-gpt-5-4': 'gpt-5.4',
-  'codex-gpt-5-5': 'gpt-5.5',
-  'codex-gpt-5-3-codex': 'gpt-5.3-codex',
-  'codex-gpt-5-2-codex': 'gpt-5.2-codex',
-};
-
-const IMAGE_PRODUCTION_GUIDANCE_LINES = [
-  'Imagen production guidance:',
-  '- These are static image keyframes for later animation in Seedance.',
-  '- The generated frames will be used by Seedance as reference images, so each still must be a complete, stable, animatable frame.',
-  '- Use the Imagen toolkit to generate the reference images that make a later Seedance plan possible; do not try to generate Seedance itself here.',
-  '- Prepare outputs so the later direcao-de-cena skill can turn them into Seedance-ready scene plans with subject lock, one clear motion beat, camera language, lighting/style, and negative constraints.',
-  '- When planning Seedance/video-ready output, apply the direcao-de-cena rules too: cartoon DreamWorks look, reference-image-first continuity, multishot structure, and music disabled.',
-  '- Treat each 15s clip as about 4 clear beats max. If the scene needs more, split it.',
-  '- If 3+ characters are acting at once, serialize the scene: group, then individualize, then group again.',
-  '- If the composition is spatially complex, give it a dedicated clip instead of forcing everything into one shot.',
-  '- Each clip should do one job: establish, escalate, reverse, or release.',
-  '- Preserve environment identity using coverage plates and detail plates: same layout, materials, fixed object positions, door/window placement, lighting direction, palette, and scale.',
-  '- Use environment coverage plates and closest detail plates for the visible area instead of redesigning the location.',
-  '- Lock character identity with named character-sheet anchors: exact face shape, proportions, wardrobe, hair silhouette, palette, age read, and distinguishing details.',
-  '- Use consistent character names, exact wardrobe, proportions, face shape, hair silhouette, palette, and distinguishing details in every prompt where that character appears.',
-  '- Re-anchor recurring characters to the original sheet or strongest approved keyframe whenever prompt drift appears.',
-  '- Give every visible character a natural performance beat: emotion, eyes, brows, mouth, posture, weight shift, hands, walk phase, and interaction with the set.',
-  '- Put camera angle and shot size early in the prompt using standard cinematography terms; avoid contradictions such as close-up plus full room.',
-  '- Do not write video motion, duration, tracking, pan, or animation instructions into image prompts; describe the single frozen visual instant.',
+const IMAGE_MODEL_OPTIONS = [
+  {
+    id: 'codex-gpt-5-4-mini',
+    label: 'GPT-5.4 Mini',
+    providerId: 'codex',
+    runtimeModel: 'gpt-5.4',
+  },
 ];
 
-const IMAGE_PRODUCTION_GUIDANCE = IMAGE_PRODUCTION_GUIDANCE_LINES.join('\n');
+function resolveDirectorModel(modelId) {
+  return (
+    DIRECTOR_MODEL_OPTIONS.find((model) => model.id === modelId) ??
+    DIRECTOR_MODEL_OPTIONS.find((model) => model.id === DEFAULT_DIRECTOR_MODEL_ID) ??
+    DIRECTOR_MODEL_OPTIONS[0]
+  );
+}
 
-const DIRECTOR_SEEDANCE_CARTOON_CONTRACT_LINES = [
-  'Loaded direcao-de-cena skill contract:',
-  '- Use the direcao-de-cena skill as the governing workflow whenever the user is planning a scene, clip, multishot, animation beat, or Seedance-ready output.',
-  '- Follow the direcao-de-cena three-phase flow explicitly: Fase 1 pre-plano (direction / dramatic motor / beats / visual strategy), Fase 2 frame planning for Seedance, Fase 3 execution via imagen-action.',
-  '- In Fase 1, diagnose whether the requested material fits in one clip or needs to become an arc. If one clip becomes overcrowded, split it.',
-  '- Treat a 15s clip as roughly 4 clear beats. More than that should be split or serialized.',
-  '- If 3+ characters are acting simultaneously, serialize the action: group -> individual -> group.',
-  '- If the scene needs a specific formation, vehicle assignment, or spatial arrangement, give it a dedicated clip.',
-  '- Each clip should carry one function only: establish, escalate, reverse, or release.',
-  '- In the scenes table, show the beat count for each scene and keep it at 4 beats max before splitting.',
-  '- A frame or shot in image generation is a single image. A beat should usually be represented by one image, because it is one action.',
-  '- Beat is a story unit and frame is an image unit: use beats to measure scene complexity, and use frames to build the visual sequence.',
-  '- One beat can expand into multiple frames when the action is complex; a simple beat can stay as one frame.',
-  '- Do not ask one still to show multiple major actions at once; if the beat changes, split the frame or the clip.',
-  '- When answering the user, keep the response centered on the shot plan. Do not dump the full dramatic analysis unless the user explicitly asks for it.',
-  '- Prefer compact bullets and coverage tables over long diagnosis sections when the goal is to explain the scene simply.',
-  '- Treat every create_scene action as a Seedance multishot blueprint: each frame is one shot/keyframe in a single future Seedance sequence, not an unrelated still-image batch.',
-  '- When the user asks for a scene, video, animation, multishot, cartoon motion prompt, or Seedance-ready output, apply this contract even if the user does not say "direcao-de-cena".',
-  '- Before camera choices, define the dramatic motor internally: want, obstacle, turn, narrative objective, emotional objective, and the dramatic question of the clip.',
-  '- Very strongly prefer outputting a proper pre-plano before any imagen-action: objective of the scene, beats, dramatic shape, visual strategy, coverage plan, blocking, and rhythm.',
-  '- If the requested clip should be split into two scenes, say so clearly and divide the material into Scene 1 and Scene 2 with their own beat ranges, durations, and continuity anchors.',
-  '- Because the app accepts only one scene action per Director response, if the clip must be split across two scene groups, first deliver the full split plan and emit only Scene 1 in the current imagen-action. Then instruct that Scene 2 should be emitted in the next Director turn after approval.',
-  '- Keep the video prompt copy in English. Explanations may be in the user language, but copy-ready Seedance prompt blocks must be English.',
-  '- Always target landscape 16:9.',
-  '- Use a cartoon DreamWorks look: polished 3D feature-animation proportions, tactile materials, detailed hair, soft subsurface skin, expressive eyes, motivated cinematic lighting, and faint volumetric atmosphere.',
-  '- Never name animation studios in the prompt text; describe visual qualities instead.',
-  '- Use Shot 1:, Shot 2:, and Hard cut to labels for multishot prompts. Limit to five shots unless the user explicitly asks otherwise.',
-  '- Keep one clear action beat per shot. Do not stack multiple major actions inside one shot block.',
-  '- Maintain a shared anchor across shots: same @Reference character, same @Reference environment, or the same lighting recipe.',
-  '- Repeat @Reference mentions inside every shot where that reference matters; do not rely on an attachment alone.',
-  '- Duration: 12-15s for multishot, 16:9.',
-  '- Close every Seedance prompt with the style anchor and audio rule.',
-  '- Style anchor: Polished 3D feature-animation look, semi-realistic proportions, tousled detailed hair, warm-undertone skin with soft subsurface scattering, expressive proportionate eyes with clean catchlights, tactile fabric and material detail, composed cinematic lighting with motivated key sources, faint volumetric atmosphere, 16:9.',
-  '- Audio: no music, no background score. Sound effects and ambient only — list specific SFX and ambience for the scene.',
-];
+function resolveImageModel(modelId) {
+  return IMAGE_MODEL_OPTIONS.find((model) => model.id === modelId) ?? IMAGE_MODEL_OPTIONS[0];
+}
 
-const MODEL_LABEL_BY_ID = {
-  'codex-gpt-5-4-mini': 'GPT-5.4 Mini',
-  'codex-gpt-5-4': 'GPT-5.4',
-  'codex-gpt-5-5': 'GPT-5.5',
-  'codex-gpt-5-3-codex': 'GPT-5.3 Codex',
-  'codex-gpt-5-2-codex': 'GPT-5.2 Codex',
-  'antigravity-gemini-3-5-flash-low': 'Gemini 3.5 Flash (Low)',
-  'antigravity-gemini-3-5-flash': 'Gemini 3.5 Flash',
-  'antigravity-claude-sonnet-4-6': 'Claude Sonnet 4.6',
-  'antigravity-claude-opus-4-6': 'Claude Opus 4.6',
-  'antigravity-gpt-oss-120b': 'GPT-OSS-120b',
-};
+function normalizeDirectorPromptContent(content) {
+  return String(content ?? '').trim();
+}
 
-const ANTIGRAVITY_MODEL_BY_ID = {
-  'antigravity-gemini-3-5-flash-low': 'Gemini 3.5 Flash (Low)',
-  'antigravity-gemini-3-5-flash': 'Gemini 3.5 Flash',
-  'antigravity-claude-sonnet-4-6': 'Claude Sonnet 4.6',
-  'antigravity-claude-opus-4-6': 'Claude Opus 4.6',
-  'antigravity-gpt-oss-120b': 'GPT-OSS-120b',
-};
+const DIRECTOR_SYSTEM_PROMPT = [
+  'You are Director for Imagen, a professional AI image and video editing studio.',
+  'Respond with normal concise markdown by default.',
+  'When the user explicitly wants one or more still images, call the generateImages tool.',
+  'Do not claim that generation already happened before approval.',
+  'Use @Reference names only when they are actually relevant.',
+].join('\n');
 
-function formatTraceElapsedMs(startedAtMs) {
-  return `+${Date.now() - startedAtMs}ms`;
+function parseDirectorParts(partsJson) {
+  try {
+    const parts = JSON.parse(partsJson || '[]');
+    return Array.isArray(parts) ? parts : [];
+  } catch {
+    return [];
+  }
+}
+
+function serializeDirectorParts(parts) {
+  return JSON.stringify(Array.isArray(parts) ? parts : []);
+}
+
+function getDirectorMessageText(message) {
+  return getTextFromParts(message?.parts ?? parseDirectorParts(message?.partsJson));
+}
+
+function buildDirectorMessages({ previousMessages, prompt, referenceImages }) {
+  const messages = [{ role: 'system', content: DIRECTOR_SYSTEM_PROMPT }, ...toDirectorModelMessages(
+    previousMessages
+      .filter((message) => message?.status === 'completed')
+      .map((message) => ({
+        ...message,
+        parts: message.parts ?? parseDirectorParts(message.partsJson),
+      }))
+  )];
+
+  if (referenceImages.length === 0) {
+    messages.push({ role: 'user', content: prompt });
+    return messages;
+  }
+
+  messages.push({
+    role: 'user',
+    content: [
+      {
+        type: 'text',
+        text: [
+          prompt,
+          '',
+          'Attached reference metadata:',
+          ...referenceImages.map((reference, index) =>
+            [
+              `${index + 1}. ${reference.title || reference.name}`,
+              reference.description ? ` - ${reference.description}` : '',
+            ].join('')
+          ),
+        ].join('\n'),
+      },
+      ...referenceImages
+        .filter((reference) => typeof reference.bytesBase64 === 'string' && reference.bytesBase64.length > 0)
+        .map((reference) => ({
+          type: 'image',
+          image: `data:${reference.mimeType || 'image/png'};base64,${reference.bytesBase64}`,
+        })),
+    ],
+  });
+
+  return messages;
+}
+
+function normalizeDirectorReferenceLabel(value) {
+  return String(value ?? '')
+    .replace(/^@+/, '')
+    .trim()
+    .toLowerCase();
+}
+
+function extractDirectorErrorMessageCandidate(value, depth = 0) {
+  if (depth > 4 || value == null) {
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    if (trimmed.includes('This model is currently experiencing high demand')) {
+      return trimmed;
+    }
+
+    try {
+      return extractDirectorErrorMessageCandidate(JSON.parse(trimmed), depth + 1);
+    } catch {
+      return null;
+    }
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const match = extractDirectorErrorMessageCandidate(entry, depth + 1);
+      if (match) {
+        return match;
+      }
+    }
+    return null;
+  }
+
+  if (typeof value === 'object') {
+    for (const entry of Object.values(value)) {
+      const match = extractDirectorErrorMessageCandidate(entry, depth + 1);
+      if (match) {
+        return match;
+      }
+    }
+  }
+
+  return null;
+}
+
+function normalizeDirectorErrorMessage(error) {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const candidate = extractDirectorErrorMessageCandidate(rawMessage) ?? rawMessage;
+  if (candidate.includes('This model is currently experiencing high demand')) {
+    return 'Gemini is temporarily unavailable due to high demand. Try again in a moment.';
+  }
+  return candidate;
 }
 
 function registerSceneGroupCancelableRun(activeSceneGroupCancellations, sceneGroupId, cancelableRun) {
@@ -273,284 +346,11 @@ function resolveSceneFrameConcurrencyLimit(taskCount) {
   );
 }
 
-function normalizeDirectorReferenceName(value) {
-  return String(value ?? '')
-    .trim()
-    .replace(/^@+/, '')
-    .replace(/\s+/g, ' ')
-    .toLowerCase();
-}
-
-function normalizeDirectorAttachmentSelector(value) {
-  const withoutExtension = String(value ?? '').replace(/\.[a-z0-9]+$/i, '');
-  return withoutExtension
-    .trim()
-    .replace(/^@+/, '')
-    .replace(/[#/\\:]+/g, ' ')
-    .replace(/[-_.]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .toLowerCase();
-}
-
-function parseDirectorReferenceSelector(value) {
-  const raw = String(value ?? '').trim().replace(/^@+/, '');
-  const match = raw.match(/^([^#/:]+)(?:[#/:](.+))?$/);
-  if (!match) {
-    return null;
-  }
-
-  const referenceName = normalizeDirectorReferenceName(match[1]);
-  if (!referenceName) {
-    return null;
-  }
-
-  const attachmentSelector = normalizeDirectorAttachmentSelector(match[2]);
-  return {
-    referenceName,
-    attachmentSelector: attachmentSelector || null,
-  };
-}
-
-function parseDirectorActionBlocks(markdown) {
-  const source = typeof markdown === 'string' ? markdown : '';
-  const actionBlocks = [];
-  const fencePattern = /```imagen-action\s*\n([\s\S]*?)```/g;
-  let match;
-
-  while ((match = fencePattern.exec(source)) !== null) {
-    const rawJson = match[1]?.trim() ?? '';
-    try {
-      const parsed = JSON.parse(rawJson);
-      actionBlocks.push(validateDirectorActionBlock(parsed));
-    } catch (error) {
-      actionBlocks.push({
-        version: 1,
-        action: 'invalid',
-        summary: 'Invalid Director action',
-        payload: {},
-        error: `Invalid imagen-action JSON: ${error instanceof Error ? error.message : String(error)}`,
-      });
-    }
-  }
-
-  const sceneActions = actionBlocks.filter((action) => action.action === 'create_scene' || action.action === 'update_scene');
-  if (sceneActions.length > 1) {
-    return [
-      {
-        version: 1,
-        action: 'invalid',
-        summary: 'Invalid Director action',
-        payload: {},
-        error: 'Only one scene action can be orchestrated from a single Director response.',
-      },
-    ];
-  }
-
-  return actionBlocks;
-}
-
-function validateDirectorActionBlock(action) {
-  if (!action || typeof action !== 'object') {
-    return {
-      version: 1,
-      action: 'invalid',
-      summary: 'Invalid Director action',
-      payload: {},
-      error: 'Director action must be a JSON object.',
-    };
-  }
-
-  const actionType = action.action;
-  const payload = action.payload && typeof action.payload === 'object' ? action.payload : {};
-  const summary =
-    typeof action.summary === 'string' && action.summary.trim()
-      ? action.summary.trim()
-      : actionType === 'create_scene'
-        ? 'Create and generate a scene.'
-        : 'Generate images.';
-  const normalizedVersion =
-    action.version === undefined || action.version === null || action.version === '' ? 1 : Number(action.version);
-
-  if (normalizedVersion !== 1) {
-    return {
-      version: 1,
-      action: 'invalid',
-      summary,
-      payload,
-      error: 'Director action version must be 1.',
-    };
-  }
-
-  if (actionType === 'generate_classic') {
-    const prompt = typeof payload.prompt === 'string' ? payload.prompt.trim() : '';
-    if (!prompt) {
-      return {
-        version: 1,
-        action: 'invalid',
-        summary,
-        payload,
-        error: 'Classic generation actions require payload.prompt.',
-      };
-    }
-    return {
-      version: 1,
-      action: actionType,
-      summary,
-      payload: {
-        ...payload,
-        prompt,
-        count: clampInteger(payload.count, 1, 12, 1),
-        references: Array.isArray(payload.references) ? payload.references.filter((reference) => typeof reference === 'string') : [],
-      },
-    };
-  }
-
-  if (actionType === 'create_scene') {
-    const frames = Array.isArray(payload.frames) ? payload.frames : [];
-    if (frames.length === 0) {
-      return {
-        version: 1,
-        action: 'invalid',
-        summary,
-        payload,
-        error: 'Scene actions require at least one frame.',
-      };
-    }
-    return {
-      version: 1,
-      action: actionType,
-      summary,
-      payload: {
-        ...payload,
-        title: typeof payload.title === 'string' && payload.title.trim() ? payload.title.trim() : 'Director Scene',
-        scenePrompt: typeof payload.scenePrompt === 'string' ? payload.scenePrompt.trim() : '',
-        references: Array.isArray(payload.references) ? payload.references.filter((reference) => typeof reference === 'string') : [],
-        frames: frames.slice(0, 24).map((frame, index) => ({
-          title:
-            typeof frame?.title === 'string' && frame.title.trim()
-              ? frame.title.trim()
-              : `Frame ${index + 1}`,
-          prompt: typeof frame?.prompt === 'string' ? frame.prompt.trim() : '',
-          references: Array.isArray(frame?.references)
-            ? frame.references.filter((reference) => typeof reference === 'string')
-            : [],
-        })),
-        generate: true,
-      },
-    };
-  }
-
-  if (actionType === 'update_scene') {
-    const frames = Array.isArray(payload.frames) ? payload.frames : [];
-    const sceneGroupId = typeof payload.sceneGroupId === 'string' ? payload.sceneGroupId.trim() : '';
-    const sceneTitle = typeof payload.sceneTitle === 'string' ? payload.sceneTitle.trim() : '';
-    if (!sceneGroupId && !sceneTitle) {
-      return {
-        version: 1,
-        action: 'invalid',
-        summary,
-        payload,
-        error: 'Update scene actions require payload.sceneGroupId or payload.sceneTitle.',
-      };
-    }
-    return {
-      version: 1,
-      action: actionType,
-      summary,
-      payload: {
-        ...payload,
-        sceneGroupId: sceneGroupId || null,
-        sceneTitle: sceneTitle || null,
-        title: typeof payload.title === 'string' ? payload.title.trim() : '',
-        scenePrompt: typeof payload.scenePrompt === 'string' ? payload.scenePrompt.trim() : '',
-        references: Array.isArray(payload.references) ? payload.references.filter((reference) => typeof reference === 'string') : [],
-        generate: payload.generate !== false,
-        frames: frames.slice(0, 24).map((frame) => ({
-          id: typeof frame?.id === 'string' && frame.id.trim() ? frame.id.trim() : null,
-          title:
-            typeof frame?.title === 'string' && frame.title.trim()
-              ? frame.title.trim()
-              : 'Untitled frame',
-          prompt: typeof frame?.prompt === 'string' ? frame.prompt.trim() : '',
-          operation: frame?.operation === 'add' ? 'add' : 'update',
-          generate: frame?.generate !== false,
-          references: Array.isArray(frame?.references)
-            ? frame.references.filter((reference) => typeof reference === 'string')
-            : [],
-        })),
-      },
-    };
-  }
-
-  return {
-    version: 1,
-    action: 'invalid',
-    summary,
-    payload,
-    error: `Unsupported Director action: ${String(actionType)}`,
-  };
-}
-
-function buildDirectorStatusBlock({ status, title, detail, action, actionIndex, result, progress }) {
-  const payload = {
-    version: 1,
-    kind: 'orchestration',
-    status,
-    title,
-    detail,
-    action,
-    actionIndex,
-    result,
-    progress,
-    updatedAt: new Date().toISOString(),
-  };
-
-  return `\n\n\`\`\`imagen-status\n${JSON.stringify(payload)}\n\`\`\``;
-}
-
-function toSceneFrameReferenceInput(referenceImage) {
-  return {
-    referenceKind: referenceImage.category ? 'saved_reference' : 'uploaded_attachment',
-    referenceId: referenceImage.id ?? null,
-    name: referenceImage.name,
-    mimeType: referenceImage.mimeType,
-    bytesBase64: referenceImage.bytesBase64,
-  };
-}
-
 function normalizeSceneLookupText(value) {
   return String(value ?? '')
     .trim()
     .replace(/\s+/g, ' ')
     .toLowerCase();
-}
-
-function resolveDirectorSceneTarget(sceneGroups, payload) {
-  const sceneGroupId = typeof payload?.sceneGroupId === 'string' ? payload.sceneGroupId.trim() : '';
-  if (sceneGroupId) {
-    return sceneGroups.find((sceneGroup) => sceneGroup.id === sceneGroupId) ?? null;
-  }
-
-  const sceneTitle = normalizeSceneLookupText(payload?.sceneTitle);
-  if (!sceneTitle) {
-    return null;
-  }
-
-  return sceneGroups.find((sceneGroup) => normalizeSceneLookupText(sceneGroup.title) === sceneTitle) ?? null;
-}
-
-function resolveDirectorFrameTarget(frames, framePayload) {
-  const frameId = typeof framePayload?.id === 'string' ? framePayload.id.trim() : '';
-  if (frameId) {
-    return frames.find((frame) => frame.id === frameId) ?? null;
-  }
-
-  const frameTitle = normalizeSceneLookupText(framePayload?.title);
-  if (!frameTitle) {
-    return null;
-  }
-
-  return frames.find((frame) => normalizeSceneLookupText(frame.title) === frameTitle) ?? null;
 }
 
 function buildDirectorSceneContextLines(sceneGroups) {
@@ -570,105 +370,6 @@ function buildDirectorSceneContextLines(sceneGroups) {
     }
   }
   return lines;
-}
-
-function buildDirectorChatPrompt({
-  projectName,
-  threadName,
-  systemInstructions,
-  artStyle,
-  sceneGroups = [],
-  history,
-  referenceImages,
-  userPrompt,
-}) {
-  const historyLines = history
-    .filter((message) => message.role === 'user' || message.role === 'assistant')
-    .map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.contentMarkdown}`);
-
-  return [
-    'You are the Director workspace inside the Imagen app.',
-    'You are the orchestration layer for image and scene creation inside Imagen.',
-    'Help the user develop shots, scene coverage, continuity notes, and production-ready creative direction.',
-    'Answer in clean Markdown.',
-    'Be concise by default, but expand when the user asks for detail.',
-    'You cannot generate images yourself.',
-    'When the user asks you to render, generate, create images, or send a scene to the app, write a short explanation and then emit exactly one fenced JSON block using this fence: ```imagen-action',
-    'The Imagen app will execute the action through Classic or Scenes. Do not claim images already exist until the app reports completion.',
-    'Do not invent local file paths, manifests, image ids, or stored asset paths.',
-    'For Classic generation use action "generate_classic" and set payload.prompt, payload.count, payload.aspectRatio, and payload.references.',
-    'For Scenes use action "create_scene"; you may include many frames, but only one scene action is allowed per response.',
-    'For edits to existing Scenes use action "update_scene" instead of creating a duplicate scene.',
-    'Use update_scene when the user asks to revise, fix, continue, add frames to, regenerate, or modify a previous scene or frame.',
-    'An update_scene payload shape is {"sceneGroupId":"...","sceneTitle":"...","title":"optional new title","scenePrompt":"optional revised continuity brief","generate":true,"references":["@Reference"],"frames":[{"id":"existing-frame-id","title":"Frame title","prompt":"revised prompt","operation":"update","generate":true,"references":["@Reference"]},{"title":"New frame","prompt":"new prompt","operation":"add","generate":true,"references":["@Reference"]}]}',
-    'When editing an existing frame, include its frameId in frames[].id whenever available. When adding a frame, set operation to "add" and omit id.',
-    'When only part of a Scene changes, update only those frames. The app will generate only changed or added frames.',
-    'Scene actions are reviewed in Director before approval; once the user approves, Imagen creates the scene plan and immediately generates its frames.',
-    'A create_scene payload shape is {"title":"...","scenePrompt":"...","references":["@Reference"],"generate":true,"frames":[{"title":"Frame 1","prompt":"...","references":["@Reference"]}]}',
-    'A generate_classic payload shape is {"prompt":"...","count":1,"aspectRatio":"16:9","references":["@Reference"]}.',
-    ...DIRECTOR_SEEDANCE_CARTOON_CONTRACT_LINES,
-    'Very strongly prefer writing a Seedance Coverage Plan before emitting any imagen-action, unless the user explicitly asks to skip planning or only execute.',
-    'Seedance accepts at most 15 seconds per generation. If a requested beat needs more than 15 seconds, split it into multiple Seedance-ready scene groups or clearly state the split.',
-    'A Seedance Coverage Plan should be concrete and brief: duration budget, beat order, shot count, angle/take choice, image/keyframe count, references, and what must preserve / may change.',
-    'Dialogue coverage: map each dialogue line or story beat to a shot/take, angle, shot size, speaker/reaction focus, eye line, gesture, and reference anchors.',
-    'Image/keyframe budget: decide how many still images each frame/shot needs; naturally request more than 1 image per frame when expression, camera, timing, or continuity uncertainty benefits from variants.',
-    'This guidance can be relaxed when needed, but in general tend toward more scenes, frames, and beats rather than fewer when coverage or clarity benefits from it.',
-    'For each planned shot, state must preserve / may change so the generator knows which reference traits are locked and which performance/camera traits are free.',
-    'You may still emit the imagen-action in the same response after the plan when the plan is generation-ready.',
-    'If an environment reference contains multiple images, pick the single attachment that best suits the current frame and do not pass the whole group to the imagen-action unless the full set is genuinely required.',
-    'Treat environment references as locked layout anchors: preserve room geometry, wall/floor materials, door/window placement, furniture positions, lighting direction, and spatial scale unless the user explicitly asks to change them.',
-    'Treat character sheets as locked identity anchors: preserve face shape, proportions, costume, hair, palette, and distinguishing details across every prompt and frame.',
-    'Every imagen-action payload must include the relevant environment and character @Reference names; do not rely on prose mentions alone.',
-    'Use the closest environment detail reference for the visible area of each frame; read the full environment set for context, then choose the correct base/detail refs for that shot.',
-    'Before emitting an imagen-action, inspect every provided reference image and every image in a multi-image environment set. Use the complete set to understand layout, then include only the specific @Reference titles needed for each action or frame.',
-    'For environment references with multiple attachments, treat all attachments with the same environment title as one context set. Pick the closest base plate, side view, or detail plate for the current camera angle and visible area.',
-    'When a saved reference has multiple attachments, choose the exact attachment needed for each frame instead of attaching the whole set by default.',
-    'Use @Reference for the whole reference set only when the frame needs the full set. Use @Reference#attachment-name, @Reference/attachment-name, or @Reference:attachment-name to select one specific attachment by file name, id, or description.',
-    'Each frame can include its own references array; put attachment-specific selectors there so each frame receives only the closest base plate, side view, detail plate, character angle, or prop image it needs.',
-    'When reviewing generated outputs, compare the generated images against the original references and call out mismatches in environment geometry, character identity, prop continuity, camera intent, and prompt adherence.',
-    'Give visible characters natural performance beats: expression, eye line, posture, weight shift, hand occupation, walk phase, and physical interaction with the set so they do not look robotic.',
-    'When changing camera angle or shot size, rotate or reframe within the same environment instead of redesigning the location.',
-    'Every frame you prepare is a static image keyframe for later Seedance animation, not a final video prompt.',
-    'These generated still frames are later used in Seedance as reference images.',
-    'Add enough stable visual specificity that the later direcao-de-cena skill can create Seedance-ready prompts using subject lock, one action beat, one camera instruction, lighting/style, and negative constraints.',
-    'When the user asks for Seedance, video, animation, multishot, or cartoon motion prompts, use the direcao-de-cena skill standards too: write the video prompt in English, keep it 16:9, use a cartoon DreamWorks look, and keep music disabled.',
-    'Use consistent character names, exact wardrobe, proportions, face shape, hair silhouette, palette, and distinguishing details across Classic and Scenes actions.',
-    'If a character appears across multiple frames, repeat the identity lock in every frame prompt and re-anchor to the character sheet or strongest approved keyframe.',
-    'Only provide the references and continuity constraints needed for the requested shot or frame; avoid stuffing unrelated references into the payload.',
-    'Only references listed under Attached reference images in this turn are available for visual inspection.',
-    'Plain names without @ are ordinary text and do not grant saved-reference access. If the user names a saved reference without @, ask them to mention it with @Reference or attach it before claiming to inspect it.',
-    'When referring to a known character, environment, prop, or saved visual anchor, write it as an @Reference mention using the exact human-facing reference title when available, for example @Tito, @Base, or @HoverBike.',
-    'When you produce a shot list, frame plan, production plan, asset manifesto, or any structured output the user may paste into another composer, include a copyable markdown code block after the readable explanation.',
-    'Use this fence for copyable production blocks: ```markdown',
-    'Inside that code block, preserve @Reference mentions so the Imagen composer can auto-detect references when pasted.',
-    'Do not wrap ordinary short answers in a code block unless they are a shot/frame/asset plan or the user asks for copy-ready output.',
-    projectName ? `Project: ${projectName}` : null,
-    threadName ? `Thread: ${threadName}` : null,
-    systemInstructions ? `Project instructions: ${systemInstructions}` : null,
-    artStyle ? `Project art style: ${artStyle}` : null,
-    '',
-    ...buildDirectorSceneContextLines(sceneGroups),
-    '',
-    referenceImages.length > 0 ? 'Attached reference images:' : null,
-    ...referenceImages.map((referenceImage) => {
-      const metadata = [
-        referenceImage.title ? `title: ${referenceImage.title}` : null,
-        referenceImage.description ? `description: ${referenceImage.description}` : null,
-      ].filter(Boolean);
-      return metadata.length > 0
-        ? `- ${referenceImage.path} (${metadata.join('; ')})`
-        : `- ${referenceImage.path}`;
-    }),
-    referenceImages.length > 0 ? 'Use attached references when discussing environments, characters, props, or shot continuity.' : null,
-    '',
-    historyLines.length > 0 ? 'Conversation so far:' : null,
-    ...historyLines,
-    '',
-    `User: ${userPrompt.trim()}`,
-    'Assistant:',
-  ]
-    .filter(Boolean)
-    .join('\n');
 }
 
 function buildReferenceCollectionDescriptionPrompt({ category, title, attachmentPaths }) {
@@ -691,32 +392,6 @@ function buildReferenceCollectionDescriptionPrompt({ category, title, attachment
     'Attachment files:',
     ...attachmentPaths.map((attachment) => `- id=${attachment.id} path=${attachment.path}`),
   ].join('\n');
-}
-
-function classifyCodexTraceLine(line) {
-  const normalized = line.trim().toLowerCase();
-  if (!normalized) {
-    return 'plain';
-  }
-  if (
-    normalized.startsWith('thinking') ||
-    normalized.startsWith('reasoning') ||
-    normalized.startsWith('analyzing') ||
-    normalized.startsWith('analysis:') ||
-    normalized.startsWith('plan:')
-  ) {
-    return 'reasoning';
-  }
-  if (
-    normalized.includes('calling tool') ||
-    normalized.includes('running tool') ||
-    normalized.includes('invoking tool') ||
-    normalized.includes('tool call') ||
-    normalized.includes('using tool')
-  ) {
-    return 'tool_call';
-  }
-  return 'plain';
 }
 
 const projectsTable = sqliteTable('projects', {
@@ -756,7 +431,13 @@ const generationJobsTable = sqliteTable('generation_jobs', {
   durationMs: integer('duration_ms'),
   providerThreadId: text('provider_thread_id'),
   providerTurnId: text('provider_turn_id'),
-  runtime: text('runtime').notNull().default('codex-app-server'),
+  requestStartedAt: text('request_started_at'),
+  firstEventAt: text('first_event_at'),
+  imageToolCallStartedAt: text('image_tool_call_started_at'),
+  imageToolGeneratingAt: text('image_tool_generating_at'),
+  firstPartialImageAt: text('first_partial_image_at'),
+  completedAt: text('completed_at'),
+  runtime: text('runtime').notNull().default('api-backend'),
   importedCount: integer('imported_count').notNull().default(0),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -803,6 +484,7 @@ const characterReferenceCollectionsTable = sqliteTable('character_reference_coll
   id: text('id').primaryKey(),
   title: text('title').notNull(),
   description: text('description'),
+  parentFolderId: text('parent_folder_id'),
   createdAt: text('created_at').notNull(),
 });
 
@@ -823,6 +505,7 @@ const objectReferenceCollectionsTable = sqliteTable('object_reference_collection
   id: text('id').primaryKey(),
   title: text('title').notNull(),
   description: text('description'),
+  parentFolderId: text('parent_folder_id'),
   createdAt: text('created_at').notNull(),
 });
 
@@ -843,6 +526,7 @@ const environmentReferencesTable = sqliteTable('environment_references', {
   id: text('id').primaryKey(),
   title: text('title').notNull(),
   description: text('description'),
+  parentFolderId: text('parent_folder_id'),
   createdAt: text('created_at').notNull(),
 });
 
@@ -941,7 +625,7 @@ const directorChatsTable = sqliteTable('director_chats', {
     .references(() => threadsTable.id),
   title: text('title').notNull(),
   providerThreadId: text('provider_thread_id'),
-  providerRuntime: text('provider_runtime').notNull().default('codex-app-server'),
+  providerRuntime: text('provider_runtime').notNull().default('api-backend'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -952,7 +636,7 @@ const directorMessagesTable = sqliteTable('director_messages', {
     .notNull()
     .references(() => directorChatsTable.id),
   role: text('role').notNull(),
-  contentMarkdown: text('content_markdown').notNull(),
+  partsJson: text('parts_json').notNull(),
   status: text('status').notNull(),
   modelId: text('model_id'),
   modelLabel: text('model_label'),
@@ -1004,7 +688,13 @@ const CREATE_GENERATION_JOBS_TABLE_SQL = `
     duration_ms INTEGER,
     provider_thread_id TEXT,
     provider_turn_id TEXT,
-    runtime TEXT NOT NULL DEFAULT 'codex-app-server',
+    request_started_at TEXT,
+    first_event_at TEXT,
+    image_tool_call_started_at TEXT,
+    image_tool_generating_at TEXT,
+    first_partial_image_at TEXT,
+    completed_at TEXT,
+    runtime TEXT NOT NULL DEFAULT 'api-backend',
     imported_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -1059,6 +749,7 @@ const CREATE_CHARACTER_REFERENCE_COLLECTIONS_TABLE_SQL = `
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     description TEXT,
+    parent_folder_id TEXT,
     created_at TEXT NOT NULL
   )
 `;
@@ -1082,6 +773,7 @@ const CREATE_OBJECT_REFERENCE_COLLECTIONS_TABLE_SQL = `
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     description TEXT,
+    parent_folder_id TEXT,
     created_at TEXT NOT NULL
   )
 `;
@@ -1105,6 +797,7 @@ const CREATE_ENVIRONMENT_REFERENCES_TABLE_SQL = `
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     description TEXT,
+    parent_folder_id TEXT,
     created_at TEXT NOT NULL
   )
 `;
@@ -1207,7 +900,7 @@ const CREATE_DIRECTOR_CHATS_TABLE_SQL = `
     thread_id TEXT NOT NULL,
     title TEXT NOT NULL,
     provider_thread_id TEXT,
-    provider_runtime TEXT NOT NULL DEFAULT 'codex-app-server',
+    provider_runtime TEXT NOT NULL DEFAULT 'api-backend',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (thread_id) REFERENCES threads(id)
@@ -1219,7 +912,7 @@ const CREATE_DIRECTOR_MESSAGES_TABLE_SQL = `
     id TEXT PRIMARY KEY,
     chat_id TEXT NOT NULL,
     role TEXT NOT NULL,
-    content_markdown TEXT NOT NULL,
+    parts_json TEXT NOT NULL,
     status TEXT NOT NULL,
     model_id TEXT,
     model_label TEXT,
@@ -1239,36 +932,8 @@ function getAppDataPaths(userDataDir) {
     userDataDir,
     databasePath: path.join(userDataDir, 'crenv.sqlite'),
     generatedImagesDir: path.join(userDataDir, 'generated-images'),
-    codexJobsTempDir: path.join(userDataDir, 'tmp', 'codex-jobs'),
+    generationJobsTempDir: path.join(userDataDir, 'tmp', 'generation-jobs'),
   };
-}
-
-function resolveCodexHomeDirectory({ env = process.env, homeDirectory = os.homedir() } = {}) {
-  const codexHome = typeof env.CODEX_HOME === 'string' ? env.CODEX_HOME.trim() : '';
-  return codexHome || path.join(homeDirectory, '.codex');
-}
-
-function resolveBundledCodexSkillsDirectory({
-  resourcesPath = process.resourcesPath,
-  appRoot = path.join(__dirname, '..'),
-} = {}) {
-  if (resourcesPath) {
-    const packagedSkillsDir = path.join(resourcesPath, 'codex-skills');
-    if (fs.existsSync(packagedSkillsDir)) {
-      return packagedSkillsDir;
-    }
-  }
-
-  return path.join(appRoot, 'resources', 'codex', 'skills');
-}
-
-async function pathExists(filePath) {
-  try {
-    await fsp.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function sanitizeArchiveSegment(value, fallback = 'asset') {
@@ -1523,6 +1188,14 @@ function extensionForImportedAsset(fileName, mimeType) {
   return '.png';
 }
 
+function mimeTypeForImportedAsset(sourcePath) {
+  const extension = path.extname(sourcePath).toLowerCase();
+  if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg';
+  if (extension === '.webp') return 'image/webp';
+  if (extension === '.gif') return 'image/gif';
+  return 'image/png';
+}
+
 async function writeImportedAssetBuffer({ buffer, assetId, fileName, mimeType, generatedImagesDir }) {
   await fsp.mkdir(generatedImagesDir, { recursive: true });
   const storedFileName = `${assetId}${extensionForImportedAsset(fileName, mimeType)}`;
@@ -1534,127 +1207,128 @@ async function writeImportedAssetBuffer({ buffer, assetId, fileName, mimeType, g
   };
 }
 
-async function copyDirectoryWithoutOverwrite(sourceDirectory, targetDirectory) {
-  const entries = await fsp.readdir(sourceDirectory, { withFileTypes: true });
-  await fsp.mkdir(targetDirectory, { recursive: true });
-
-  for (const entry of entries) {
-    const sourcePath = path.join(sourceDirectory, entry.name);
-    const targetPath = path.join(targetDirectory, entry.name);
-
-    if (entry.isDirectory()) {
-      await copyDirectoryWithoutOverwrite(sourcePath, targetPath);
-      continue;
-    }
-
-    if (!entry.isFile()) {
-      continue;
-    }
-
-    await fsp.copyFile(sourcePath, targetPath, fs.constants.COPYFILE_EXCL).catch((error) => {
-      if (error.code !== 'EEXIST') {
-        throw error;
-      }
-    });
-  }
-}
-
-async function seedBundledCodexSkills({
-  bundledSkillsDir = resolveBundledCodexSkillsDirectory(),
-  codexHomeDir = resolveCodexHomeDirectory(),
-} = {}) {
-  if (!(await pathExists(bundledSkillsDir))) {
-    return { seeded: false, reason: 'missing-bundled-skills', bundledSkillsDir, codexHomeDir };
-  }
-
-  const targetSkillsDir = path.join(codexHomeDir, 'skills');
-  await copyDirectoryWithoutOverwrite(bundledSkillsDir, targetSkillsDir);
-  return { seeded: true, bundledSkillsDir, codexHomeDir, targetSkillsDir };
-}
-
-async function resetCodexJobsDirectory(codexJobsTempDir) {
-  await fsp.rm(codexJobsTempDir, { recursive: true, force: true });
-  await fsp.mkdir(codexJobsTempDir, { recursive: true });
-}
-
-function resolveGenerationSelection(provider, modelId) {
-  if (ANTIGRAVITY_MODEL_BY_ID[modelId]) {
-    return {
-      provider: 'antigravity',
-      modelId,
-      modelLabel: MODEL_LABEL_BY_ID[modelId],
-      codexModel: null,
-      antigravityModel: ANTIGRAVITY_MODEL_BY_ID[modelId],
-    };
-  }
-
-  if (CODEX_MODEL_BY_ID[modelId]) {
-    return {
-      provider: DEFAULT_GENERATION_PROVIDER,
-      modelId,
-      modelLabel: MODEL_LABEL_BY_ID[modelId],
-      codexModel: CODEX_MODEL_BY_ID[modelId],
-      antigravityModel: null,
-    };
-  }
-
-  if (provider === 'antigravity') {
-    const resolvedModelId = ANTIGRAVITY_MODEL_BY_ID[modelId] ? modelId : DEFAULT_ANTIGRAVITY_MODEL_ID;
-    return {
-      provider: 'antigravity',
-      modelId: resolvedModelId,
-      modelLabel: MODEL_LABEL_BY_ID[resolvedModelId],
-      codexModel: null,
-      antigravityModel: ANTIGRAVITY_MODEL_BY_ID[resolvedModelId],
-    };
-  }
-
-  const resolvedModelId = CODEX_MODEL_BY_ID[modelId] ? modelId : DEFAULT_CODEX_MODEL_ID;
+async function importGeneratedAssetFile({ sourcePath, generatedImagesDir }) {
+  const buffer = await fsp.readFile(sourcePath);
+  const assetId = nanoid();
+  const mimeType = mimeTypeForImportedAsset(sourcePath);
+  const imported = await writeImportedAssetBuffer({
+    buffer,
+    assetId,
+    fileName: path.basename(sourcePath),
+    mimeType,
+    generatedImagesDir,
+  });
   return {
-    provider: DEFAULT_GENERATION_PROVIDER,
-    modelId: resolvedModelId,
-    modelLabel: MODEL_LABEL_BY_ID[resolvedModelId],
-    codexModel: CODEX_MODEL_BY_ID[resolvedModelId],
-    antigravityModel: null,
+    id: assetId,
+    fileName: imported.fileName,
+    storedPath: imported.storedPath,
+    mimeType,
   };
 }
 
-function resolveJobWorkingDirectory({ provider, jobId, codexJobsTempDir }) {
-  if (provider === 'antigravity') {
-    return path.join('/tmp', 'crenv-antigravity-jobs', jobId);
+function mergeIsoTimestamp(currentValue, nextValue, prefer = 'earliest') {
+  if (!nextValue) {
+    return currentValue ?? null;
   }
 
-  return path.join(codexJobsTempDir, jobId);
+  if (!currentValue) {
+    return nextValue;
+  }
+
+  const currentTime = Date.parse(currentValue);
+  const nextTime = Date.parse(nextValue);
+  if (!Number.isFinite(currentTime) || !Number.isFinite(nextTime)) {
+    return prefer === 'latest' ? nextValue : currentValue;
+  }
+
+  if (prefer === 'latest') {
+    return nextTime > currentTime ? nextValue : currentValue;
+  }
+
+  return nextTime < currentTime ? nextValue : currentValue;
+}
+
+function toGenerationBenchmarkPatch(currentJob, benchmark = {}) {
+  return {
+    requestStartedAt: mergeIsoTimestamp(currentJob.requestStartedAt, benchmark.requestStartedAt),
+    firstEventAt: mergeIsoTimestamp(currentJob.firstEventAt, benchmark.firstEventAt),
+    imageToolCallStartedAt: mergeIsoTimestamp(currentJob.imageToolCallStartedAt, benchmark.imageToolCallStartedAt),
+    imageToolGeneratingAt: mergeIsoTimestamp(currentJob.imageToolGeneratingAt, benchmark.imageToolGeneratingAt),
+    firstPartialImageAt: mergeIsoTimestamp(currentJob.firstPartialImageAt, benchmark.firstPartialImageAt),
+    completedAt: mergeIsoTimestamp(currentJob.completedAt, benchmark.completedAt, 'latest'),
+  };
+}
+
+function truncateGenerationLogText(value, maxLength = 140) {
+  const text = String(value ?? '').trim().replace(/\s+/g, ' ');
+  if (!text) {
+    return '';
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+function summarizeGenerationReferenceForLog(reference, index) {
+  return {
+    index: index + 1,
+    name: reference?.name ?? `reference-${index + 1}`,
+    mimeType: reference?.mimeType ?? 'image/png',
+    title: reference?.title ? truncateGenerationLogText(reference.title, 80) : null,
+    description: reference?.description ? truncateGenerationLogText(reference.description, 120) : null,
+    hasInlineBytes: typeof reference?.bytesBase64 === 'string' && reference.bytesBase64.length > 0,
+  };
+}
+
+function sanitizeReferenceImageFileName(name, mimeType, index) {
+  const rawBaseName = path.basename(name, path.extname(name));
+  const baseName =
+    rawBaseName
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || `reference-${index + 1}`;
+  const extension = path.extname(name).toLowerCase() || extensionForImportedAsset(name, mimeType);
+  return `${baseName}${extension}`;
+}
+
+async function stageReferenceImages({ workingDirectory, referenceImages }) {
+  if (!Array.isArray(referenceImages) || referenceImages.length === 0) {
+    return [];
+  }
+
+  const referencesDirectory = path.join(workingDirectory, 'references');
+  await fsp.mkdir(referencesDirectory, { recursive: true });
+
+  const stagedReferences = [];
+  for (const [index, referenceImage] of referenceImages.entries()) {
+    const fileName = sanitizeReferenceImageFileName(referenceImage.name, referenceImage.mimeType, index);
+    const stagedPath = path.join(referencesDirectory, fileName);
+    await fsp.writeFile(stagedPath, Buffer.from(referenceImage.bytesBase64, 'base64'));
+    stagedReferences.push({
+      path: stagedPath,
+      title: referenceImage.title,
+      description: referenceImage.description,
+    });
+  }
+
+  return stagedReferences;
+}
+
+async function resetGenerationJobsDirectory(generationJobsTempDir) {
+  await fsp.rm(generationJobsTempDir, { recursive: true, force: true });
+  await fsp.mkdir(generationJobsTempDir, { recursive: true });
 }
 
 async function createGenerationStore(userDataDir, options = {}) {
   const paths = getAppDataPaths(userDataDir);
   const activeSceneGroupCancellations = new Map();
   const activeDirectorChatCancellations = new Map();
-  const codexAppServerClient = options.codexAppServerClient ?? createCodexAppServerClient();
+  const createDirectorPartStream = options.createDirectorPartStream ?? createAiSdkDirectorPartStream;
+  const executeImageGenerationBatch = options.runImageGenerationBatch ?? runImageGenerationBatch;
   fs.mkdirSync(path.dirname(paths.databasePath), { recursive: true });
-  await resetCodexJobsDirectory(paths.codexJobsTempDir);
-  const codexSkillsSeed =
-    options.seedCodexSkills === false
-      ? null
-      : await seedBundledCodexSkills({
-          bundledSkillsDir: options.bundledCodexSkillsDir,
-          codexHomeDir: options.codexHomeDir,
-        }).catch((error) => {
-          console.warn(`[crenv:codex] failed to seed bundled skills: ${error.message}`);
-          return null;
-        });
-
-  console.info('[crenv:codex] initialized store');
-  console.info('[crenv:codex] userDataDir:', paths.userDataDir);
-  console.info('[crenv:codex] databasePath:', paths.databasePath);
-  console.info('[crenv:codex] generatedImagesDir:', paths.generatedImagesDir);
-  console.info('[crenv:codex] cleared codexJobsTempDir:', paths.codexJobsTempDir);
-  if (codexSkillsSeed?.seeded) {
-    console.info('[crenv:codex] seeded bundled skills:', codexSkillsSeed.targetSkillsDir);
-  } else if (codexSkillsSeed) {
-    console.info('[crenv:codex] bundled skills unavailable:', codexSkillsSeed.bundledSkillsDir);
-  }
+  console.info('[crenv:generation] initialized store');
+  console.info('[crenv:generation] userDataDir:', paths.userDataDir);
+  console.info('[crenv:generation] databasePath:', paths.databasePath);
+  console.info('[crenv:generation] generatedImagesDir:', paths.generatedImagesDir);
 
   const client = createClient({
     url: pathToFileURL(paths.databasePath).toString(),
@@ -1679,25 +1353,20 @@ async function createGenerationStore(userDataDir, options = {}) {
   await db.run(sql.raw(CREATE_SCENE_GROUP_RUNS_TABLE_SQL));
   await db.run(sql.raw(CREATE_SCENE_FRAME_ASSETS_TABLE_SQL));
   await db.run(sql.raw(CREATE_DIRECTOR_CHATS_TABLE_SQL));
-  await db.run(sql.raw(CREATE_DIRECTOR_MESSAGES_TABLE_SQL));
+  await ensureStructuredDirectorMessagesTable(db);
   await migrateLegacyReferencesTable(db);
   await ensureEnvironmentAttachmentDescriptionColumn(db);
   await ensureReferenceAttachmentTitleColumns(db);
   await ensureEnvironmentAttachmentSectionColumn(db);
+  await ensureReferenceFolderParentColumns(db);
   await ensureProjectSettingsColumns(db);
   await ensureGenerationJobsThreadColumn(db);
   await ensureGenerationJobMetadataColumns(db);
   await ensureGenerationRuntimeColumns(db);
+  await ensureGenerationBenchmarkColumns(db);
   await ensureGeneratedAssetProviderColumns(db);
   await ensureDirectorRuntimeColumns(db);
-
-  if (options.warmCodexAppServer !== false) {
-    setImmediate(() => {
-      void codexAppServerClient.start().catch((error) => {
-        console.warn(`[crenv:codex-app-server] warmup failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
-    });
-  }
+  await failInterruptedGenerationJobs(db);
 
   async function ensureProjectThreadWorkspace() {
     const projects = await listProjectsWithThreads();
@@ -2282,7 +1951,7 @@ async function createGenerationStore(userDataDir, options = {}) {
         id: importedMessageId,
         chatId: importedChatId,
         role: message.role ?? 'assistant',
-        contentMarkdown: message.contentMarkdown ?? '',
+        partsJson: message.partsJson ?? serializeDirectorParts(message.parts),
         status: message.status ?? 'completed',
         modelId: message.modelId ?? null,
         modelLabel: message.modelLabel ?? null,
@@ -2354,7 +2023,7 @@ async function createGenerationStore(userDataDir, options = {}) {
         sceneGroupId: importedSceneGroupId,
         threadId: importedThreadId,
         status: run.status ?? 'succeeded',
-        provider: run.provider ?? 'codex',
+        provider: run.provider ?? 'api',
         modelId: run.modelId ?? 'unknown',
         modelLabel: run.modelLabel ?? 'Imported',
         requestedFrameCount: Number.isInteger(run.requestedFrameCount) ? run.requestedFrameCount : 0,
@@ -2562,6 +2231,7 @@ function mapReferenceCollectionAttachment({
   collectionId,
   collectionTitle,
   collectionDescription,
+  parentFolderId,
   timestamp,
 }) {
   return {
@@ -2576,8 +2246,81 @@ function mapReferenceCollectionAttachment({
     bytesBase64: attachment.bytesBase64,
     createdAt: timestamp,
     category,
-      environmentId: category === 'environment' ? collectionId : null,
-    };
+    environmentId: category === 'environment' ? collectionId : null,
+    parentFolderId: parentFolderId ?? null,
+  };
+}
+
+async function listReferenceFolders() {
+  const [characterFolders, objectFolders, environmentFolders] = await Promise.all([
+    db
+      .select({
+        id: characterReferenceCollectionsTable.id,
+        title: characterReferenceCollectionsTable.title,
+        description: characterReferenceCollectionsTable.description,
+        parentFolderId: characterReferenceCollectionsTable.parentFolderId,
+        createdAt: characterReferenceCollectionsTable.createdAt,
+      })
+      .from(characterReferenceCollectionsTable)
+      .orderBy(desc(characterReferenceCollectionsTable.createdAt), desc(characterReferenceCollectionsTable.id)),
+    db
+      .select({
+        id: objectReferenceCollectionsTable.id,
+        title: objectReferenceCollectionsTable.title,
+        description: objectReferenceCollectionsTable.description,
+        parentFolderId: objectReferenceCollectionsTable.parentFolderId,
+        createdAt: objectReferenceCollectionsTable.createdAt,
+      })
+      .from(objectReferenceCollectionsTable)
+      .orderBy(desc(objectReferenceCollectionsTable.createdAt), desc(objectReferenceCollectionsTable.id)),
+    db
+      .select({
+        id: environmentReferencesTable.id,
+        title: environmentReferencesTable.title,
+        description: environmentReferencesTable.description,
+        parentFolderId: environmentReferencesTable.parentFolderId,
+        createdAt: environmentReferencesTable.createdAt,
+      })
+      .from(environmentReferencesTable)
+      .orderBy(desc(environmentReferencesTable.createdAt), desc(environmentReferencesTable.id)),
+  ]);
+
+  return [
+    ...characterFolders.map((folder) => ({ ...folder, category: 'characters' })),
+    ...objectFolders.map((folder) => ({ ...folder, category: 'objects' })),
+    ...environmentFolders.map((folder) => ({ ...folder, category: 'environment' })),
+  ];
+}
+
+  async function createReferenceFolder(payload) {
+    const category = normalizeReferenceCollectionCategory(payload.category);
+    const title = (payload.title ?? '').trim() || 'Nova pasta';
+    const parentFolderId = payload?.parentFolderId ?? null;
+    const timestamp = new Date().toISOString();
+
+    if (category === 'environment') {
+      const environmentId = nanoid();
+      await db.insert(environmentReferencesTable).values({
+        id: environmentId,
+        title,
+        description: null,
+        parentFolderId,
+        createdAt: timestamp,
+      });
+      return { id: environmentId, category: 'environment', title, parentFolderId, createdAt: timestamp };
+    }
+
+    const collectionTable =
+      category === 'objects' ? objectReferenceCollectionsTable : characterReferenceCollectionsTable;
+    const collectionId = nanoid();
+    await db.insert(collectionTable).values({
+      id: collectionId,
+      title,
+      description: null,
+      parentFolderId,
+      createdAt: timestamp,
+    });
+    return { id: collectionId, category, title, parentFolderId, createdAt: timestamp };
   }
 
   async function createReferenceCollection(payload) {
@@ -2603,6 +2346,7 @@ function mapReferenceCollectionAttachment({
       id: collectionId,
       title,
       description,
+      parentFolderId: null,
       createdAt: timestamp,
     });
 
@@ -2626,6 +2370,7 @@ function mapReferenceCollectionAttachment({
         collectionId,
         collectionTitle: title,
         collectionDescription: description,
+        parentFolderId: null,
         timestamp: attachment.createdAt,
       })
     );
@@ -2641,6 +2386,7 @@ function mapReferenceCollectionAttachment({
       id: environmentId,
       title: payload.title.trim(),
       description: payload.description?.trim() || null,
+      parentFolderId: null,
       createdAt: timestamp,
     });
 
@@ -2672,6 +2418,7 @@ function mapReferenceCollectionAttachment({
       bytesBase64: attachment.bytesBase64,
       createdAt: attachment.createdAt,
       category: 'environment',
+      parentFolderId: null,
       section: attachment.section,
     }));
   }
@@ -2735,6 +2482,7 @@ function mapReferenceCollectionAttachment({
       category: payload.category,
       collectionId: null,
       environmentId: null,
+      parentFolderId: null,
     };
   }
 
@@ -2750,6 +2498,14 @@ function mapReferenceCollectionAttachment({
         description,
       })
       .where(eq(environmentReferencesTable.id, environmentId));
+
+    const [environment] = await db
+      .select({
+        parentFolderId: environmentReferencesTable.parentFolderId,
+      })
+      .from(environmentReferencesTable)
+      .where(eq(environmentReferencesTable.id, environmentId))
+      .limit(1);
 
     await db
       .delete(environmentReferenceAttachmentsTable)
@@ -2785,6 +2541,7 @@ function mapReferenceCollectionAttachment({
       bytesBase64: attachment.bytesBase64,
       createdAt: attachment.createdAt,
       category: 'environment',
+      parentFolderId: environment?.parentFolderId ?? null,
       section: attachment.section,
     }));
   }
@@ -2816,6 +2573,14 @@ function mapReferenceCollectionAttachment({
       })
       .where(eq(collectionTable.id, collectionId));
 
+    const [collection] = await db
+      .select({
+        parentFolderId: collectionTable.parentFolderId,
+      })
+      .from(collectionTable)
+      .where(eq(collectionTable.id, collectionId))
+      .limit(1);
+
     await db.delete(attachmentTable).where(eq(attachmentTable.collectionId, collectionId));
 
     const timestamp = new Date().toISOString();
@@ -2841,6 +2606,7 @@ function mapReferenceCollectionAttachment({
         collectionId,
         collectionTitle: title,
         collectionDescription: description,
+        parentFolderId: collection?.parentFolderId ?? null,
         timestamp: attachment.createdAt,
       })
     );
@@ -2889,6 +2655,7 @@ function mapReferenceCollectionAttachment({
         .select({
           id: characterReferenceAttachmentsTable.id,
           collectionId: characterReferenceAttachmentsTable.collectionId,
+          parentFolderId: characterReferenceCollectionsTable.parentFolderId,
           name: characterReferenceAttachmentsTable.name,
           title: characterReferenceAttachmentsTable.title,
           groupTitle: characterReferenceCollectionsTable.title,
@@ -2908,6 +2675,7 @@ function mapReferenceCollectionAttachment({
         .select({
           id: objectReferenceAttachmentsTable.id,
           collectionId: objectReferenceAttachmentsTable.collectionId,
+          parentFolderId: objectReferenceCollectionsTable.parentFolderId,
           name: objectReferenceAttachmentsTable.name,
           title: objectReferenceAttachmentsTable.title,
           groupTitle: objectReferenceCollectionsTable.title,
@@ -2927,6 +2695,7 @@ function mapReferenceCollectionAttachment({
         .select({
           id: environmentReferenceAttachmentsTable.id,
           environmentId: environmentReferenceAttachmentsTable.environmentId,
+          parentFolderId: environmentReferencesTable.parentFolderId,
           name: environmentReferenceAttachmentsTable.name,
           title: environmentReferenceAttachmentsTable.title,
           groupTitle: environmentReferencesTable.title,
@@ -2951,12 +2720,14 @@ function mapReferenceCollectionAttachment({
         category: 'characters',
         collectionId: null,
         environmentId: null,
+        parentFolderId: null,
       })),
       ...objects.map((reference) => ({
         ...reference,
         category: 'objects',
         collectionId: null,
         environmentId: null,
+        parentFolderId: null,
       })),
       ...groupedCharacters.map((reference) => ({
         ...reference,
@@ -2967,6 +2738,7 @@ function mapReferenceCollectionAttachment({
         title: reference.title ?? reference.name,
         groupTitle: reference.groupTitle ?? null,
         groupDescription: reference.collectionDescription ?? null,
+        parentFolderId: reference.parentFolderId ?? null,
       })),
       ...groupedObjects.map((reference) => ({
         ...reference,
@@ -2977,6 +2749,7 @@ function mapReferenceCollectionAttachment({
         title: reference.title ?? reference.name,
         groupTitle: reference.groupTitle ?? null,
         groupDescription: reference.collectionDescription ?? null,
+        parentFolderId: reference.parentFolderId ?? null,
       })),
       ...environments.map((reference) => ({
         ...reference,
@@ -2986,6 +2759,7 @@ function mapReferenceCollectionAttachment({
         title: reference.title ?? reference.name,
         groupTitle: reference.groupTitle ?? null,
         groupDescription: reference.environmentDescription ?? null,
+        parentFolderId: reference.parentFolderId ?? null,
         section: normalizeReferenceAttachmentSection(reference.section),
       })),
     ];
@@ -3048,21 +2822,39 @@ function mapReferenceCollectionAttachment({
     await db.delete(directorChatsTable).where(eq(directorChatsTable.id, chatId));
   }
 
+  async function cancelDirectorChat(chatId) {
+    const activeRun = activeDirectorChatCancellations.get(chatId);
+    if (!activeRun) {
+      return false;
+    }
+
+    const canceled = activeRun.cancel('user_requested_chat_stop') === true;
+    activeDirectorChatCancellations.delete(chatId);
+    return canceled;
+  }
+
   async function listDirectorMessages(chatId) {
     if (typeof chatId !== 'string' || !chatId.trim()) {
       return [];
     }
 
-    const messages = await db
+    const messages = await loadDirectorMessageRows(chatId.trim());
+
+    return sortDirectorMessageRecords(messages).map((message) => toRendererDirectorMessage(message));
+  }
+
+  async function loadDirectorMessageRows(chatId) {
+    return db
       .select({
         id: directorMessagesTable.id,
         chatId: directorMessagesTable.chatId,
         role: directorMessagesTable.role,
-        contentMarkdown: directorMessagesTable.contentMarkdown,
+        partsJson: directorMessagesTable.partsJson,
         status: directorMessagesTable.status,
         modelId: directorMessagesTable.modelId,
         modelLabel: directorMessagesTable.modelLabel,
         fastMode: directorMessagesTable.fastMode,
+        referenceImagesJson: directorMessagesTable.referenceImagesJson,
         messageOrder: directorMessagesTable.messageOrder,
         providerTurnId: directorMessagesTable.providerTurnId,
         providerItemId: directorMessagesTable.providerItemId,
@@ -3070,1049 +2862,849 @@ function mapReferenceCollectionAttachment({
         updatedAt: directorMessagesTable.updatedAt,
       })
       .from(directorMessagesTable)
-      .where(eq(directorMessagesTable.chatId, chatId.trim()))
+      .where(eq(directorMessagesTable.chatId, chatId))
       .orderBy(directorMessagesTable.messageOrder, directorMessagesTable.createdAt, directorMessagesTable.id);
-
-    return sortDirectorMessageRecords(messages).map((message) => toRendererDirectorMessage(message));
   }
 
-  async function appendDirectorStatusToMessage({ assistantMessageId, chatId, threadId, status }) {
-    const [currentMessage] = await db
-      .select()
-      .from(directorMessagesTable)
-      .where(eq(directorMessagesTable.id, assistantMessageId))
-      .limit(1);
-    if (!currentMessage) {
-      return '';
+  async function runDirectorMessage({
+    chatId,
+    threadId,
+    prompt,
+    modelId,
+    fastMode = false,
+    referenceImages = [],
+    previousMessagesOverride,
+    regenerateSourceUserMessage = null,
+    regenerateAssistantMessage = null,
+  }) {
+    if (!chatId) {
+      throw new Error('Director chat id is required.');
+    }
+    if (!threadId) {
+      throw new Error('Director thread id is required.');
+    }
+    if (!prompt) {
+      throw new Error('Director prompt cannot be empty.');
     }
 
+    const [chat] = await db.select().from(directorChatsTable).where(eq(directorChatsTable.id, chatId)).limit(1);
+    if (!chat || chat.threadId !== threadId) {
+      throw new Error('Director chat not found.');
+    }
+
+    const referenceImagesJson = JSON.stringify(toGenerationReferenceSnapshot(referenceImages));
+    const rendererReferenceMetadata = toGenerationReferenceMetadata(referenceImages);
+    const previousMessages = previousMessagesOverride ?? (await listDirectorMessages(chatId));
+    const selectedModel = resolveDirectorModel(modelId);
+    const nextFastMode = fastMode === true ? 1 : 0;
+    const timestamp = new Date().toISOString();
+    const nextMessageOrder = await getNextDirectorMessageOrder(chatId);
+    const isRegeneration = regenerateSourceUserMessage && regenerateAssistantMessage;
+    const userMessage = isRegeneration
+      ? regenerateSourceUserMessage
+      : {
+          id: nanoid(),
+          chatId,
+          role: 'user',
+          partsJson: serializeDirectorParts([{ type: 'text', text: prompt }]),
+          status: 'completed',
+          modelId: null,
+          modelLabel: null,
+          fastMode: nextFastMode,
+          referenceImagesJson,
+          messageOrder: nextMessageOrder,
+          providerTurnId: null,
+          providerItemId: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+    const assistantMessage = isRegeneration
+      ? {
+          ...regenerateAssistantMessage,
+          partsJson: '[]',
+          status: 'streaming',
+          modelId: selectedModel.id,
+          modelLabel: selectedModel.label,
+          fastMode: nextFastMode,
+          referenceImagesJson,
+          providerTurnId: null,
+          providerItemId: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }
+      : {
+          id: nanoid(),
+          chatId,
+          role: 'assistant',
+          partsJson: '[]',
+          status: 'streaming',
+          modelId: selectedModel.id,
+          modelLabel: selectedModel.label,
+          fastMode: nextFastMode,
+          referenceImagesJson,
+          messageOrder: nextMessageOrder + 1,
+          providerTurnId: null,
+          providerItemId: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+
+    if (isRegeneration) {
+      await db
+        .update(directorMessagesTable)
+        .set({
+          partsJson: assistantMessage.partsJson,
+          status: assistantMessage.status,
+          modelId: assistantMessage.modelId,
+          modelLabel: assistantMessage.modelLabel,
+          fastMode: assistantMessage.fastMode,
+          referenceImagesJson: assistantMessage.referenceImagesJson,
+          providerTurnId: assistantMessage.providerTurnId,
+          providerItemId: assistantMessage.providerItemId,
+          createdAt: assistantMessage.createdAt,
+          updatedAt: assistantMessage.updatedAt,
+        })
+        .where(eq(directorMessagesTable.id, assistantMessage.id));
+    } else {
+      await db.insert(directorMessagesTable).values([userMessage, assistantMessage]);
+    }
+    await db
+      .update(directorChatsTable)
+      .set({
+        title: chat.title === 'New chat' ? truncateDirectorChatTitle(prompt) : chat.title,
+        updatedAt: timestamp,
+      })
+      .where(eq(directorChatsTable.id, chatId));
+
+    const rendererUserMessage = toRendererDirectorMessage(userMessage, rendererReferenceMetadata);
+    const rendererAssistantMessage = toRendererDirectorMessage(assistantMessage, rendererReferenceMetadata);
+    options.onDirectorMessageStart?.({
+      threadId,
+      chatId,
+      userMessage: rendererUserMessage,
+      assistantMessage: rendererAssistantMessage,
+    });
+
+    const abortController = new AbortController();
+    const cancelableRun = {
+      cancel(reason) {
+        if (!abortController.signal.aborted) {
+          abortController.abort(reason);
+        }
+        return true;
+      },
+    };
+    activeDirectorChatCancellations.set(chatId, cancelableRun);
+
+    let parts = [];
+    let completedAssistantMessage = assistantMessage;
+    try {
+      const messages = buildDirectorMessages({
+        previousMessages,
+        prompt,
+        referenceImages: parseGenerationReferenceSnapshot(referenceImagesJson),
+      });
+
+      for await (const nextParts of createDirectorPartStream({
+        modelId: selectedModel.runtimeModel,
+        messages,
+        abortController,
+      })) {
+        if (abortController.signal.aborted) {
+          break;
+        }
+        parts = nextParts;
+        const updatedAt = new Date().toISOString();
+        await db
+          .update(directorMessagesTable)
+          .set({
+            partsJson: serializeDirectorParts(parts),
+            status: 'streaming',
+            updatedAt,
+          })
+          .where(eq(directorMessagesTable.id, assistantMessage.id));
+        options.onDirectorMessageDelta?.({
+          threadId,
+          chatId,
+          messageId: assistantMessage.id,
+          parts,
+        });
+      }
+
+      if (abortController.signal.aborted) {
+        throw new Error('Director chat canceled.');
+      }
+
+      const completedAt = new Date().toISOString();
+      completedAssistantMessage = {
+        ...assistantMessage,
+        partsJson: serializeDirectorParts(parts),
+        status: 'completed',
+        updatedAt: completedAt,
+      };
+      await db
+        .update(directorMessagesTable)
+        .set({
+          partsJson: serializeDirectorParts(parts),
+          status: 'completed',
+          updatedAt: completedAt,
+        })
+        .where(eq(directorMessagesTable.id, assistantMessage.id));
+      options.onDirectorMessageComplete?.({
+        threadId,
+        chatId,
+        messageId: assistantMessage.id,
+        parts,
+      });
+    } catch (error) {
+      const canceled = abortController.signal.aborted;
+      const errorMessage = canceled ? 'Director chat canceled.' : normalizeDirectorErrorMessage(error);
+      const failedAt = new Date().toISOString();
+      completedAssistantMessage = {
+        ...assistantMessage,
+        partsJson: serializeDirectorParts(
+          parts.length > 0 ? parts : [{ type: 'text', text: errorMessage }]
+        ),
+        status: 'failed',
+        updatedAt: failedAt,
+      };
+      await db
+        .update(directorMessagesTable)
+        .set({
+          partsJson: completedAssistantMessage.partsJson,
+          status: 'failed',
+          updatedAt: failedAt,
+        })
+        .where(eq(directorMessagesTable.id, assistantMessage.id));
+      options.onDirectorMessageError?.({
+        threadId,
+        chatId,
+        messageId: assistantMessage.id,
+        errorMessage,
+        parts: parseDirectorParts(completedAssistantMessage.partsJson),
+        canceled,
+      });
+      if (!canceled) {
+        throw new Error(errorMessage);
+      }
+    } finally {
+      if (activeDirectorChatCancellations.get(chatId) === cancelableRun) {
+        activeDirectorChatCancellations.delete(chatId);
+      }
+    }
+
+    const chats = await listDirectorChats(threadId);
+    return {
+      chat: chats.find((item) => item.id === chatId) ?? null,
+      userMessage: rendererUserMessage,
+      assistantMessage: toRendererDirectorMessage(completedAssistantMessage, rendererReferenceMetadata),
+    };
+  }
+
+  async function sendDirectorMessage(input) {
+    const chatId = typeof input?.chatId === 'string' ? input.chatId.trim() : '';
+    const threadId = typeof input?.threadId === 'string' ? input.threadId.trim() : '';
+    const prompt = typeof input?.prompt === 'string' ? input.prompt.trim() : '';
+
+    return runDirectorMessage({
+      chatId,
+      threadId,
+      prompt,
+      modelId: input?.modelId,
+      fastMode: input?.fastMode === true,
+      referenceImages: Array.isArray(input?.referenceImages) ? input.referenceImages : [],
+    });
+  }
+
+  async function regenerateDirectorMessage(input) {
+    const chatId = typeof input?.chatId === 'string' ? input.chatId.trim() : '';
+    const threadId = typeof input?.threadId === 'string' ? input.threadId.trim() : '';
+    const assistantMessageId = typeof input?.assistantMessageId === 'string' ? input.assistantMessageId.trim() : '';
+
+    if (!chatId) {
+      throw new Error('Director chat id is required.');
+    }
+    if (!threadId) {
+      throw new Error('Director thread id is required.');
+    }
+    if (!assistantMessageId) {
+      throw new Error('Director assistant message id is required.');
+    }
+
+    const messages = sortDirectorMessageRecords(await loadDirectorMessageRows(chatId));
+    const assistantIndex = messages.findIndex(
+      (message) => message.id === assistantMessageId && message.role === 'assistant'
+    );
+    if (assistantIndex === -1) {
+      throw new Error('Director assistant message not found.');
+    }
+
+    let userIndex = assistantIndex - 1;
+    while (userIndex >= 0 && messages[userIndex]?.role !== 'user') {
+      userIndex -= 1;
+    }
+    if (userIndex < 0) {
+      throw new Error('Director source prompt not found.');
+    }
+
+    const sourceUserMessage = messages[userIndex];
+    const sourceAssistantMessage = messages[assistantIndex];
+
+    return runDirectorMessage({
+      chatId,
+      threadId,
+      prompt: normalizeDirectorPromptContent(getDirectorMessageText(sourceUserMessage)),
+      modelId: sourceAssistantMessage.modelId ?? undefined,
+      fastMode: Boolean(sourceAssistantMessage.fastMode),
+      referenceImages: parseGenerationReferenceSnapshot(sourceUserMessage.referenceImagesJson),
+      previousMessagesOverride: messages.slice(0, userIndex),
+      regenerateSourceUserMessage: sourceUserMessage,
+      regenerateAssistantMessage: sourceAssistantMessage,
+    });
+  }
+
+  async function resolveDirectorActionContext(messageId, actionIndex) {
+    const [message] = await db
+      .select()
+      .from(directorMessagesTable)
+      .where(eq(directorMessagesTable.id, messageId))
+      .limit(1);
+    if (!message || message.role !== 'assistant') {
+      throw new Error('Director assistant message not found.');
+    }
+
+    const [chat] = await db
+      .select()
+      .from(directorChatsTable)
+      .where(eq(directorChatsTable.id, message.chatId))
+      .limit(1);
+    if (!chat) {
+      throw new Error('Director chat not found.');
+    }
+
+    const messages = sortDirectorMessageRecords(await loadDirectorMessageRows(chat.id));
+    const assistantIndex = messages.findIndex((entry) => entry.id === messageId && entry.role === 'assistant');
+    if (assistantIndex === -1) {
+      throw new Error('Director assistant message not found.');
+    }
+
+    let userIndex = assistantIndex - 1;
+    while (userIndex >= 0 && messages[userIndex]?.role !== 'user') {
+      userIndex -= 1;
+    }
+
+    const sourceUserMessage = userIndex >= 0 ? messages[userIndex] : null;
+    const parts = parseDirectorParts(message.partsJson);
+    const toolParts = parts
+      .map((part, partIndex) => ({ part, partIndex }))
+      .filter(({ part }) => part?.type === 'tool-generateImages');
+    const target = toolParts[actionIndex] ?? null;
+    const targetAction = target
+      ? {
+          kind: 'generateImages',
+          payload: target.part.input,
+          partIndex: target.partIndex,
+          part: target.part,
+        }
+      : null;
+    if (!targetAction) {
+      throw new Error('Director action not found.');
+    }
+
+    return {
+      chat,
+      message,
+      sourceUserMessage,
+      targetAction,
+      parts,
+    };
+  }
+
+  async function updateDirectorAssistantMessage(messageId, parts) {
     const updatedAt = new Date().toISOString();
-    const content = `${currentMessage.contentMarkdown}${buildDirectorStatusBlock(status)}`;
     await db
       .update(directorMessagesTable)
       .set({
-        contentMarkdown: content,
-        status: currentMessage.status === 'failed' ? 'failed' : 'completed',
+        partsJson: serializeDirectorParts(parts),
         updatedAt,
       })
-      .where(eq(directorMessagesTable.id, assistantMessageId));
-    await db.update(directorChatsTable).set({ updatedAt }).where(eq(directorChatsTable.id, chatId));
-    options.onDirectorMessageComplete?.({
-      threadId,
-      chatId,
-      messageId: assistantMessageId,
-      content,
-    });
-    return content;
+      .where(eq(directorMessagesTable.id, messageId));
+
+    const [updatedMessage] = await db
+      .select()
+      .from(directorMessagesTable)
+      .where(eq(directorMessagesTable.id, messageId))
+      .limit(1);
+
+    return updatedMessage
+      ? toRendererDirectorMessage(updatedMessage, parseGenerationReferenceMetadata(updatedMessage.referenceImagesJson))
+      : null;
   }
 
-  async function resolveDirectorActionReferenceImages(referenceNames, attachedReferenceImages = []) {
-    const requestedSelectors = Array.isArray(referenceNames)
-      ? referenceNames.map(parseDirectorReferenceSelector).filter(Boolean)
-      : [];
-    if (requestedSelectors.length === 0) {
-      return [];
+  async function buildDirectorGenerateImagesRequest({ threadId, targetAction, sourceUserMessage }) {
+    const payload =
+      targetAction.payload && typeof targetAction.payload === 'object' && !Array.isArray(targetAction.payload)
+        ? targetAction.payload
+        : {};
+    const prompt = typeof payload.prompt === 'string' ? payload.prompt.trim() : '';
+    if (!prompt) {
+      throw new Error('Director generateImages action is missing a prompt.');
     }
 
-    const broadRequestedSet = new Set(
-      requestedSelectors
-        .filter((selector) => !selector.attachmentSelector)
-        .map((selector) => selector.referenceName)
+    const count =
+      typeof payload.count === 'number' && Number.isInteger(payload.count) && payload.count > 0 ? payload.count : 1;
+    const aspectRatio =
+      typeof payload.aspectRatio === 'string' && payload.aspectRatio.trim() ? payload.aspectRatio.trim() : '16:9';
+    const requestedReferences = Array.isArray(payload.references) ? payload.references : [];
+    const normalizedRequestedReferences = new Set(
+      requestedReferences.map((reference) => normalizeDirectorReferenceLabel(reference)).filter(Boolean)
     );
-    const specificSelectors = requestedSelectors.filter((selector) => selector.attachmentSelector);
-    const candidates = [
-      ...attachedReferenceImages.map((reference) => ({
-        id: reference.id,
-        collectionId: reference.collectionId,
-        environmentId: reference.environmentId,
-        category: reference.category,
+    const attachedReferences = sourceUserMessage
+      ? parseGenerationReferenceSnapshot(sourceUserMessage.referenceImagesJson)
+      : [];
+    const savedReferences = await listReferences();
+    const seenReferenceBytes = new Set();
+    const resolvedReferences = [];
+
+    for (const reference of savedReferences) {
+      const normalizedTitle = normalizeDirectorReferenceLabel(reference.title);
+      const normalizedName = normalizeDirectorReferenceLabel(reference.name);
+      if (
+        !normalizedRequestedReferences.has(normalizedTitle) &&
+        !normalizedRequestedReferences.has(normalizedName)
+      ) {
+        continue;
+      }
+      if (seenReferenceBytes.has(reference.bytesBase64)) {
+        continue;
+      }
+      seenReferenceBytes.add(reference.bytesBase64);
+      resolvedReferences.push({
+        name: reference.name,
+        title: reference.title ?? reference.name,
+        description: reference.description ?? undefined,
+        mimeType: reference.mimeType,
+        bytesBase64: reference.bytesBase64,
+      });
+    }
+
+    for (const reference of attachedReferences) {
+      const normalizedTitle = normalizeDirectorReferenceLabel(reference.title);
+      const normalizedName = normalizeDirectorReferenceLabel(reference.name);
+      if (
+        normalizedRequestedReferences.size > 0 &&
+        !normalizedRequestedReferences.has(normalizedTitle) &&
+        !normalizedRequestedReferences.has(normalizedName)
+      ) {
+        continue;
+      }
+      if (seenReferenceBytes.has(reference.bytesBase64)) {
+        continue;
+      }
+      seenReferenceBytes.add(reference.bytesBase64);
+      resolvedReferences.push({
         name: reference.name,
         title: reference.title,
         description: reference.description,
         mimeType: reference.mimeType,
         bytesBase64: reference.bytesBase64,
-      })),
-    ];
-
-    const resolved = [];
-    const seenBytes = new Set();
-    for (const candidate of candidates) {
-      const candidateNames = [
-        normalizeDirectorReferenceName(candidate.title),
-        normalizeDirectorReferenceName(candidate.name),
-        normalizeDirectorReferenceName(candidate.collectionId),
-        normalizeDirectorReferenceName(candidate.environmentId),
-        normalizeDirectorReferenceName(candidate.id),
-      ].filter(Boolean);
-      const broadMatch = candidateNames.some((name) => broadRequestedSet.has(name));
-      const specificMatch = specificSelectors.some((selector) => {
-        if (!candidateNames.some((name) => name === selector.referenceName)) {
-          return false;
-        }
-        const attachmentNames = [
-          candidate.id,
-          candidate.name,
-          path.basename(candidate.name ?? '', path.extname(candidate.name ?? '')),
-          candidate.description,
-        ]
-          .map(normalizeDirectorAttachmentSelector)
-          .filter(Boolean);
-        return attachmentNames.some((name) => name === selector.attachmentSelector);
       });
-      if (!broadMatch && !specificMatch) {
-        continue;
-      }
-      if (candidate.bytesBase64 && seenBytes.has(candidate.bytesBase64)) {
-        continue;
-      }
-      if (candidate.bytesBase64) {
-        seenBytes.add(candidate.bytesBase64);
-      }
-      resolved.push(candidate);
     }
 
-    return resolved;
-  }
-
-  function buildDirectorClassicPrompt(payload) {
-    return [
-      payload.prompt,
-      payload.aspectRatio ? `Aspect ratio: ${payload.aspectRatio}` : null,
-      payload.quality ? `Quality: ${payload.quality}` : null,
-    ]
-      .filter(Boolean)
-      .join('\n');
-  }
-
-  async function executeDirectorAction({
-    actionBlock,
-    actionIndex,
-    assistantMessageId,
-    chatId,
-    threadId,
-    fastMode,
-    attachedReferenceImages,
-  }) {
-    if (actionBlock.error || actionBlock.action === 'invalid') {
-      await appendDirectorStatusToMessage({
-        assistantMessageId,
-        chatId,
-        threadId,
-        status: {
-          status: 'failed',
-          title: 'Director action failed',
-          detail: actionBlock.error ?? 'Invalid Director action.',
-          action: 'invalid',
-          actionIndex,
-        },
-      });
-      return;
-    }
-
-    if (actionBlock.action === 'generate_classic') {
-      const payload = actionBlock.payload;
-      const count = clampInteger(payload.count, 1, 12, 1);
-      await appendDirectorStatusToMessage({
-        assistantMessageId,
-        chatId,
-        threadId,
-        status: {
-          status: 'running',
-          title: 'Calling Classic generation',
-          detail: `${count} image${count === 1 ? '' : 's'} requested.`,
-          action: actionBlock.action,
-          actionIndex,
-        },
-      });
-
-      try {
-        const referenceImages = await resolveDirectorActionReferenceImages(payload.references, attachedReferenceImages);
-        const result = await generateImages({
-          clientRunId: `director-action-${assistantMessageId}`,
-          prompt: buildDirectorClassicPrompt(payload),
-          count,
-          threadId,
-          mode: 'manual',
-          provider: payload.provider === 'antigravity' ? 'antigravity' : 'codex',
-          modelId: typeof payload.modelId === 'string' ? payload.modelId : null,
-          referenceImages,
-          fastMode: payload.fastMode === true || fastMode,
-        });
-
-        await appendDirectorStatusToMessage({
-          assistantMessageId,
-          chatId,
-          threadId,
-          status: {
-            status: 'succeeded',
-            title: 'Classic generation finished',
-            detail: `Generated ${result.assets.length} image${result.assets.length === 1 ? '' : 's'}.`,
-            action: actionBlock.action,
-            actionIndex,
-            result: { jobId: result.jobId, assetIds: result.assets.map((asset) => asset.id) },
-          },
-        });
-        await requestDirectorGeneratedImageReview({
-          chatId,
-          threadId,
-          fastMode,
-          modelId: typeof payload.modelId === 'string' ? payload.modelId : null,
-          generatedAssets: result.assets,
-          originalReferenceImages: referenceImages,
-          actionSummary: actionBlock.summary,
-        });
-      } catch (error) {
-        await appendDirectorStatusToMessage({
-          assistantMessageId,
-          chatId,
-          threadId,
-          status: {
-            status: 'failed',
-            title: 'Classic generation failed',
-            detail: error instanceof Error ? error.message : String(error),
-            action: actionBlock.action,
-            actionIndex,
-          },
-        });
-      }
-      return;
-    }
-
-    if (actionBlock.action === 'create_scene') {
-      const payload = actionBlock.payload;
-      const frameCount = Array.isArray(payload.frames) ? payload.frames.length : 0;
-      await appendDirectorStatusToMessage({
-        assistantMessageId,
-        chatId,
-        threadId,
-        status: {
-          status: 'running',
-          title: 'Creating editable Scene plan',
-          detail: `${frameCount} frame${frameCount === 1 ? '' : 's'} prepared for review before generation.`,
-          action: actionBlock.action,
-          actionIndex,
-        },
-      });
-
-      try {
-        const referenceImages = await resolveDirectorActionReferenceImages(payload.references, attachedReferenceImages);
-        const existingScenes = await listSceneGroups(threadId);
-        let sceneGroup = await createSceneGroup(threadId, {
-          title: payload.title,
-          prompt: payload.scenePrompt,
-          tocOrder: existingScenes.length + 1,
-        });
-
-        for (const [index, frame] of payload.frames.entries()) {
-          sceneGroup = await createSceneFrame(sceneGroup.id, {
-            title: frame.title,
-            prompt: frame.prompt,
-            frameOrder: index + 1,
-          });
-          const createdFrame = (sceneGroup.frames ?? []).find((candidate) => candidate.frameOrder === index + 1);
-          if (createdFrame && Array.isArray(frame.references) && frame.references.length > 0) {
-            const frameReferenceImages = await resolveDirectorActionReferenceImages(frame.references, attachedReferenceImages);
-            if (frameReferenceImages.length > 0) {
-              const updatedSceneGroup = await saveSceneFrameReferences(
-                createdFrame.id,
-                frameReferenceImages.map(toSceneFrameReferenceInput)
-              );
-              if (updatedSceneGroup) {
-                sceneGroup = updatedSceneGroup;
-              }
-            }
-          }
-        }
-
-        const runningProgress = { generated: 0, total: frameCount };
-        options.onDirectorSceneReady?.({
-          threadId,
-          chatId,
-          messageId: assistantMessageId,
-          sceneGroupId: sceneGroup.id,
-        });
-
-        await appendDirectorStatusToMessage({
-          assistantMessageId,
-          chatId,
-          threadId,
-          status: {
-            status: 'running',
-            title: 'Generating scene',
-            detail: `Created "${payload.title}" and started generating ${frameCount} frame${frameCount === 1 ? '' : 's'}.`,
-            action: actionBlock.action,
-            actionIndex,
-            result: { sceneGroupId: sceneGroup.id },
-            progress: runningProgress,
-          },
-        });
-
-        const generatedSceneGroup = await generateSceneGroup({
-          sceneGroupId: sceneGroup.id,
-          referenceImages,
-          fastMode,
-          onFrameReady: async ({ generated, total }) => {
-            await appendDirectorStatusToMessage({
-              assistantMessageId,
-              chatId,
-              threadId,
-              status: {
-                status: 'running',
-                title: 'Generating scene',
-                detail: `Generated ${generated} of ${total} frame${total === 1 ? '' : 's'}.`,
-                action: actionBlock.action,
-                actionIndex,
-                result: { sceneGroupId: sceneGroup.id },
-                progress: { generated, total },
-              },
-            });
-          },
-        });
-        const generatedCount = generatedSceneGroup?.frames?.filter((frame) => (frame.assets ?? []).length > 0).length ?? 0;
-        await appendDirectorStatusToMessage({
-          assistantMessageId,
-          chatId,
-          threadId,
-          status: {
-            status: 'succeeded',
-            title: 'Scene generation finished',
-            detail: `Generated ${generatedCount} of ${frameCount} frame${frameCount === 1 ? '' : 's'}.`,
-            action: actionBlock.action,
-            actionIndex,
-            result: { sceneGroupId: sceneGroup.id },
-            progress: { generated: generatedCount, total: frameCount },
-          },
-        });
-      } catch (error) {
-        await appendDirectorStatusToMessage({
-          assistantMessageId,
-          chatId,
-          threadId,
-          status: {
-            status: 'failed',
-            title: 'Scene orchestration failed',
-            detail: error instanceof Error ? error.message : String(error),
-            action: actionBlock.action,
-            actionIndex,
-          },
-        });
-      }
-    }
-
-    if (actionBlock.action === 'update_scene') {
-      const payload = actionBlock.payload;
-      const requestedFrameCount = Array.isArray(payload.frames) ? payload.frames.length : 0;
-      await appendDirectorStatusToMessage({
-        assistantMessageId,
-        chatId,
-        threadId,
-        status: {
-          status: 'running',
-          title: 'Updating Scene plan',
-          detail: `${requestedFrameCount} frame change${requestedFrameCount === 1 ? '' : 's'} prepared.`,
-          action: actionBlock.action,
-          actionIndex,
-        },
-      });
-
-      try {
-        const referenceImages = await resolveDirectorActionReferenceImages(payload.references, attachedReferenceImages);
-        const existingScenes = await listSceneGroups(threadId);
-        let sceneGroup = resolveDirectorSceneTarget(existingScenes, payload);
-        if (!sceneGroup) {
-          throw new Error('Director update_scene target scene was not found.');
-        }
-
-        if (payload.title || payload.scenePrompt) {
-          sceneGroup = await updateSceneGroup(sceneGroup.id, {
-            title: payload.title || sceneGroup.title,
-            prompt: payload.scenePrompt || sceneGroup.prompt,
-            tocOrder: sceneGroup.tocOrder,
-          });
-        }
-
-        const changedFrameIds = [];
-        for (const frame of payload.frames) {
-          const currentFrames = sceneGroup.frames ?? [];
-          const existingFrame = frame.operation === 'add' ? null : resolveDirectorFrameTarget(currentFrames, frame);
-          const framePrompt = frame.prompt || existingFrame?.prompt || '';
-          const frameTitle = frame.title || existingFrame?.title || `Frame ${currentFrames.length + 1}`;
-
-          if (existingFrame) {
-            sceneGroup = await updateSceneFrame(existingFrame.id, {
-              title: frameTitle,
-              prompt: framePrompt,
-              frameOrder: existingFrame.frameOrder,
-            });
-            if (Array.isArray(frame.references)) {
-              const frameReferenceImages = await resolveDirectorActionReferenceImages(frame.references, attachedReferenceImages);
-              const updatedSceneGroup = await saveSceneFrameReferences(
-                existingFrame.id,
-                frameReferenceImages.map(toSceneFrameReferenceInput)
-              );
-              if (updatedSceneGroup) {
-                sceneGroup = updatedSceneGroup;
-              }
-            }
-            if (frame.generate !== false) {
-              changedFrameIds.push(existingFrame.id);
-            }
-            continue;
-          }
-
-          const nextFrameOrder =
-            currentFrames.reduce((maxOrder, candidate) => Math.max(maxOrder, candidate.frameOrder ?? 0), 0) + 1;
-          sceneGroup = await createSceneFrame(sceneGroup.id, {
-            title: frameTitle,
-            prompt: framePrompt,
-            frameOrder: nextFrameOrder,
-          });
-          const createdFrame = (sceneGroup.frames ?? []).find((candidate) => candidate.frameOrder === nextFrameOrder);
-          if (createdFrame && Array.isArray(frame.references)) {
-            const frameReferenceImages = await resolveDirectorActionReferenceImages(frame.references, attachedReferenceImages);
-            const updatedSceneGroup = await saveSceneFrameReferences(
-              createdFrame.id,
-              frameReferenceImages.map(toSceneFrameReferenceInput)
-            );
-            if (updatedSceneGroup) {
-              sceneGroup = updatedSceneGroup;
-            }
-          }
-          if (createdFrame && frame.generate !== false) {
-            changedFrameIds.push(createdFrame.id);
-          }
-        }
-
-        options.onDirectorSceneReady?.({
-          threadId,
-          chatId,
-          messageId: assistantMessageId,
-          sceneGroupId: sceneGroup.id,
-        });
-
-        const shouldGenerate = payload.generate !== false && changedFrameIds.length > 0;
-        if (!shouldGenerate) {
-          await appendDirectorStatusToMessage({
-            assistantMessageId,
-            chatId,
-            threadId,
-            status: {
-              status: 'succeeded',
-              title: 'Scene updated',
-              detail: `Updated "${sceneGroup.title}".`,
-              action: actionBlock.action,
-              actionIndex,
-              result: { sceneGroupId: sceneGroup.id, frameIds: changedFrameIds },
-              progress: { generated: 0, total: 0 },
-            },
-          });
-          return;
-        }
-
-        const generatedFrameIds = new Set();
-        await appendDirectorStatusToMessage({
-          assistantMessageId,
-          chatId,
-          threadId,
-          status: {
-            status: 'running',
-            title: 'Generating updated frames',
-            detail: `Generating ${changedFrameIds.length} changed frame${changedFrameIds.length === 1 ? '' : 's'}.`,
-            action: actionBlock.action,
-            actionIndex,
-            result: { sceneGroupId: sceneGroup.id, frameIds: changedFrameIds },
-            progress: { generated: 0, total: changedFrameIds.length },
-          },
-        });
-
-        await runWithConcurrencyLimit(
-          changedFrameIds,
-          resolveSceneFrameConcurrencyLimit(changedFrameIds.length),
-          async (frameId) => {
-            await generateSceneGroup({
-              sceneGroupId: sceneGroup.id,
-              targetFrameId: frameId,
-              referenceImages,
-              fastMode,
-              onFrameReady: async ({ frameId: readyFrameId }) => {
-                generatedFrameIds.add(readyFrameId);
-                await appendDirectorStatusToMessage({
-                  assistantMessageId,
-                  chatId,
-                  threadId,
-                  status: {
-                    status: 'running',
-                    title: 'Generating updated frames',
-                    detail: `Generated ${generatedFrameIds.size} of ${changedFrameIds.length} changed frame${changedFrameIds.length === 1 ? '' : 's'}.`,
-                    action: actionBlock.action,
-                    actionIndex,
-                    result: { sceneGroupId: sceneGroup.id, frameIds: changedFrameIds },
-                    progress: { generated: generatedFrameIds.size, total: changedFrameIds.length },
-                  },
-                });
-              },
-            });
-          }
-        );
-
-        await appendDirectorStatusToMessage({
-          assistantMessageId,
-          chatId,
-          threadId,
-          status: {
-            status: 'succeeded',
-            title: 'Scene update finished',
-            detail: `Generated ${generatedFrameIds.size} of ${changedFrameIds.length} changed frame${changedFrameIds.length === 1 ? '' : 's'}.`,
-            action: actionBlock.action,
-            actionIndex,
-            result: { sceneGroupId: sceneGroup.id, frameIds: changedFrameIds },
-            progress: { generated: generatedFrameIds.size, total: changedFrameIds.length },
-          },
-        });
-      } catch (error) {
-        await appendDirectorStatusToMessage({
-          assistantMessageId,
-          chatId,
-          threadId,
-          status: {
-            status: 'failed',
-            title: 'Scene update failed',
-            detail: error instanceof Error ? error.message : String(error),
-            action: actionBlock.action,
-            actionIndex,
-          },
-        });
-      }
-    }
-  }
-
-  function parseDirectorStatusBlocks(markdown) {
-    const source = typeof markdown === 'string' ? markdown : '';
-    const statusBlocks = [];
-    const fencePattern = /```imagen-status\s*\n([\s\S]*?)```/g;
-    let match;
-
-    while ((match = fencePattern.exec(source)) !== null) {
-      try {
-        const parsed = JSON.parse(match[1]?.trim() ?? '');
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          statusBlocks.push(parsed);
-        }
-      } catch {
-        // Ignore malformed status blocks; they should not block future actions.
-      }
-    }
-
-    return statusBlocks;
-  }
-
-  function hasTerminalDirectorActionStatus(contentMarkdown, actionIndex) {
-    return parseDirectorStatusBlocks(contentMarkdown).some((statusBlock) => {
-      if (Number(statusBlock.actionIndex) !== actionIndex) {
-        return false;
-      }
-      return ['running', 'succeeded', 'failed', 'declined'].includes(String(statusBlock.status));
-    });
-  }
-
-  async function getDirectorMessageById(messageId) {
-    const [message] = await db
-      .select({
-        id: directorMessagesTable.id,
-        chatId: directorMessagesTable.chatId,
-        role: directorMessagesTable.role,
-        contentMarkdown: directorMessagesTable.contentMarkdown,
-        status: directorMessagesTable.status,
-        modelId: directorMessagesTable.modelId,
-        modelLabel: directorMessagesTable.modelLabel,
-        fastMode: directorMessagesTable.fastMode,
-        messageOrder: directorMessagesTable.messageOrder,
-        providerTurnId: directorMessagesTable.providerTurnId,
-        providerItemId: directorMessagesTable.providerItemId,
-        createdAt: directorMessagesTable.createdAt,
-        updatedAt: directorMessagesTable.updatedAt,
-      })
-      .from(directorMessagesTable)
-      .where(eq(directorMessagesTable.id, messageId))
-      .limit(1);
-    if (!message) {
-      return null;
-    }
-    return toRendererDirectorMessage(message);
+    return {
+      threadId,
+      provider: 'codex',
+      modelId: IMAGE_MODEL_OPTIONS[0]?.id,
+      mode: 'manual',
+      prompt: `${prompt}\n\nAspect ratio: ${aspectRatio}`,
+      count,
+      referenceImages: resolvedReferences,
+    };
   }
 
   async function approveDirectorAction(input) {
-    const assistantMessageId = typeof input?.messageId === 'string' ? input.messageId.trim() : '';
-    const actionIndex = Number.isInteger(input?.actionIndex) ? input.actionIndex : 0;
-    if (!assistantMessageId) {
-      throw new Error('Director action approval requires a message id.');
+    const messageId = typeof input?.messageId === 'string' ? input.messageId.trim() : '';
+    const actionIndex = typeof input?.actionIndex === 'number' ? input.actionIndex : -1;
+    const clientRunId = typeof input?.clientRunId === 'string' ? input.clientRunId.trim() : '';
+    if (!messageId) {
+      throw new Error('Director message id is required.');
+    }
+    if (!Number.isInteger(actionIndex) || actionIndex < 0) {
+      throw new Error('Director action index is required.');
     }
 
-    const [assistantMessage] = await db
-      .select()
-      .from(directorMessagesTable)
-      .where(eq(directorMessagesTable.id, assistantMessageId))
-      .limit(1);
-    if (!assistantMessage || assistantMessage.role !== 'assistant') {
-      throw new Error('Director action message not found.');
-    }
-
-    if (hasTerminalDirectorActionStatus(assistantMessage.contentMarkdown, actionIndex)) {
-      return getDirectorMessageById(assistantMessageId);
-    }
-
-    const [chat] = await db
-      .select()
-      .from(directorChatsTable)
-      .where(eq(directorChatsTable.id, assistantMessage.chatId))
-      .limit(1);
-    if (!chat) {
-      throw new Error('Director chat not found.');
-    }
-
-    const actionBlocks = parseDirectorActionBlocks(assistantMessage.contentMarkdown);
-    const actionBlock = actionBlocks[actionIndex];
-    if (!actionBlock) {
-      throw new Error('Director action not found.');
-    }
-
-    await executeDirectorAction({
-      actionBlock,
-      actionIndex,
-      assistantMessageId,
-      chatId: assistantMessage.chatId,
+    const { chat, sourceUserMessage, targetAction, parts } = await resolveDirectorActionContext(messageId, actionIndex);
+    const runningParts = parts.map((part, index) =>
+      index === targetAction.partIndex ? { ...part, state: 'running' } : part
+    );
+    await updateDirectorAssistantMessage(messageId, runningParts);
+    options.onDirectorMessageDelta?.({
       threadId: chat.threadId,
-      fastMode: Boolean(assistantMessage.fastMode),
-      attachedReferenceImages: parseGenerationReferenceSnapshot(assistantMessage.referenceImagesJson),
+      chatId: chat.id,
+      messageId,
+      parts: runningParts,
     });
 
-    return getDirectorMessageById(assistantMessageId);
+    const request = await buildDirectorGenerateImagesRequest({
+      threadId: chat.threadId,
+      targetAction,
+      sourceUserMessage,
+    });
+    if (clientRunId) {
+      request.clientRunId = clientRunId;
+    }
+
+    try {
+      const result = await generateImages(request);
+      const completedParts = runningParts.map((part, index) =>
+        index === targetAction.partIndex
+          ? { ...part, state: 'output-available', output: result }
+          : part
+      );
+      const updatedMessage = await updateDirectorAssistantMessage(
+        messageId,
+        completedParts
+      );
+      options.onDirectorMessageDelta?.({
+        threadId: chat.threadId,
+        chatId: chat.id,
+        messageId,
+        parts: completedParts,
+      });
+      return updatedMessage;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const failedParts = runningParts.map((part, index) =>
+        index === targetAction.partIndex
+          ? { ...part, state: 'output-error', errorText: errorMessage }
+          : part
+      );
+      await updateDirectorAssistantMessage(messageId, failedParts);
+      options.onDirectorMessageDelta?.({
+        threadId: chat.threadId,
+        chatId: chat.id,
+        messageId,
+        parts: failedParts,
+      });
+      throw error;
+    }
   }
 
   async function declineDirectorAction(input) {
-    const assistantMessageId = typeof input?.messageId === 'string' ? input.messageId.trim() : '';
-    const actionIndex = Number.isInteger(input?.actionIndex) ? input.actionIndex : 0;
-    if (!assistantMessageId) {
-      throw new Error('Director action decline requires a message id.');
+    const messageId = typeof input?.messageId === 'string' ? input.messageId.trim() : '';
+    const actionIndex = typeof input?.actionIndex === 'number' ? input.actionIndex : -1;
+    if (!messageId) {
+      throw new Error('Director message id is required.');
+    }
+    if (!Number.isInteger(actionIndex) || actionIndex < 0) {
+      throw new Error('Director action index is required.');
     }
 
-    const [assistantMessage] = await db
-      .select()
-      .from(directorMessagesTable)
-      .where(eq(directorMessagesTable.id, assistantMessageId))
-      .limit(1);
-    if (!assistantMessage || assistantMessage.role !== 'assistant') {
-      throw new Error('Director action message not found.');
-    }
-    if (hasTerminalDirectorActionStatus(assistantMessage.contentMarkdown, actionIndex)) {
-      return getDirectorMessageById(assistantMessageId);
-    }
-
-    const [chat] = await db
-      .select()
-      .from(directorChatsTable)
-      .where(eq(directorChatsTable.id, assistantMessage.chatId))
-      .limit(1);
-    if (!chat) {
-      throw new Error('Director chat not found.');
-    }
-
-    const actionBlocks = parseDirectorActionBlocks(assistantMessage.contentMarkdown);
-    const actionBlock = actionBlocks[actionIndex];
-    await appendDirectorStatusToMessage({
-      assistantMessageId,
-      chatId: assistantMessage.chatId,
-      threadId: chat.threadId,
-      status: {
-        status: 'declined',
-        title: 'Director request declined',
-        detail: 'No app action was run.',
-        action: actionBlock?.action ?? 'unknown',
-        actionIndex,
-      },
-    });
-
-    return getDirectorMessageById(assistantMessageId);
+    const { targetAction, parts } = await resolveDirectorActionContext(messageId, actionIndex);
+    return updateDirectorAssistantMessage(
+      messageId,
+      parts.map((part, index) =>
+        index === targetAction.partIndex ? { ...part, state: 'declined' } : part
+      )
+    );
   }
 
-  async function requestDirectorGeneratedImageReview({
-    chatId,
-    threadId,
-    fastMode,
-    modelId,
-    generatedAssets,
-    originalReferenceImages,
-    actionSummary,
-  }) {
-    const generatedReferenceImages = [];
-    for (const asset of generatedAssets) {
-      const storedAsset = await getGeneratedImage(asset.id);
-      if (!storedAsset) {
-        continue;
-      }
-      const bytes = await fsp.readFile(storedAsset.storedPath);
-      generatedReferenceImages.push({
-        name: storedAsset.fileName,
-        title: `Generated ${storedAsset.outputIndex ?? generatedReferenceImages.length + 1}`,
-        description: 'Generated output from the approved Director action. Review for prompt adherence and visual consistency.',
-        mimeType: storedAsset.mimeType,
-        bytesBase64: bytes.toString('base64'),
-      });
+  async function generateImages() {
+    const request = arguments[0] ?? {};
+    const provider = request.provider ?? 'codex';
+    if (provider !== 'codex') {
+      throw new Error(`Unsupported image generation provider: ${provider}`);
     }
 
-    if (generatedReferenceImages.length === 0) {
-      return;
-    }
-
-    await sendDirectorMessage({
-      chatId,
-      threadId,
-      prompt: [
-        'Review the newly generated images attached to this message.',
-        actionSummary ? `Approved action: ${actionSummary}` : null,
-        'Compare them against the original references attached here, including every environment angle/detail plate.',
-        'Check environment geometry, character identity, prop continuity, camera intent, and prompt adherence.',
-        'Be concise. If something is wrong, explain exactly what should be revised and which @Reference names should be used next. Do not claim new images were generated.',
-      ].filter(Boolean).join('\n'),
-      modelId: modelId ?? DEFAULT_CODEX_MODEL_ID,
-      fastMode,
-      referenceImages: [...originalReferenceImages, ...generatedReferenceImages],
-    });
-  }
-
-  async function generateImages({
-    prompt,
-    count,
-    threadId,
-    mode = 'manual',
-    referenceImages = [],
-    pinPoint,
-    camera,
-    fastMode = false,
-    clientRunId = null,
-    provider = DEFAULT_GENERATION_PROVIDER,
-    modelId = null,
-    onScenePlan,
-    onCancelableRun,
-    onImageReady,
-  }) {
+    const imageModel = resolveImageModel(request.modelId);
     const jobId = nanoid();
-    const startedAtMs = Date.now();
-    const timestamp = new Date(startedAtMs).toISOString();
-    const selection = resolveGenerationSelection(provider, modelId);
-    const workingDirectory = resolveJobWorkingDirectory({
-      provider: selection.provider,
-      jobId,
-      codexJobsTempDir: paths.codexJobsTempDir,
-    });
+    const createdAt = new Date().toISOString();
+    const workingDirectory = path.join(paths.generationJobsTempDir, jobId);
     const outputDirectory = path.join(workingDirectory, 'output');
-    const manifestPath = path.join(workingDirectory, 'manifest.json');
-    const logPrefix = `[crenv:${selection.provider}:${jobId}]`;
-    const referenceImagesJson = JSON.stringify(toGenerationReferenceMetadata(referenceImages));
-    const stagedReferenceImages = await stageReferenceImages({
-      workingDirectory,
-      referenceImages,
-    });
+    const artifactsDirectory = path.join(workingDirectory, 'artifacts');
+    const manifestPath = '';
+    const references = request.referenceImages ?? [];
 
     await fsp.mkdir(outputDirectory, { recursive: true });
 
-    console.info(`${logPrefix} starting image generation`);
-    console.info(`${logPrefix} workingDirectory: ${workingDirectory}`);
-    console.info(`${logPrefix} outputDirectory: ${outputDirectory}`);
-    if (selection.provider === 'antigravity') {
-      console.info(`${logPrefix} manifestPath: ${manifestPath}`);
-    } else {
-      console.info(`${logPrefix} streamingReadyEvents: CRENV_IMAGE_READY`);
-    }
-    console.info(`${logPrefix} requestedCount: ${count}`);
-    console.info(`${logPrefix} threadId: ${threadId}`);
-    console.info(`${logPrefix} modelId: ${selection.modelId}`);
-    if (CODEX_DEEP_TRACE_ENABLED) {
-      console.info(`${logPrefix} deepTrace: enabled`);
-      console.info(`${logPrefix} stagedReferenceCount: ${stagedReferenceImages.length}`);
-      for (const referenceImage of stagedReferenceImages) {
-        const metadata = [
-          referenceImage.title ? `title=${referenceImage.title}` : null,
-          referenceImage.description ? `description=${referenceImage.description}` : null,
-        ]
-          .filter(Boolean)
-          .join(' ');
-        console.info(
-          `${logPrefix} stagedReference: ${referenceImage.path}${metadata ? ` ${metadata}` : ''}`
-        );
-      }
+    console.info('[crenv:generation] starting image job', {
+      jobId,
+      clientRunId: request.clientRunId ?? null,
+      threadId: request.threadId,
+      provider,
+      modelId: imageModel.id,
+      runtimeModel: imageModel.runtimeModel,
+      count: Number.isInteger(request.count) ? request.count : 1,
+      references: references.length,
+      prompt: truncateGenerationLogText(request.prompt ?? '', 180),
+    });
+    for (const [index, reference] of references.entries()) {
+      console.info(`[crenv:generation] reference[${index + 1}]`, summarizeGenerationReferenceForLog(reference, index));
     }
 
-    await upsertJob({
+    const pendingJob = {
       id: jobId,
-      threadId,
-      prompt,
-      requestedCount: count,
+      threadId: request.threadId,
+      prompt: request.prompt ?? '',
+      requestedCount: Number.isInteger(request.count) ? request.count : 1,
       status: 'running',
       workingDirectory,
       manifestPath,
       errorMessage: null,
-      provider: selection.provider,
-      modelId: selection.modelId,
-      modelLabel: selection.modelLabel,
-      referenceImagesJson,
+      provider,
+      modelId: imageModel.id,
+      modelLabel: imageModel.label,
+      referenceImagesJson: JSON.stringify(
+        references.map((reference) => ({
+          name: reference.name,
+          title: reference.title ?? null,
+          description: reference.description ?? null,
+          mimeType: reference.mimeType,
+        }))
+      ),
       durationMs: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    });
+      providerThreadId: null,
+      providerTurnId: null,
+      requestStartedAt: null,
+      firstEventAt: null,
+      imageToolCallStartedAt: null,
+      imageToolGeneratingAt: null,
+      firstPartialImageAt: null,
+      completedAt: null,
+      runtime: 'chatgpt-codex-responses',
+      importedCount: 0,
+      createdAt,
+      updatedAt: createdAt,
+    };
 
-    try {
-      const providerPromptInput = {
-        jobId,
-        mode,
-        userPrompt: prompt,
-        outputDirectory,
-        manifestPath,
-        imageCount: count,
-        referenceImages: stagedReferenceImages,
-        pinPoint,
-        camera,
+    let currentJob = pendingJob;
+    const importedAssetsByRun = new Map();
+
+    async function persistJobPatch(patch) {
+      currentJob = {
+        ...currentJob,
+        ...patch,
+        updatedAt: new Date().toISOString(),
       };
-      const assetRecords = [];
-      const importReadyImage = async ({ event, absolutePath, providerThreadId, providerTurnId }) => {
-        const assetId = nanoid();
-        const imported = await importGeneratedImage({
-          assetId,
-          sourcePath: absolutePath,
-          generatedImagesDir: paths.generatedImagesDir,
-          createdAt: new Date().toISOString(),
-        });
+      await upsertJob(currentJob);
+    }
 
+    async function upsertImportedAsset(update) {
+      const outputIndex = Math.max(0, Number(update.run) - 1);
+      const createdAt = new Date().toISOString();
+      const mimeType = update.mimeType ?? mimeTypeForImportedAsset(update.savedPath);
+      const sourceBuffer = await fsp.readFile(update.savedPath);
+      const existingAsset = importedAssetsByRun.get(update.run) ?? null;
+
+      if (!existingAsset) {
+        const assetId = nanoid();
+        const imported = await writeImportedAssetBuffer({
+          buffer: sourceBuffer,
+          assetId,
+          fileName: path.basename(update.savedPath),
+          mimeType,
+          generatedImagesDir: paths.generatedImagesDir,
+        });
         const assetRecord = {
           id: assetId,
           jobId,
-          originalPath: absolutePath,
+          originalPath: update.savedPath,
           storedPath: imported.storedPath,
           fileName: imported.fileName,
-          mimeType: imported.mimeType,
-          width: Number.isInteger(event.width) ? event.width : null,
-          height: Number.isInteger(event.height) ? event.height : null,
-          providerImageId: event.imageId,
-          outputIndex: event.outputIndex,
-          reviewStatus: event.reviewStatus,
-          createdAt: imported.createdAt,
+          mimeType,
+          width: null,
+          height: null,
+          providerImageId: update.providerImageId ?? null,
+          outputIndex,
+          reviewStatus: update.isFinal ? 'accepted' : 'preview',
+          createdAt,
         };
+        await db.insert(generatedAssetsTable).values(assetRecord);
+        console.info(`[crenv:generation] stored ${update.isFinal ? 'final' : 'preview'} asset`, {
+          jobId,
+          run: update.run,
+          assetId,
+          outputIndex,
+          storedPath: imported.storedPath,
+          providerImageId: update.providerImageId ?? null,
+        });
 
-        await db.insert(generatedAssetsTable).values(assetRecord).onConflictDoNothing();
-        assetRecords.push(assetRecord);
         const rendererAsset = toRendererAsset({
           ...assetRecord,
-          prompt,
-          provider: selection.provider,
-          modelId: selection.modelId,
-          modelLabel: selection.modelLabel,
-          referenceImagesJson,
-          durationMs: null,
+          provider,
+          modelId: imageModel.id,
+          modelLabel: imageModel.label,
+          prompt: request.prompt ?? '',
+          referenceImagesJson: currentJob.referenceImagesJson,
+          durationMs: currentJob.durationMs,
         });
-        const readyPayload = {
+        importedAssetsByRun.set(update.run, rendererAsset);
+        options.onImageReady?.({
           jobId,
-          clientRunId,
-          threadId,
+          clientRunId: request.clientRunId ?? null,
+          threadId: request.threadId,
           asset: rendererAsset,
-          providerThreadId,
-          providerTurnId,
-        };
-        options.onImageReady?.(readyPayload);
-        await onImageReady?.(readyPayload);
-        await upsertJob({
-          id: jobId,
-          threadId,
-          prompt,
-          requestedCount: count,
-          status: 'running',
-          workingDirectory,
-          manifestPath,
-          errorMessage: null,
-          provider: selection.provider,
-          modelId: selection.modelId,
-          modelLabel: selection.modelLabel,
-          referenceImagesJson,
-          durationMs: null,
-          providerThreadId: providerThreadId ?? null,
-          providerTurnId: providerTurnId ?? null,
-          runtime: 'codex-app-server',
-          importedCount: assetRecords.length,
-          createdAt: timestamp,
-          updatedAt: new Date().toISOString(),
+          providerThreadId: update.providerThreadId ?? currentJob.providerThreadId,
+          providerTurnId: update.providerTurnId ?? currentJob.providerTurnId,
         });
-        console.info(
-          `${logPrefix} imported ready asset: ${imported.storedPath} outputIndex=${assetRecord.outputIndex ?? 'unknown'} clientRunId=${clientRunId ?? 'none'}`
-        );
-      };
-
-      let result;
-      if (selection.provider === 'antigravity') {
-        result = await runAntigravityJob({
-              jobId,
-              clientRunId,
-              workingDirectory,
-              prompt: buildAntigravityImageGenerationPrompt({
-                ...providerPromptInput,
-                antigravityModel: selection.antigravityModel,
-              }),
-              requestedCount: count,
-              threadId,
-              model: selection.antigravityModel,
-              onScenePlan: (payload) => {
-                options.onScenePlan?.(payload);
-                onScenePlan?.(payload);
-              },
-              onCancelableRun: (cancelableRun) => {
-                options.onCancelableRun?.(cancelableRun);
-                onCancelableRun?.(cancelableRun);
-              },
-            });
-      } else {
-        result = await runCodexImageAppServerJob({
-              client: codexAppServerClient,
-              jobId,
-              workingDirectory,
-              outputDirectory,
-              prompt: buildCodexImageGenerationPrompt(providerPromptInput),
-              referenceImages: providerPromptInput.referenceImages,
-              requestedCount: count,
-              fastMode,
-              model: selection.codexModel,
-              onScenePlan: (payload) => {
-                const eventPayload = {
-                  ...payload,
-                  clientRunId,
-                  threadId,
-                };
-                options.onScenePlan?.(eventPayload);
-                onScenePlan?.(eventPayload);
-              },
-              onCancelableRun: (cancelableRun) => {
-                options.onCancelableRun?.(cancelableRun);
-                onCancelableRun?.(cancelableRun);
-              },
-              onImageReady: importReadyImage,
-            });
+        await persistJobPatch({
+          importedCount: importedAssetsByRun.size,
+          providerThreadId: update.providerThreadId ?? currentJob.providerThreadId,
+          providerTurnId: update.providerTurnId ?? currentJob.providerTurnId,
+          ...toGenerationBenchmarkPatch(currentJob, update.benchmark),
+        });
+        return rendererAsset;
       }
 
-      if (!result.success) {
-        if (result.canceled) {
-          console.info(`${logPrefix} generation canceled`);
-          const canceledError = new Error(result.errorMessage);
-          canceledError.name = 'GenerationCanceledError';
-          canceledError.code = 'GENERATION_CANCELED';
-          throw canceledError;
-        }
-
-        console.error(`${logPrefix} generation failed`);
-        throw new Error(result.errorMessage);
-      }
-
-      if (selection.provider === 'antigravity') {
-        let manifest = result.manifest ?? null;
-        if (manifest) {
-          if (CODEX_DEEP_TRACE_ENABLED) {
-            console.info(`${logPrefix} manifest sourced from stdout`);
-          }
-          await fsp.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
-        } else {
-          await fsp.access(manifestPath);
-          if (CODEX_DEEP_TRACE_ENABLED) {
-            console.info(`${logPrefix} manifest sourced from disk`);
-          }
-          manifest = parseGenerationManifest(await fsp.readFile(manifestPath, 'utf8'));
-        }
-        console.info(`${logPrefix} manifest contains ${manifest.images.length} image(s)`);
-
-        for (const image of manifest.images) {
-          const assetId = nanoid();
-          const imported = await importGeneratedImage({
-            assetId,
-            sourcePath: image.path,
-            generatedImagesDir: paths.generatedImagesDir,
-            createdAt: new Date().toISOString(),
-          });
-
-          const assetRecord = {
-            id: assetId,
-            jobId,
-            originalPath: image.path,
-            storedPath: imported.storedPath,
-            fileName: imported.fileName,
-            mimeType: imported.mimeType,
-            width: null,
-            height: null,
-            providerImageId: null,
-            outputIndex: null,
-            reviewStatus: null,
-            createdAt: imported.createdAt,
-          };
-
-          await db.insert(generatedAssetsTable).values(assetRecord);
-          assetRecords.push(assetRecord);
-          console.info(`${logPrefix} imported asset: ${imported.storedPath}`);
-        }
-      } else if (assetRecords.length === 0) {
-        throw new Error(result.errorMessage ?? 'Codex completed without accepting any generated images.');
-      }
-
-      const durationMs = Date.now() - startedAtMs;
-      await upsertJob({
-        id: jobId,
-        threadId,
-        prompt,
-        requestedCount: count,
-        status: 'succeeded',
-        workingDirectory,
-        manifestPath,
-        errorMessage: null,
-        provider: selection.provider,
-        modelId: selection.modelId,
-        modelLabel: selection.modelLabel,
-        referenceImagesJson,
-        durationMs,
-        providerThreadId: result.providerThreadId ?? null,
-        providerTurnId: result.providerTurnId ?? null,
-        runtime: selection.provider === 'codex' ? 'codex-app-server' : 'antigravity-cli',
-        importedCount: assetRecords.length,
-        createdAt: timestamp,
-        updatedAt: new Date().toISOString(),
+      const previousStoredPath = decodeGeneratedAssetStoredPath(existingAsset.fileUrl);
+      const imported = await writeImportedAssetBuffer({
+        buffer: sourceBuffer,
+        assetId: existingAsset.id,
+        fileName: path.basename(update.savedPath),
+        mimeType,
+        generatedImagesDir: paths.generatedImagesDir,
       });
 
-      console.info(`${logPrefix} generation succeeded`);
+      if (previousStoredPath && previousStoredPath !== imported.storedPath) {
+        await fsp.rm(previousStoredPath, { force: true }).catch(() => {});
+      }
+
+      await db
+        .update(generatedAssetsTable)
+        .set({
+          originalPath: update.savedPath,
+          storedPath: imported.storedPath,
+          fileName: imported.fileName,
+          mimeType,
+          providerImageId: update.providerImageId ?? null,
+          reviewStatus: update.isFinal ? 'accepted' : 'preview',
+          createdAt,
+        })
+        .where(eq(generatedAssetsTable.id, existingAsset.id));
+      console.info(`[crenv:generation] updated ${update.isFinal ? 'final' : 'preview'} asset`, {
+        jobId,
+        run: update.run,
+        assetId: existingAsset.id,
+        outputIndex,
+        storedPath: imported.storedPath,
+        providerImageId: update.providerImageId ?? null,
+      });
+
+      const rendererAsset = toRendererAsset({
+        id: existingAsset.id,
+        storedPath: imported.storedPath,
+        fileName: imported.fileName,
+        createdAt,
+        prompt: request.prompt ?? '',
+        provider,
+        modelId: imageModel.id,
+        modelLabel: imageModel.label,
+        referenceImagesJson: currentJob.referenceImagesJson,
+        durationMs: currentJob.durationMs,
+        outputIndex,
+      });
+      importedAssetsByRun.set(update.run, rendererAsset);
+      options.onImageReady?.({
+        jobId,
+        clientRunId: request.clientRunId ?? null,
+        threadId: request.threadId,
+        asset: rendererAsset,
+        providerThreadId: update.providerThreadId ?? currentJob.providerThreadId,
+        providerTurnId: update.providerTurnId ?? currentJob.providerTurnId,
+      });
+      await persistJobPatch({
+        importedCount: importedAssetsByRun.size,
+        providerThreadId: update.providerThreadId ?? currentJob.providerThreadId,
+        providerTurnId: update.providerTurnId ?? currentJob.providerTurnId,
+        ...toGenerationBenchmarkPatch(currentJob, update.benchmark),
+      });
+      return rendererAsset;
+    }
+
+    await upsertJob(pendingJob);
+
+    try {
+      const batch = await executeImageGenerationBatch({
+        workingDirectory,
+        outputDirectory,
+        artifactsDirectory,
+        model: imageModel.runtimeModel,
+        prompt: request.prompt ?? '',
+        count: pendingJob.requestedCount,
+        references: request.referenceImages ?? [],
+        onImageUpdated: upsertImportedAsset,
+      });
+
+      const successfulResults = batch.results.filter((result) => !result.failed && result.savedPath);
+      for (const result of successfulResults) {
+        if (!importedAssetsByRun.has(result.run)) {
+          await upsertImportedAsset({
+            run: result.run,
+            savedPath: result.savedPath,
+            isFinal: true,
+          });
+        }
+      }
+
+      const failedResults = batch.results.filter((result) => result.failed);
+
+      await persistJobPatch({
+        status: failedResults.length > 0 ? 'failed' : 'succeeded',
+        errorMessage:
+          failedResults.length > 0
+            ? failedResults.map((result) => `run ${result.run}: ${result.errorMessage || 'unknown failure'}`).join('; ')
+            : null,
+        durationMs: batch.wallClockMs,
+        importedCount: importedAssetsByRun.size,
+        ...batch.results.reduce(
+          (patch, result) => ({
+            ...patch,
+            ...toGenerationBenchmarkPatch({ ...currentJob, ...patch }, result.benchmark),
+          }),
+          {}
+        ),
+      });
+      console.info('[crenv:generation] image job completed', {
+        jobId,
+        status: failedResults.length > 0 ? 'failed' : 'succeeded',
+        importedCount: importedAssetsByRun.size,
+        failedRuns: failedResults.length,
+        durationMs: batch.wallClockMs,
+        references: references.length,
+      });
+
+      const importedAssets = successfulResults
+        .map((result) => {
+          const asset = importedAssetsByRun.get(result.run);
+          if (!asset) {
+            return null;
+          }
+          return {
+            ...asset,
+            durationMs: batch.wallClockMs,
+          };
+        })
+        .filter(Boolean);
+
+      if (failedResults.length > 0) {
+        throw new Error(
+          failedResults.map((result) => `run ${result.run}: ${result.errorMessage || 'unknown failure'}`).join('; ')
+        );
+      }
 
       return {
         jobId,
-        assets: assetRecords.map((assetRecord) =>
-          toRendererAsset({
-            ...assetRecord,
-            prompt,
-            provider: selection.provider,
-            modelId: selection.modelId,
-            modelLabel: selection.modelLabel,
-            referenceImagesJson,
-            durationMs,
-          })
-        ),
+        assets: importedAssets,
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      await upsertJob({
-        id: jobId,
-        threadId,
-        prompt,
-        requestedCount: count,
+      await persistJobPatch({
         status: 'failed',
-        workingDirectory,
-        manifestPath,
         errorMessage,
-        provider: selection.provider,
-        modelId: selection.modelId,
-        modelLabel: selection.modelLabel,
-        referenceImagesJson,
-        durationMs: Date.now() - startedAtMs,
-        createdAt: timestamp,
-        updatedAt: new Date().toISOString(),
+      });
+      console.info('[crenv:generation] image job failed', {
+        jobId,
+        error: errorMessage,
       });
       throw error;
     }
@@ -4483,7 +4075,7 @@ function mapReferenceCollectionAttachment({
       sceneGroupId: sceneGroup.id,
       threadId: sceneGroup.threadId,
       status: 'succeeded',
-      provider: 'codex',
+      provider: 'api',
       modelId: 'clipboard',
       modelLabel: 'Clipboard',
       requestedFrameCount: 1,
@@ -4511,236 +4103,8 @@ function mapReferenceCollectionAttachment({
     return details.find((item) => item.id === sceneGroup.id) ?? null;
   }
 
-  async function generateSceneGroup(input) {
-    const sceneGroupId = typeof input === 'string' ? input : input?.sceneGroupId;
-    const targetFrameId =
-      typeof input?.targetFrameId === 'string' && input.targetFrameId.trim() ? input.targetFrameId.trim() : null;
-    const promptOverride = typeof input?.promptOverride === 'string' ? input.promptOverride : null;
-    const frameOverrideMap = new Map(
-      Array.isArray(input?.frameOverrides)
-        ? input.frameOverrides
-            .filter((frame) => frame && typeof frame.id === 'string')
-            .map((frame) => [frame.id, frame])
-        : []
-    );
-    const sceneReferenceImages = Array.isArray(input?.referenceImages) ? input.referenceImages : [];
-    const fastMode = input?.fastMode === true;
-    const onFrameReady = typeof input?.onFrameReady === 'function' ? input.onFrameReady : null;
-    const existing = await db.select().from(sceneGroupsTable).where(eq(sceneGroupsTable.id, sceneGroupId)).limit(1);
-    const sceneGroup = existing[0];
-    if (!sceneGroup) {
-      throw new Error('Scene group not found.');
-    }
-    const frames = await db
-      .select()
-      .from(sceneFramesTable)
-      .where(eq(sceneFramesTable.sceneGroupId, sceneGroupId))
-      .orderBy(sceneFramesTable.frameOrder, desc(sceneFramesTable.createdAt), desc(sceneFramesTable.id));
-
-    if (frames.length === 0) {
-      throw new Error('Scene group has no frames to generate.');
-    }
-    if (targetFrameId && !frames.some((frame) => frame.id === targetFrameId)) {
-      throw new Error('Target frame not found.');
-    }
-
-    const frameIds = frames.map((frame) => frame.id);
-    const persistedFrameReferences =
-      frameIds.length === 0
-        ? []
-        : await db
-            .select()
-            .from(sceneFrameReferencesTable)
-            .where(inArray(sceneFrameReferencesTable.sceneFrameId, frameIds))
-            .orderBy(desc(sceneFrameReferencesTable.createdAt), desc(sceneFrameReferencesTable.id));
-
-    const startedAtMs = Date.now();
-    const timestamp = new Date(startedAtMs).toISOString();
-    const runId = nanoid();
-    const modelId = DEFAULT_CODEX_MODEL_ID;
-    const modelLabel = `Codex / ${MODEL_LABEL_BY_ID[modelId]}`;
-
-    await db.insert(sceneGroupRunsTable).values({
-      id: runId,
-      sceneGroupId,
-      threadId: sceneGroup.threadId,
-      status: 'running',
-      provider: 'codex',
-      modelId: 'gpt-5.4-mini',
-      modelLabel,
-      requestedFrameCount: targetFrameId ? 1 : frames.length,
-      errorMessage: null,
-      durationMs: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    });
-
-    const referencesByFrameId = new Map();
-    for (const reference of persistedFrameReferences) {
-      const current = referencesByFrameId.get(reference.sceneFrameId) ?? [];
-      current.push(reference);
-      referencesByFrameId.set(reference.sceneFrameId, current);
-    }
-
-    for (const frame of frames) {
-      const override = frameOverrideMap.get(frame.id);
-      if (!Array.isArray(override?.references)) {
-        continue;
-      }
-      referencesByFrameId.set(
-        frame.id,
-        override.references.map((reference) => ({
-          sceneFrameId: frame.id,
-          ...reference,
-        }))
-      );
-    }
-
-    const tasks = buildSceneFrameGenerationTasks({
-      sceneGroupTitle: sceneGroup.title,
-      scenePrompt: promptOverride || sceneGroup.prompt,
-      frames,
-      targetFrameId,
-      frameOverrideMap,
-      referencesByFrameId,
-      sceneReferenceImages,
-    });
-    const completedFrameIds = new Set();
-    const reportFrameReady = async (frameId) => {
-      if (!onFrameReady || completedFrameIds.has(frameId)) {
-        return;
-      }
-      completedFrameIds.add(frameId);
-      await onFrameReady({
-        sceneGroupId,
-        frameId,
-        generated: completedFrameIds.size,
-        total: tasks.length,
-      });
-    };
-
-    try {
-      const sceneFrameConcurrency = resolveSceneFrameConcurrencyLimit(tasks.length);
-      console.info(
-        `[crenv:scene:${sceneGroupId}] generating ${tasks.length} frame(s) with concurrency=${sceneFrameConcurrency}`
-      );
-      const settledResults = await runWithConcurrencyLimit(
-        tasks,
-        sceneFrameConcurrency,
-        async (task) => {
-          const registeredAssetIds = new Set();
-          try {
-            const result = await generateImages({
-              prompt: task.prompt,
-              count: 1,
-              threadId: sceneGroup.threadId,
-              mode: 'scene',
-              provider: 'codex',
-              modelId,
-              referenceImages: task.referenceImages,
-              fastMode,
-              onCancelableRun: (cancelableRun) => {
-                registerSceneGroupCancelableRun(activeSceneGroupCancellations, sceneGroupId, cancelableRun);
-              },
-              onImageReady: async (payload) => {
-                const generatedAsset = await getGeneratedImage(payload.asset.id);
-                if (!generatedAsset || registeredAssetIds.has(generatedAsset.id)) {
-                  return;
-                }
-                registeredAssetIds.add(generatedAsset.id);
-                await db.insert(sceneFrameAssetsTable).values({
-                  id: nanoid(),
-                  sceneGroupRunId: runId,
-                  sceneFrameId: task.frameId,
-                  outputIndex: payload.asset.outputIndex ?? registeredAssetIds.size - 1,
-                  originalPath: generatedAsset.originalPath,
-                  storedPath: generatedAsset.storedPath,
-                  fileName: generatedAsset.fileName,
-                  mimeType: generatedAsset.mimeType,
-                  width: generatedAsset.width ?? null,
-                  height: generatedAsset.height ?? null,
-                  createdAt: generatedAsset.createdAt,
-                });
-                options.onSceneFrameReady?.({
-                  threadId: sceneGroup.threadId,
-                  sceneGroupId,
-                  frameId: task.frameId,
-                });
-                await reportFrameReady(task.frameId);
-              },
-            });
-            return { status: 'fulfilled', value: { task, result, registeredAssetIds } };
-          } catch (reason) {
-            return { status: 'rejected', reason };
-          }
-        }
-      );
-
-      const firstRejected = settledResults.find((result) => result.status === 'rejected');
-      if (firstRejected) {
-        cancelSceneGroupCancelableRuns(activeSceneGroupCancellations, sceneGroupId, 'peer_failed_scene_generation');
-        throw firstRejected.reason;
-      }
-
-      for (const settledResult of settledResults) {
-        const { task, result, registeredAssetIds } = settledResult.value;
-        for (const [index, asset] of result.assets.entries()) {
-          if (registeredAssetIds.has(asset.id)) {
-            continue;
-          }
-          const generatedAsset = await getGeneratedImage(asset.id);
-          if (!generatedAsset) {
-            continue;
-          }
-
-          await db.insert(sceneFrameAssetsTable).values({
-            id: nanoid(),
-            sceneGroupRunId: runId,
-            sceneFrameId: task.frameId,
-            outputIndex: index,
-            originalPath: generatedAsset.originalPath,
-            storedPath: generatedAsset.storedPath,
-            fileName: generatedAsset.fileName,
-            mimeType: generatedAsset.mimeType,
-            width: generatedAsset.width ?? null,
-            height: generatedAsset.height ?? null,
-            createdAt: generatedAsset.createdAt,
-          });
-        }
-
-          options.onSceneFrameReady?.({
-            threadId: sceneGroup.threadId,
-            sceneGroupId,
-            frameId: task.frameId,
-          });
-          await reportFrameReady(task.frameId);
-      }
-
-      await db
-        .update(sceneGroupRunsTable)
-        .set({
-          status: 'succeeded',
-          durationMs: Date.now() - startedAtMs,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(sceneGroupRunsTable.id, runId));
-    } catch (error) {
-      await db
-        .update(sceneGroupRunsTable)
-        .set({
-          status: 'failed',
-          errorMessage: error instanceof Error ? error.message : String(error),
-          durationMs: Date.now() - startedAtMs,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(sceneGroupRunsTable.id, runId));
-      throw error;
-    } finally {
-      activeSceneGroupCancellations.delete(sceneGroupId);
-    }
-
-    const sceneGroups = await listSceneGroups(sceneGroup.threadId);
-    return sceneGroups.find((item) => item.id === sceneGroupId) ?? null;
+  async function generateSceneGroup() {
+    throw new Error('Scene generation backend is not configured yet.');
   }
 
   async function cancelSceneGroupGeneration(sceneGroupId) {
@@ -4752,457 +4116,12 @@ function mapReferenceCollectionAttachment({
     return cancelSceneGroupCancelableRuns(activeSceneGroupCancellations, sceneGroupId);
   }
 
-  async function structureScenePrompt(input) {
-    const sourceText = typeof input?.sourceText === 'string' ? input.sourceText.trim() : '';
-    const selection = resolveGenerationSelection('codex', input?.modelId ?? DEFAULT_CODEX_MODEL_ID);
-
-    if (!sourceText) {
-      throw new Error('Clipboard is empty.');
-    }
-
-    const jobId = nanoid();
-    const workingDirectory = resolveJobWorkingDirectory({
-      provider: 'codex',
-      jobId,
-      codexJobsTempDir: paths.codexJobsTempDir,
-    });
-
-    await fsp.mkdir(workingDirectory, { recursive: true });
-
-    const result = await runCodexStructuredOutputJob({
-      jobId,
-      workingDirectory,
-      prompt: buildCodexSceneStructuringPrompt(sourceText),
-      model: selection.codexModel,
-    });
-
-    if (!result.success) {
-      throw new Error(result.errorMessage);
-    }
-
-    const parsed = parseStructuredJsonObject(result.output);
-    const sceneDescription =
-      typeof parsed?.sceneDescription === 'string' ? parsed.sceneDescription.trim() : '';
-    const frames = Array.isArray(parsed?.frames)
-      ? parsed.frames
-          .filter((frame) => frame && typeof frame.prompt === 'string')
-          .map((frame) => ({ prompt: frame.prompt.trim() }))
-          .filter((frame) => frame.prompt.length > 0)
-      : [];
-
-    if (!sceneDescription || frames.length === 0) {
-      throw new Error('Codex returned an incomplete scene breakdown.');
-    }
-
-    return {
-      sceneDescription,
-      frames,
-    };
+  async function structureScenePrompt() {
+    throw new Error('Scene structuring backend is not configured yet.');
   }
 
-  async function describeReferenceCollection(input) {
-    const attachments = Array.isArray(input?.attachments) ? input.attachments : [];
-    if (attachments.length === 0) {
-      throw new Error('Reference description generation requires at least one image.');
-    }
-
-    const category = normalizeReferenceCollectionCategory(input?.category);
-    const selection = resolveGenerationSelection('codex', DEFAULT_CODEX_MODEL_ID);
-    const jobId = nanoid();
-    const workingDirectory = resolveJobWorkingDirectory({
-      provider: 'codex',
-      jobId,
-      codexJobsTempDir: paths.codexJobsTempDir,
-    });
-
-    await fsp.mkdir(workingDirectory, { recursive: true });
-
-    const stagedAttachments = await Promise.all(
-      attachments.map(async (attachment, index) => {
-        const extension = attachment.mimeType === 'image/jpeg' ? '.jpg' : '.png';
-        const filePath = path.join(workingDirectory, `${attachment.id || `attachment-${index + 1}`}${extension}`);
-        await fsp.writeFile(filePath, Buffer.from(attachment.bytesBase64, 'base64'));
-        return {
-          id: attachment.id,
-          path: filePath,
-        };
-      })
-    );
-
-    const result = await runCodexStructuredOutputJob({
-      jobId,
-      workingDirectory,
-      prompt: buildReferenceCollectionDescriptionPrompt({
-        category,
-        title: typeof input?.title === 'string' ? input.title.trim() : '',
-        attachmentPaths: stagedAttachments,
-      }),
-      model: selection.codexModel,
-    });
-
-    if (!result.success) {
-      throw new Error(result.errorMessage);
-    }
-
-    const parsed = parseStructuredJsonObject(result.output);
-    const suggestedTitle = typeof parsed?.title === 'string' ? parsed.title.trim() : '';
-    const suggestedDescription = typeof parsed?.description === 'string' ? parsed.description.trim() : '';
-    const describedAttachments = Array.isArray(parsed?.attachments)
-      ? parsed.attachments
-          .filter((attachment) => attachment && typeof attachment.id === 'string' && typeof attachment.description === 'string')
-          .map((attachment) => ({
-            id: attachment.id,
-            description: attachment.description.trim(),
-          }))
-          .filter((attachment) => attachment.description.length > 0)
-      : [];
-
-    if (!suggestedTitle || !suggestedDescription) {
-      throw new Error('Codex returned an incomplete reference description result.');
-    }
-
-    return {
-      title: suggestedTitle,
-      description: suggestedDescription,
-      attachments: describedAttachments,
-    };
-  }
-
-  async function sendDirectorMessage(input) {
-    const chatId = typeof input?.chatId === 'string' ? input.chatId.trim() : '';
-    const threadId = typeof input?.threadId === 'string' ? input.threadId.trim() : '';
-    const prompt = typeof input?.prompt === 'string' ? input.prompt.trim() : '';
-
-    if (!chatId || !threadId || !prompt) {
-      throw new Error('Director chat requires chatId, threadId, and prompt.');
-    }
-
-    const [chat] = await db.select().from(directorChatsTable).where(eq(directorChatsTable.id, chatId)).limit(1);
-    if (!chat || chat.threadId !== threadId) {
-      throw new Error('Director chat not found.');
-    }
-
-    if (activeDirectorChatCancellations.has(chatId)) {
-      throw new Error('This Director chat is already generating.');
-    }
-
-    const [thread] = await db.select().from(threadsTable).where(eq(threadsTable.id, threadId)).limit(1);
-    const [project] = thread
-      ? await db.select().from(projectsTable).where(eq(projectsTable.id, thread.projectId)).limit(1)
-      : [];
-    const historyRows = await db
-      .select({
-        role: directorMessagesTable.role,
-        contentMarkdown: directorMessagesTable.contentMarkdown,
-        messageOrder: directorMessagesTable.messageOrder,
-        createdAt: directorMessagesTable.createdAt,
-        id: directorMessagesTable.id,
-      })
-      .from(directorMessagesTable)
-      .where(eq(directorMessagesTable.chatId, chatId))
-      .orderBy(directorMessagesTable.messageOrder, directorMessagesTable.createdAt, directorMessagesTable.id);
-
-    const selection = resolveGenerationSelection('codex', input?.modelId ?? DEFAULT_CODEX_MODEL_ID);
-    const resolvedModelId = selection.provider === 'codex' ? selection.modelId : DEFAULT_CODEX_MODEL_ID;
-    const resolvedModelLabel =
-      selection.provider === 'codex' ? selection.modelLabel : MODEL_LABEL_BY_ID[DEFAULT_CODEX_MODEL_ID];
-    const resolvedCodexModel =
-      selection.provider === 'codex' ? selection.codexModel : CODEX_MODEL_BY_ID[DEFAULT_CODEX_MODEL_ID];
-    const fastMode = input?.fastMode === true;
-    const referenceImages = Array.isArray(input?.referenceImages) ? input.referenceImages : [];
-    const referenceImagesJson = JSON.stringify(toGenerationReferenceSnapshot(referenceImages));
-    const timestamp = new Date().toISOString();
-    const nextMessageOrder = await getNextDirectorMessageOrder(chatId);
-    const userMessage = {
-      id: nanoid(),
-      chatId,
-      role: 'user',
-      contentMarkdown: prompt,
-      status: 'completed',
-      modelId: resolvedModelId,
-      modelLabel: resolvedModelLabel,
-      fastMode: fastMode ? 1 : 0,
-      referenceImagesJson,
-      messageOrder: nextMessageOrder,
-      providerTurnId: null,
-      providerItemId: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    const assistantMessage = {
-      id: nanoid(),
-      chatId,
-      role: 'assistant',
-      contentMarkdown: '',
-      status: 'streaming',
-      modelId: resolvedModelId,
-      modelLabel: resolvedModelLabel,
-      fastMode: fastMode ? 1 : 0,
-      referenceImagesJson,
-      messageOrder: nextMessageOrder + 1,
-      providerTurnId: null,
-      providerItemId: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-
-    await db.insert(directorMessagesTable).values([userMessage, assistantMessage]);
-    await db
-      .update(directorChatsTable)
-      .set({
-        title: chat.title === 'New chat' ? truncateDirectorChatTitle(prompt) : chat.title,
-        updatedAt: timestamp,
-      })
-      .where(eq(directorChatsTable.id, chatId));
-
-    const rendererReferenceMetadata = toGenerationReferenceMetadata(referenceImages);
-
-    options.onDirectorMessageStart?.({
-      threadId,
-      chatId,
-      userMessage: toRendererDirectorMessage(userMessage, rendererReferenceMetadata),
-      assistantMessage: toRendererDirectorMessage(assistantMessage, rendererReferenceMetadata),
-    });
-
-    const jobId = nanoid();
-    const workingDirectory = resolveJobWorkingDirectory({
-      provider: 'codex',
-      jobId,
-      codexJobsTempDir: paths.codexJobsTempDir,
-    });
-
-    await fsp.mkdir(workingDirectory, { recursive: true });
-    const stagedReferenceImages = await stageReferenceImages({
-      workingDirectory,
-      referenceImages,
-    });
-    const currentSceneGroups = await listSceneGroupOutlines(threadId);
-    const promptText = buildDirectorChatPrompt({
-      projectName: project?.name ?? '',
-      threadName: thread?.name ?? '',
-      systemInstructions: project?.systemInstructions ?? '',
-      artStyle: project?.artStyle ?? '',
-      sceneGroups: currentSceneGroups,
-      history: historyRows.map((message) => ({
-        role: message.role,
-        contentMarkdown: message.contentMarkdown,
-      })),
-      referenceImages: stagedReferenceImages,
-      userPrompt: prompt,
-    });
-
-    void runDirectorChatCompletion({
-      activeDirectorChatCancellations,
-      assistantMessageId: assistantMessage.id,
-      chatId,
-      threadId,
-      fastMode,
-      jobId,
-      model: resolvedCodexModel,
-      prompt: promptText,
-      providerThreadId: chat.providerThreadId ?? null,
-      referenceImages,
-      workingDirectory,
-    });
-
-    const chats = await listDirectorChats(threadId);
-    return {
-      chat: chats.find((item) => item.id === chatId) ?? null,
-      userMessage: toRendererDirectorMessage(userMessage, rendererReferenceMetadata),
-      assistantMessage: toRendererDirectorMessage(assistantMessage, rendererReferenceMetadata),
-    };
-  }
-
-  async function runDirectorChatCompletion({
-    activeDirectorChatCancellations,
-    assistantMessageId,
-    chatId,
-    threadId,
-    fastMode,
-    model,
-    prompt,
-    providerThreadId,
-    referenceImages = [],
-    workingDirectory,
-  }) {
-    let pendingDirectorDelta = null;
-    let directorDeltaPersistTimer = null;
-    let directorDeltaPersistPromise = Promise.resolve();
-
-    async function flushDirectorDeltaPersist() {
-      const pendingDelta = pendingDirectorDelta;
-      if (!pendingDelta) {
-        return;
-      }
-      pendingDirectorDelta = null;
-      const updatedAt = new Date().toISOString();
-      await Promise.all([
-        db
-          .update(directorMessagesTable)
-          .set({
-            contentMarkdown: pendingDelta.aggregate,
-            providerTurnId: pendingDelta.providerTurnId,
-            providerItemId: pendingDelta.itemId,
-            updatedAt,
-          })
-          .where(eq(directorMessagesTable.id, assistantMessageId)),
-        db.update(directorChatsTable).set({ updatedAt }).where(eq(directorChatsTable.id, chatId)),
-      ]);
-    }
-
-    function scheduleDirectorDeltaPersist() {
-      if (directorDeltaPersistTimer) {
-        return;
-      }
-      directorDeltaPersistTimer = setTimeout(() => {
-        directorDeltaPersistTimer = null;
-        directorDeltaPersistPromise = directorDeltaPersistPromise
-          .then(() => flushDirectorDeltaPersist())
-          .catch((error) => {
-            console.error(`[crenv:director:${chatId}] failed to persist stream delta: ${error.message}`);
-          });
-      }, DIRECTOR_DELTA_PERSIST_INTERVAL_MS);
-      directorDeltaPersistTimer.unref?.();
-    }
-
-    async function drainDirectorDeltaPersist() {
-      if (directorDeltaPersistTimer) {
-        clearTimeout(directorDeltaPersistTimer);
-        directorDeltaPersistTimer = null;
-      }
-      await directorDeltaPersistPromise;
-      await flushDirectorDeltaPersist();
-    }
-
-    try {
-      let activeProviderThreadId = providerThreadId;
-      const result = await runDirectorAppServerTurn({
-        client: codexAppServerClient,
-        providerThreadId,
-        cwd: workingDirectory,
-        prompt,
-        model,
-        fastMode,
-        async onProviderThread(nextProviderThreadId) {
-          activeProviderThreadId = nextProviderThreadId;
-          await db
-            .update(directorChatsTable)
-            .set({
-              providerThreadId: nextProviderThreadId,
-              providerRuntime: 'codex-app-server',
-              updatedAt: new Date().toISOString(),
-            })
-            .where(eq(directorChatsTable.id, chatId));
-        },
-        async onTurnStarted(providerTurnId) {
-          const updatedAt = new Date().toISOString();
-          await db
-            .update(directorMessagesTable)
-            .set({
-              providerTurnId,
-              updatedAt,
-            })
-            .where(eq(directorMessagesTable.id, assistantMessageId));
-          activeDirectorChatCancellations.set(chatId, {
-            cancel(reason = 'user_requested') {
-              if (!activeProviderThreadId || !providerTurnId) {
-                return false;
-              }
-              void codexAppServerClient.interruptTurn(activeProviderThreadId, providerTurnId).catch((error) => {
-                console.error(`[crenv:director:${chatId}] failed to interrupt app-server turn (${reason}): ${error.message}`);
-              });
-              return true;
-            },
-          });
-        },
-        onDelta(delta, aggregate, metadata = {}) {
-          pendingDirectorDelta = {
-            aggregate,
-            providerTurnId: metadata.providerTurnId,
-            itemId: metadata.itemId,
-          };
-          scheduleDirectorDeltaPersist();
-          options.onDirectorMessageDelta?.({
-            threadId,
-            chatId,
-            messageId: assistantMessageId,
-            delta,
-            content: aggregate,
-          });
-        },
-      });
-
-      await drainDirectorDeltaPersist();
-      const updatedAt = new Date().toISOString();
-      await db
-        .update(directorMessagesTable)
-        .set({
-          contentMarkdown: result.output,
-          status: result.canceled ? 'failed' : result.success ? 'completed' : 'failed',
-          providerTurnId: result.providerTurnId,
-          updatedAt,
-        })
-        .where(eq(directorMessagesTable.id, assistantMessageId));
-      await db.update(directorChatsTable).set({ updatedAt }).where(eq(directorChatsTable.id, chatId));
-
-      if (result.success) {
-        options.onDirectorMessageComplete?.({
-          threadId,
-          chatId,
-          messageId: assistantMessageId,
-          content: result.output,
-        });
-      } else {
-        options.onDirectorMessageError?.({
-          threadId,
-          chatId,
-          messageId: assistantMessageId,
-          errorMessage: result.errorMessage ?? (result.canceled ? 'Director turn canceled.' : 'Director turn failed.'),
-          content: result.output,
-          canceled: result.canceled === true,
-        });
-      }
-    } catch (error) {
-      await drainDirectorDeltaPersist();
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const updatedAt = new Date().toISOString();
-      const [currentMessage] = await db
-        .select()
-        .from(directorMessagesTable)
-        .where(eq(directorMessagesTable.id, assistantMessageId))
-        .limit(1);
-      const content = currentMessage?.contentMarkdown ?? '';
-
-      await db
-        .update(directorMessagesTable)
-        .set({
-          status: 'failed',
-          updatedAt,
-        })
-        .where(eq(directorMessagesTable.id, assistantMessageId));
-      await db.update(directorChatsTable).set({ updatedAt }).where(eq(directorChatsTable.id, chatId));
-      options.onDirectorMessageError?.({
-        threadId,
-        chatId,
-        messageId: assistantMessageId,
-        errorMessage,
-        content,
-        canceled: false,
-      });
-    } finally {
-      if (directorDeltaPersistTimer) {
-        clearTimeout(directorDeltaPersistTimer);
-      }
-      activeDirectorChatCancellations.delete(chatId);
-    }
-  }
-
-  async function cancelDirectorChat(chatId) {
-    const activeRun = activeDirectorChatCancellations.get(chatId);
-    if (!activeRun) {
-      return false;
-    }
-    return activeRun.cancel('user_requested_director_stop') === true;
+  async function describeReferenceCollection() {
+    throw new Error('Reference description backend is not configured yet.');
   }
 
   async function getGeneratedImage(imageId) {
@@ -5271,7 +4190,6 @@ function mapReferenceCollectionAttachment({
   }
 
   function close() {
-    codexAppServerClient.dispose?.();
     client.close();
   }
 
@@ -5303,12 +4221,15 @@ function mapReferenceCollectionAttachment({
     deleteDirectorChat,
     listDirectorMessages,
     sendDirectorMessage,
+    regenerateDirectorMessage,
     approveDirectorAction,
     declineDirectorAction,
     cancelDirectorChat,
     listProjectsWithThreads,
     listReferences,
+    listReferenceFolders,
     createReference,
+    createReferenceFolder,
     createEnvironmentReference,
     createReferenceCollection,
     updateReference,
@@ -5409,6 +4330,12 @@ function mapReferenceCollectionAttachment({
           durationMs: job.durationMs,
           providerThreadId: job.providerThreadId,
           providerTurnId: job.providerTurnId,
+          requestStartedAt: job.requestStartedAt,
+          firstEventAt: job.firstEventAt,
+          imageToolCallStartedAt: job.imageToolCallStartedAt,
+          imageToolGeneratingAt: job.imageToolGeneratingAt,
+          firstPartialImageAt: job.firstPartialImageAt,
+          completedAt: job.completedAt,
           runtime: job.runtime,
           importedCount: job.importedCount,
           createdAt: job.createdAt,
@@ -5492,7 +4419,7 @@ function mapReferenceCollectionAttachment({
     await Promise.all(
       assets.map((asset) =>
         fsp.rm(asset.storedPath, { force: true }).catch((error) => {
-          console.error(`[crenv:codex] failed to remove asset file ${asset.storedPath}: ${error.message}`);
+          console.error(`[crenv:generation] failed to remove asset file ${asset.storedPath}: ${error.message}`);
         })
       )
     );
@@ -5559,7 +4486,7 @@ async function ensureGenerationRuntimeColumns(db) {
   }
 
   if (!columnNames.has('runtime')) {
-    await db.run(sql.raw("ALTER TABLE generation_jobs ADD COLUMN runtime TEXT NOT NULL DEFAULT 'codex-app-server'"));
+    await db.run(sql.raw("ALTER TABLE generation_jobs ADD COLUMN runtime TEXT NOT NULL DEFAULT 'api-backend'"));
   }
 
   if (!columnNames.has('imported_count')) {
@@ -5567,6 +4494,48 @@ async function ensureGenerationRuntimeColumns(db) {
   }
 
   await db.run(sql.raw('CREATE INDEX IF NOT EXISTS generation_jobs_provider_thread_id_idx ON generation_jobs(provider_thread_id)'));
+}
+
+async function ensureGenerationBenchmarkColumns(db) {
+  const tableInfo = await db.all(sql.raw("PRAGMA table_info('generation_jobs')"));
+  const columnNames = new Set(tableInfo.map((column) => column.name));
+
+  if (!columnNames.has('request_started_at')) {
+    await db.run(sql.raw('ALTER TABLE generation_jobs ADD COLUMN request_started_at TEXT'));
+  }
+
+  if (!columnNames.has('first_event_at')) {
+    await db.run(sql.raw('ALTER TABLE generation_jobs ADD COLUMN first_event_at TEXT'));
+  }
+
+  if (!columnNames.has('image_tool_call_started_at')) {
+    await db.run(sql.raw('ALTER TABLE generation_jobs ADD COLUMN image_tool_call_started_at TEXT'));
+  }
+
+  if (!columnNames.has('image_tool_generating_at')) {
+    await db.run(sql.raw('ALTER TABLE generation_jobs ADD COLUMN image_tool_generating_at TEXT'));
+  }
+
+  if (!columnNames.has('first_partial_image_at')) {
+    await db.run(sql.raw('ALTER TABLE generation_jobs ADD COLUMN first_partial_image_at TEXT'));
+  }
+
+  if (!columnNames.has('completed_at')) {
+    await db.run(sql.raw('ALTER TABLE generation_jobs ADD COLUMN completed_at TEXT'));
+  }
+}
+
+async function failInterruptedGenerationJobs(db) {
+  const interruptedAt = new Date().toISOString();
+  await db
+    .update(generationJobsTable)
+    .set({
+      status: 'failed',
+      errorMessage: 'Image generation was interrupted when the app closed.',
+      completedAt: interruptedAt,
+      updatedAt: interruptedAt,
+    })
+    .where(eq(generationJobsTable.status, 'running'));
 }
 
 async function ensureGeneratedAssetProviderColumns(db) {
@@ -5601,7 +4570,7 @@ async function ensureDirectorRuntimeColumns(db) {
   }
 
   if (!chatColumns.has('provider_runtime')) {
-    await db.run(sql.raw("ALTER TABLE director_chats ADD COLUMN provider_runtime TEXT NOT NULL DEFAULT 'codex-app-server'"));
+    await db.run(sql.raw("ALTER TABLE director_chats ADD COLUMN provider_runtime TEXT NOT NULL DEFAULT 'api-backend'"));
   }
 
   const messageInfo = await db.all(sql.raw("PRAGMA table_info('director_messages')"));
@@ -5636,6 +4605,15 @@ async function backfillDirectorMessageOrder(db) {
     nextOrderByChatId.set(message.chat_id, nextOrder + 1);
     await db.run(sql.raw(`UPDATE director_messages SET message_order = ${nextOrder} WHERE id = '${escapeSqlLiteral(message.id)}' AND message_order IS NULL`));
   }
+}
+
+async function ensureStructuredDirectorMessagesTable(db) {
+  const tableInfo = await db.all(sql.raw("PRAGMA table_info('director_messages')"));
+  const columnNames = new Set(tableInfo.map((column) => column.name));
+  if (columnNames.has('content_markdown') || (columnNames.size > 0 && !columnNames.has('parts_json'))) {
+    await db.run(sql.raw('DROP TABLE director_messages'));
+  }
+  await db.run(sql.raw(CREATE_DIRECTOR_MESSAGES_TABLE_SQL));
 }
 
 async function ensureEnvironmentAttachmentDescriptionColumn(db) {
@@ -5676,6 +4654,22 @@ async function ensureEnvironmentAttachmentSectionColumn(db) {
       "UPDATE environment_reference_attachments SET section = 'angles' WHERE section IS NULL OR section NOT IN ('primary', 'angles')"
     )
   );
+}
+
+async function ensureReferenceFolderParentColumns(db) {
+  const tables = [
+    'character_reference_collections',
+    'object_reference_collections',
+    'environment_references',
+  ];
+
+  for (const tableName of tables) {
+    const tableInfo = await db.all(sql.raw(`PRAGMA table_info('${tableName}')`));
+    const columnNames = new Set(tableInfo.map((column) => column.name));
+    if (!columnNames.has('parent_folder_id')) {
+      await db.run(sql.raw(`ALTER TABLE ${tableName} ADD COLUMN parent_folder_id TEXT`));
+    }
+  }
 }
 
 async function ensureReferenceAttachmentTitleColumns(db) {
@@ -5729,7 +4723,7 @@ function toRendererAsset(asset) {
   return {
     id: asset.id,
     fileName: asset.fileName,
-    fileUrl: `crenv-asset://generated?path=${encodeURIComponent(asset.storedPath)}`,
+    fileUrl: `crenv-asset://generated?path=${encodeURIComponent(asset.storedPath)}&v=${encodeURIComponent(asset.createdAt)}`,
     createdAt: asset.createdAt,
     provider: asset.provider ?? null,
     modelId: asset.modelId ?? null,
@@ -5741,10 +4735,30 @@ function toRendererAsset(asset) {
   };
 }
 
+function decodeGeneratedAssetStoredPath(fileUrl) {
+  if (typeof fileUrl !== 'string' || !fileUrl) {
+    return null;
+  }
+
+  try {
+    const query = fileUrl.split('?', 2)[1] ?? '';
+    const params = new URLSearchParams(query);
+    const storedPath = params.get('path');
+    return storedPath ? decodeURIComponent(storedPath) : null;
+  } catch {
+    return null;
+  }
+}
+
 function toRendererDirectorMessage(message, references = []) {
-  const { referenceImagesJson: _referenceImagesJson, ...rendererMessage } = message;
+  const {
+    referenceImagesJson: _referenceImagesJson,
+    partsJson: _partsJson,
+    ...rendererMessage
+  } = message;
   return {
     ...rendererMessage,
+    parts: parseDirectorParts(message.partsJson),
     fastMode: Boolean(message.fastMode),
     references,
   };
@@ -5820,1106 +4834,6 @@ function parseGenerationReferenceMetadata(referenceImagesJson) {
   } catch {
     return [];
   }
-}
-
-function buildProviderImageGenerationPrompt(input, providerLabel, capabilityInstruction) {
-  const mode = input.mode ?? 'manual';
-
-  return [
-    `You are running inside a ${providerLabel} batch job for an Electron app.`,
-    capabilityInstruction,
-    `Generation mode: ${mode}`,
-    '',
-    `Creative prompt: ${input.userPrompt}`,
-    '',
-    IMAGE_PRODUCTION_GUIDANCE,
-    '',
-    ...(input.referenceImages.length > 0
-      ? [
-          'Reference image files:',
-          ...input.referenceImages.map((referenceImage) => {
-            const metadata = [
-              referenceImage.title ? `title: ${referenceImage.title}` : null,
-              referenceImage.description ? `description: ${referenceImage.description}` : null,
-            ].filter(Boolean);
-            return metadata.length > 0
-              ? `- ${referenceImage.path} (${metadata.join('; ')})`
-              : `- ${referenceImage.path}`;
-          }),
-          'Analyze all attached reference images before generating anything.',
-          'Decide the role of each reference image: exact edit target, scene anchor, subject anchor, style-only reference, or supporting mood/material reference.',
-          'If one or more references define the exact scene or asset to continue, preserve and extend that scene instead of inventing a different one.',
-          'If the references are only stylistic, material, or mood guidance, create a new asset that borrows those qualities without copying unrelated scene layout.',
-          'Use those reference images as visual guidance for composition, subject, color, materials, and mood when relevant.',
-          '',
-        ]
-      : []),
-    ...(mode === 'scene'
-      ? [
-          `The user requested at least ${input.imageCount} image file(s). Never create fewer than that.`,
-          'You may create more image files when useful, but never fewer.',
-          'Decide whether the scene already has a strong anchor from the prompt or references, or whether you should create a canonical master scene first.',
-          'If a master scene is useful, create it first and then derive additional views from it.',
-          'If existing references already define the scene strongly, reuse them as the anchor instead of creating a new master image.',
-          'Use the attached references to decide whether this is a continuation/edit of an existing scene or a fresh scene that only borrows style/material cues.',
-          'Preserve environment identity, materials, layout, lighting direction, palette, and spatial continuity whenever the request calls for the same scene.',
-          'Choose camera coverage yourself and hide explicit angle-selection logic from the final output behavior.',
-          'If you choose a scene-coverage workflow, the final output must contain at least 4 image files total.',
-          'Before generating final images, print exactly one single-line JSON object to stdout in this format:',
-          '{"type":"CRENV_SCENE_PLAN","count":6,"applyToShimmers":true}',
-          'Set count to the total number of final image files you plan to create.',
-          'Set applyToShimmers to true only when the UI should expand its loading shimmer placeholders to match count.',
-          'If the UI should keep the original placeholder count, emit applyToShimmers as false.',
-          'Print that JSON line directly to stdout yourself.',
-          'Do not use shell commands, exec, tool calls, or helper scripts to emit the scene plan.',
-          '',
-        ]
-      : mode === 'pinpoint'
-        ? [
-            'Create exactly 1 final image file.',
-            'Treat the first/source pinpoint reference as the primary scene anchor.',
-            'Interpret the selected point as the target location to zoom into or edit around.',
-            'Preserve the source image world, style, lighting, perspective, and continuity.',
-            input.pinPoint?.hasCharacterReferences
-              ? 'If character-sheet or subject references are attached, place or add that character naturally at the selected point while keeping the rest of the scene coherent.'
-              : 'If no character-sheet references are attached, create a coherent zoom-in, continuation, or localized edit around the selected point.',
-            input.pinPoint?.extraPrompt
-              ? `Use this extra pinpoint guidance when useful: ${input.pinPoint.extraPrompt}`
-              : 'There is no extra pinpoint guidance beyond the selected point and attached references.',
-            '',
-          ]
-        : mode === 'camera'
-          ? [
-              `Create exactly ${input.imageCount} final image file${input.imageCount === 1 ? '' : 's'}.`,
-              'Treat the first/source camera reference as the primary scene anchor.',
-              'Move the camera around the subject or scene; do not rotate the subject like a flat sticker.',
-              'Interpret rotation, tilt, and zoom as a physical 3D camera move around the scene, producing new perspective, parallax, occlusion, and visible side geometry.',
-              'Synthesize a true novel camera view using the source image as an identity, geometry, material, and lighting anchor.',
-              `Horizontal camera orbit/azimuth: ${input.camera?.rotationDeg ?? 0} degrees.`,
-              `Vertical camera tilt/elevation: ${input.camera?.tiltDeg ?? 0} degrees.`,
-              `Camera zoom/dolly value: ${input.camera?.zoom ?? 0}.`,
-              'Treat zoom as camera dolly or field-of-view change, not as a flat crop or resize of the original pixels.',
-              input.camera?.generateBestAngles
-                ? 'Generate a deterministic 12-angle camera lattice across orbit and tilt: 0°/0°, 45°/-30°, 45°/30°, 90°/0°, 135°/-30°, 135°/30°, 180°/0°, 225°/-30°, 225°/30°, 270°/0°, 315°/-30°, and 315°/30°. Treat each pair as orbit degrees / tilt degrees. Favor views that remain plausible and identity-consistent.'
-                : 'Generate one camera-adjusted image from the requested view.',
-              'Preserve subject identity, proportions, wardrobe, materials, lighting direction, palette, and environment continuity.',
-              'Keep the original source image aspect ratio, visual quality, resolution feel, and style.',
-              'Use the original source canvas proportions exactly; do not crop, stretch, rescale, letterbox, or switch to a requested output ratio.',
-              'Keep composition and framing as close as possible while changing only the requested camera perspective.',
-              'Do not satisfy the request by cropping, panning a flat image, warping the canvas, or simply tilting the existing picture plane.',
-              'Avoid stylistic re-rendering, quality downgrades, simplified detail, compression artifacts, or a different finish.',
-              'Do not add angle labels, numbering, captions, watermarks, UI overlays, or any text into the generated pixels.',
-              'For visible areas already present in the source, keep them materially consistent. For newly revealed areas, infer plausible geometry instead of redesigning the subject or scene.',
-              'Prefer small, coherent perspective changes over dramatic reinvention when the requested rotation or tilt is modest.',
-              'If the requested camera move is too large to know hidden geometry, make the unseen side plausible while keeping every visible identifier stable.',
-              '',
-            ]
-          : [`Create exactly ${input.imageCount} image file(s).`]),
-    `The output directory is: ${input.outputDirectory}`,
-    '',
-    buildCrenvImageReadyPromptContract({
-      jobId: input.jobId,
-      outputDirectory: input.outputDirectory,
-      requestedCount: input.imageCount,
-    }),
-    '',
-    'Rules:',
-    '- Generate image assets, not text descriptions.',
-    '- Save every final image file inside the output directory.',
-    '- Register each accepted image immediately with CRENV_IMAGE_READY. Do not wait until all images are complete.',
-    '- Do not write or rely on a final manifest file.',
-    '- Do not execute shell scripts, package scripts, build scripts, test scripts, or project automation during this run.',
-    '- Do not rely on prose output as the result contract except for the required CRENV_IMAGE_READY event lines.',
-  ].join('\n');
-}
-
-function buildCodexImageGenerationPrompt(input) {
-  return buildProviderImageGenerationPrompt(
-    input,
-    'Codex',
-    'Use Codex image generation capabilities to create image files for the following prompt.'
-  );
-}
-
-function buildCodexSceneStructuringPrompt(sourceText) {
-  return [
-    'You are restructuring a pasted scene document for an Electron app.',
-    'Return exactly one JSON object and nothing else.',
-    'Do not use markdown fences.',
-    'Do not call tools.',
-    'Do not run shell commands.',
-    'Extract the general scene description and every frame prompt from the pasted document.',
-    'Break the source into static image frames, not video instructions.',
-    'Each frame will later be used as a Seedance reference image.',
-    'Do not write camera movement, duration, animation, tracking, pan, or video-only instructions into frame prompts.',
-    'Describe the single frozen visual instant for each frame: composition, camera angle, shot size, environment zone, character identity, expression, pose, gesture, and visible props.',
-    'If the document contains both Portuguese and English versions, prefer the English frame prompts.',
-    'If the general scene description is only in Portuguese, translate it to English.',
-    'All output text must be in English.',
-    'Preserve character @mentions exactly when they appear.',
-    'Output JSON in this exact shape:',
-    '{"sceneDescription":"string","frames":[{"prompt":"string"}]}',
-    'Include one frames entry for each frame found in the source, in order.',
-    'If a frame title exists, do not output it separately; keep only the prompt text.',
-    '',
-    'Source document:',
-    sourceText,
-  ].join('\n');
-}
-
-function buildAntigravityImageGenerationPrompt(input) {
-  const mode = input.mode ?? 'manual';
-  const selectedModel =
-    input.antigravityModel ?? ANTIGRAVITY_MODEL_BY_ID[DEFAULT_ANTIGRAVITY_MODEL_ID];
-
-  return [
-    'You are running inside an Antigravity CLI print-mode batch job for an Electron app.',
-    'Use Antigravity\'s built-in image generation workflow to create raster image assets.',
-    'Use Nano Banana Pro for image generation.',
-    'Do not do software-engineering work, do not inspect unrelated project files, and do not edit code.',
-    `Selected Antigravity reasoning model: ${selectedModel}`,
-    `Generation mode: ${mode}`,
-    '',
-    `Creative prompt: ${input.userPrompt}`,
-    '',
-    IMAGE_PRODUCTION_GUIDANCE,
-    '',
-    ...(input.referenceImages.length > 0
-      ? [
-          'Reference image files:',
-          ...input.referenceImages.map((referenceImage) => {
-            const metadata = [
-              referenceImage.title ? `title: ${referenceImage.title}` : null,
-              referenceImage.description ? `description: ${referenceImage.description}` : null,
-            ].filter(Boolean);
-            return metadata.length > 0
-              ? `- ${referenceImage.path} (${metadata.join('; ')})`
-              : `- ${referenceImage.path}`;
-          }),
-          'Use only the listed reference image files as visual guidance when relevant.',
-          'Prefer the most relevant references for subject identity, composition, and style. Ignore unrelated references.',
-          '',
-        ]
-      : []),
-    ...(mode === 'scene'
-      ? [
-          `Create at least ${input.imageCount} final image file(s); never create fewer.`,
-          'If useful, create a canonical anchor image first and derive the remaining scene coverage from it.',
-          'Preserve scene continuity when references or the prompt define a stable environment.',
-          'If you decide to expand the visible output count, print one single-line JSON scene-plan object first in this exact format:',
-          '{"type":"CRENV_SCENE_PLAN","count":6,"applyToShimmers":true}',
-          '',
-        ]
-      : mode === 'pinpoint'
-        ? [
-            'Create exactly 1 final image file.',
-            'Treat the first pinpoint reference as the source scene anchor.',
-            'Focus on the selected point while preserving the surrounding scene continuity.',
-            input.pinPoint?.hasCharacterReferences
-              ? 'If character references are attached, place or add that character naturally at the selected point.'
-              : 'If no character references are attached, create a coherent zoom-in or localized continuation around the selected point.',
-            input.pinPoint?.extraPrompt
-              ? `Extra pinpoint guidance: ${input.pinPoint.extraPrompt}`
-              : null,
-            '',
-          ].filter(Boolean)
-        : mode === 'camera'
-          ? [
-              `Create exactly ${input.imageCount} final image file${input.imageCount === 1 ? '' : 's'}.`,
-              'Treat the first camera reference as the primary scene anchor.',
-              'Move the camera around the subject or scene; do not rotate the subject like a flat sticker.',
-              'Interpret rotation, tilt, and zoom as a physical 3D camera move around the scene, producing new perspective, parallax, occlusion, and visible side geometry.',
-              `Horizontal orbit: ${input.camera?.rotationDeg ?? 0} degrees.`,
-              `Vertical tilt: ${input.camera?.tiltDeg ?? 0} degrees.`,
-              `Zoom/dolly value: ${input.camera?.zoom ?? 0}.`,
-              'Treat zoom as camera dolly or field-of-view change, not as a flat crop or resize of the original pixels.',
-              input.camera?.generateBestAngles
-                ? 'Generate the requested best-angle lattice while keeping identity and materials stable.'
-                : 'Generate one camera-adjusted image from the requested view.',
-              'Preserve identity, materials, lighting direction, palette, and continuity.',
-              'Keep composition and framing as close as possible while changing only the requested camera perspective.',
-              'Do not satisfy the request by cropping, panning a flat image, warping the canvas, or simply tilting the existing picture plane.',
-              '',
-            ]
-          : [`Create exactly ${input.imageCount} final image file${input.imageCount === 1 ? '' : 's'}.`, '']),
-    `Save every final image file inside this output directory: ${input.outputDirectory}`,
-    '',
-    'After all image files exist on disk, print exactly one single-line JSON object to stdout in this shape and nothing else:',
-    '{"images":[{"path":"/absolute/path/to/generated-image.png"}]}',
-    '',
-    'Rules:',
-    '- Use only absolute paths in the JSON output.',
-    '- Include every generated image in the JSON output.',
-    '- Generate image assets, not prose descriptions.',
-    '- Do not read or modify unrelated files.',
-    '- Do not execute shell scripts, package scripts, build scripts, tests, or project automation.',
-  ].join('\n');
-}
-
-async function stageReferenceImages(input) {
-  if (!input.referenceImages.length) {
-    return [];
-  }
-
-  const referencesDirectory = path.join(input.workingDirectory, 'references');
-  await fsp.mkdir(referencesDirectory, { recursive: true });
-
-  return Promise.all(input.referenceImages.map(async (referenceImage, index) => {
-    const fileName = sanitizeReferenceImageFileName(referenceImage.name, referenceImage.mimeType, index);
-    const referenceImagePath = path.join(referencesDirectory, fileName);
-    await fsp.writeFile(referenceImagePath, Buffer.from(referenceImage.bytesBase64, 'base64'));
-    return {
-      path: referenceImagePath,
-      title: referenceImage.title,
-      description: referenceImage.description,
-    };
-  }));
-}
-
-function sanitizeReferenceImageFileName(name, mimeType, index) {
-  const rawBaseName = path.basename(name, path.extname(name));
-  const baseName =
-    rawBaseName
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '') || `reference-${index + 1}`;
-  const extension = path.extname(name).toLowerCase() || mimeTypeToExtension(mimeType);
-  return `${baseName}${extension}`;
-}
-
-function mimeTypeToExtension(mimeType) {
-  switch (mimeType) {
-    case 'image/jpeg':
-      return '.jpg';
-    case 'image/webp':
-      return '.webp';
-    case 'image/gif':
-      return '.gif';
-    default:
-      return '.png';
-  }
-}
-
-function parseGenerationManifest(manifestContent) {
-  const parsed = JSON.parse(manifestContent);
-  if (!Array.isArray(parsed.images) || parsed.images.length === 0) {
-    throw new Error('Manifest must include at least one generated image.');
-  }
-
-  return {
-    images: parsed.images.map((entry) => {
-      if (typeof entry.path !== 'string' || !path.isAbsolute(entry.path)) {
-        throw new Error('Manifest image paths must be absolute.');
-      }
-      return { path: entry.path };
-    }),
-  };
-}
-
-function parseStructuredJsonObject(outputText) {
-  const trimmed = outputText.trim();
-  if (!trimmed) {
-    throw new Error('Codex returned an empty response.');
-  }
-
-  try {
-    return JSON.parse(trimmed);
-  } catch {}
-
-  const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fencedMatch) {
-    return JSON.parse(fencedMatch[1].trim());
-  }
-
-  throw new Error('Codex did not return valid JSON.');
-}
-
-async function importGeneratedImage(input) {
-  const extension = path.extname(input.sourcePath).toLowerCase();
-  const mimeTypes = {
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.png': 'image/png',
-    '.webp': 'image/webp',
-  };
-  const mimeType = mimeTypes[extension];
-
-  if (!mimeType) {
-    throw new Error(`Unsupported image type: ${extension || 'unknown'}`);
-  }
-
-  const sourceStat = await fsp.stat(input.sourcePath);
-  if (!sourceStat.isFile()) {
-    throw new Error('Generated image path must point to a file.');
-  }
-
-  await fsp.mkdir(input.generatedImagesDir, { recursive: true });
-
-  const fileName = `${input.assetId}${extension}`;
-  const storedPath = path.join(input.generatedImagesDir, fileName);
-
-  await fsp.copyFile(input.sourcePath, storedPath);
-
-  return {
-    fileName,
-    storedPath,
-    mimeType,
-    createdAt: input.createdAt,
-  };
-}
-
-function buildCodexExecArgs({ model = CODEX_MODEL_BY_ID[DEFAULT_CODEX_MODEL_ID], fastMode = false } = {}) {
-  const args = ['--model', model, '--ask-for-approval', 'never'];
-
-  if (fastMode) {
-    args.push('-c', 'service_tier="fast"');
-    args.push('-c', 'features.fast_mode=true');
-  }
-
-  args.push('exec', '--sandbox', 'workspace-write', '--skip-git-repo-check', '-');
-
-  return args;
-}
-
-function buildAntigravityExecArgs({ logFilePath } = {}) {
-  const args = ['--dangerously-skip-permissions', '--print-timeout', '5m', '--print'];
-
-  if (logFilePath) {
-    args.splice(3, 0, '--log-file', logFilePath);
-  }
-
-  return args;
-}
-
-async function prepareAntigravityHomeDirectory({ workingDirectory, model }) {
-  const actualHomeDirectory = process.env.HOME;
-  const homeDirectory = path.join(workingDirectory, '.antigravity-home');
-  const targetCliDirectory = path.join(homeDirectory, '.gemini', 'antigravity-cli');
-  const targetConfigDirectory = path.join(homeDirectory, '.gemini', 'config');
-  const targetProjectsDirectory = path.join(targetConfigDirectory, 'projects');
-  const projectMarkerDirectory = path.join(workingDirectory, '.antigravitycli');
-  const projectId = randomUUID();
-  const projectPath = path.join(targetProjectsDirectory, `${projectId}.json`);
-  const projectMarkerPath = path.join(projectMarkerDirectory, `${projectId}.json`);
-  const logFilePath = path.join(workingDirectory, 'antigravity-cli.log');
-
-  await fsp.mkdir(targetCliDirectory, { recursive: true });
-  await fsp.mkdir(targetConfigDirectory, { recursive: true });
-  await fsp.mkdir(targetProjectsDirectory, { recursive: true });
-  await fsp.mkdir(projectMarkerDirectory, { recursive: true });
-
-  let sourceSettings = {};
-  if (actualHomeDirectory) {
-    const sourceCliDirectory = path.join(actualHomeDirectory, '.gemini', 'antigravity-cli');
-    const sourceSettingsPath = path.join(sourceCliDirectory, 'settings.json');
-
-    try {
-      sourceSettings = JSON.parse(await fsp.readFile(sourceSettingsPath, 'utf8'));
-    } catch {
-      sourceSettings = {};
-    }
-
-    for (const fileName of ['antigravity-oauth-token', 'installation_id', 'keybindings.json']) {
-      const sourcePath = path.join(sourceCliDirectory, fileName);
-      const targetPath = path.join(targetCliDirectory, fileName);
-      try {
-        await fsp.copyFile(sourcePath, targetPath);
-      } catch {
-        // Best-effort copy only. Missing files should not block the runner.
-      }
-    }
-  }
-
-  const sanitizedSettings = {
-    colorScheme:
-      typeof sourceSettings.colorScheme === 'string' ? sourceSettings.colorScheme : undefined,
-    enableTelemetry:
-      typeof sourceSettings.enableTelemetry === 'boolean' ? sourceSettings.enableTelemetry : false,
-    model,
-    trustedWorkspaces: [],
-  };
-
-  await fsp.writeFile(
-    path.join(targetCliDirectory, 'settings.json'),
-    JSON.stringify(sanitizedSettings, null, 2)
-  );
-  await fsp.writeFile(path.join(targetConfigDirectory, 'mcp_config.json'), '{}');
-  await fsp.writeFile(
-    projectPath,
-    JSON.stringify(
-      {
-        id: projectId,
-        name: workingDirectory,
-        projectResources: {
-          resources: [
-            {
-              gitFolder: {
-                folderUri: pathToFileURL(workingDirectory).href,
-                allowWrite: true,
-              },
-            },
-          ],
-        },
-      },
-      null,
-      2
-    )
-  );
-
-  try {
-    await fsp.symlink(projectPath, projectMarkerPath);
-  } catch (error) {
-    if (error.code !== 'EEXIST') {
-      throw error;
-    }
-  }
-
-  return {
-    homeDirectory,
-    logFilePath,
-    projectId,
-  };
-}
-
-function runCodexJob({
-  jobId,
-  clientRunId,
-  workingDirectory,
-  prompt,
-  requestedCount = 1,
-  threadId,
-  fastMode = false,
-  model,
-  onScenePlan,
-  onCancelableRun,
-}) {
-  return new Promise((resolve) => {
-    const logPrefix = `[crenv:codex:${jobId}]`;
-    const startedAtMs = Date.now();
-    const env = buildCodexSpawnEnv(workingDirectory);
-    const codexArgs = buildCodexExecArgs({ model, fastMode });
-
-    for (const directoryPath of [
-      env.XDG_CACHE_HOME,
-      env.XDG_CONFIG_HOME,
-      env.XDG_STATE_HOME,
-      env.TMPDIR,
-    ]) {
-      fs.mkdirSync(directoryPath, { recursive: true });
-    }
-
-    const child = spawn('codex', codexArgs, {
-      cwd: workingDirectory,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stdoutLineBuffer = '';
-    let stderr = '';
-    let hasDispatchedScenePlan = false;
-    let cancellationRequested = false;
-    let firstStdoutAtMs = null;
-    let firstStderrAtMs = null;
-
-    console.info(`${logPrefix} spawn: codex ${codexArgs.join(' ')}`);
-    console.info(`${logPrefix} cwd: ${workingDirectory}`);
-    console.info(`${logPrefix} pid: ${child.pid ?? 'unknown'}`);
-    onCancelableRun?.({
-      jobId,
-      cancel(reason = 'user_requested') {
-        if (child.exitCode !== null || child.killed) {
-          return false;
-        }
-
-        cancellationRequested = true;
-        console.warn(`${logPrefix} cancel requested (${reason}) ${formatTraceElapsedMs(startedAtMs)}`);
-        child.kill('SIGTERM');
-        setTimeout(() => {
-          if (child.exitCode === null && !child.killed) {
-            console.warn(`${logPrefix} cancel escalation: SIGKILL ${formatTraceElapsedMs(startedAtMs)}`);
-            child.kill('SIGKILL');
-          }
-        }, CANCEL_EXIT_GRACE_MS).unref();
-        return true;
-      },
-    });
-
-    child.stdout.on('data', (chunk) => {
-      const text = chunk.toString();
-      if (firstStdoutAtMs === null) {
-        firstStdoutAtMs = Date.now();
-        console.info(`${logPrefix} first stdout ${formatTraceElapsedMs(startedAtMs)}`);
-      }
-      if (CODEX_DEEP_TRACE_ENABLED) {
-        console.info(`${logPrefix} stdout chunk (${text.length} chars) ${formatTraceElapsedMs(startedAtMs)}`);
-      }
-      stdoutLineBuffer += text;
-      const lines = stdoutLineBuffer.split('\n');
-      stdoutLineBuffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        processStdoutLine(line);
-      }
-    });
-
-    child.stderr.on('data', (chunk) => {
-      const text = chunk.toString();
-      if (firstStderrAtMs === null) {
-        firstStderrAtMs = Date.now();
-        console.info(`${logPrefix} first stderr ${formatTraceElapsedMs(startedAtMs)}`);
-      }
-      if (CODEX_DEEP_TRACE_ENABLED) {
-        console.info(`${logPrefix} stderr chunk (${text.length} chars) ${formatTraceElapsedMs(startedAtMs)}`);
-      }
-      stderr += text;
-      for (const line of text.split('\n')) {
-        if (line.trim()) {
-          processPotentialScenePlan(line);
-          const traceKind = classifyCodexTraceLine(line);
-          console.error(`${logPrefix} stderr:${traceKind}: ${line}`);
-        }
-      }
-    });
-
-    child.on('error', (error) => {
-      console.error(`${logPrefix} process error ${formatTraceElapsedMs(startedAtMs)}: ${error.message}`);
-      resolve({
-        success: false,
-        errorMessage: error.code === 'ENOENT' ? 'Codex CLI is not installed.' : error.message,
-      });
-    });
-
-    child.on('close', (code, signal) => {
-      if (stdoutLineBuffer.trim()) {
-        processStdoutLine(stdoutLineBuffer);
-      }
-
-      if (code === 0) {
-        console.info(`${logPrefix} process exited successfully ${formatTraceElapsedMs(startedAtMs)}`);
-        resolve({ success: true });
-        return;
-      }
-
-      if (cancellationRequested) {
-        console.warn(`${logPrefix} process canceled ${formatTraceElapsedMs(startedAtMs)} signal=${signal ?? 'none'}`);
-        resolve({
-          success: false,
-          canceled: true,
-          errorMessage: 'Generation canceled.',
-        });
-        return;
-      }
-
-      const errorMessage = stderr.trim() || stdout.trim() || `Codex exited with code ${code}.`;
-      console.error(`${logPrefix} process exited with code ${code} ${formatTraceElapsedMs(startedAtMs)}`);
-      resolve({
-        success: false,
-        errorMessage,
-      });
-    });
-
-    child.stdin.write(prompt);
-    child.stdin.end();
-    console.info(`${logPrefix} stdin:end ${formatTraceElapsedMs(startedAtMs)}`);
-
-    function processStdoutLine(line) {
-      const trimmedLine = line.trim();
-      if (!trimmedLine) {
-        return;
-      }
-
-      if (processPotentialScenePlan(trimmedLine)) {
-        return;
-      }
-
-      stdout += `${line}\n`;
-      const traceKind = classifyCodexTraceLine(line);
-      console.info(`${logPrefix} stdout:${traceKind}: ${line}`);
-    }
-
-    function processPotentialScenePlan(line) {
-      if (hasDispatchedScenePlan) {
-        return false;
-      }
-
-      const scenePlan = parseScenePlanLine(line.trim());
-      if (!scenePlan) {
-        return false;
-      }
-
-      hasDispatchedScenePlan = true;
-      const plannedCount = Math.max(requestedCount, scenePlan.count);
-      onScenePlan?.({
-        jobId,
-        clientRunId,
-        threadId,
-        count: plannedCount,
-        applyToShimmers: scenePlan.applyToShimmers,
-      });
-      console.info(`${logPrefix} scene plan: ${JSON.stringify({ ...scenePlan, count: plannedCount })}`);
-      return true;
-    }
-  });
-}
-
-function runCodexTextStreamJob({
-  jobId,
-  workingDirectory,
-  prompt,
-  fastMode = false,
-  model,
-  onCancelableRun,
-  onDelta,
-}) {
-  return new Promise((resolve) => {
-    const logPrefix = `[crenv:codex:${jobId}:director]`;
-    const startedAtMs = Date.now();
-    const env = buildCodexSpawnEnv(workingDirectory);
-    const codexArgs = buildCodexExecArgs({ model, fastMode });
-
-    for (const directoryPath of [env.XDG_CACHE_HOME, env.XDG_CONFIG_HOME, env.XDG_STATE_HOME, env.TMPDIR]) {
-      fs.mkdirSync(directoryPath, { recursive: true });
-    }
-
-    const child = spawn('codex', codexArgs, {
-      cwd: workingDirectory,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let output = '';
-    let stderr = '';
-    let cancellationRequested = false;
-
-    console.info(`${logPrefix} spawn: codex ${codexArgs.join(' ')}`);
-    onCancelableRun?.({
-      jobId,
-      cancel(reason = 'user_requested') {
-        if (child.exitCode !== null || child.killed) {
-          return false;
-        }
-
-        cancellationRequested = true;
-        console.warn(`${logPrefix} cancel requested (${reason}) ${formatTraceElapsedMs(startedAtMs)}`);
-        child.kill('SIGTERM');
-        setTimeout(() => {
-          if (child.exitCode === null && !child.killed) {
-            child.kill('SIGKILL');
-          }
-        }, CANCEL_EXIT_GRACE_MS).unref();
-        return true;
-      },
-    });
-
-    child.stdout.on('data', (chunk) => {
-      const text = chunk.toString();
-      if (!text) return;
-      output += text;
-      onDelta?.(text, output);
-    });
-
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    child.on('error', (error) => {
-      resolve({
-        success: false,
-        output,
-        errorMessage: error.code === 'ENOENT' ? 'Codex CLI is not installed.' : error.message,
-      });
-    });
-
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolve({
-          success: true,
-          output,
-        });
-        return;
-      }
-
-      if (cancellationRequested) {
-        resolve({
-          success: false,
-          canceled: true,
-          output,
-          errorMessage: 'Director chat canceled.',
-        });
-        return;
-      }
-
-      resolve({
-        success: false,
-        output,
-        errorMessage: stderr.trim() || output.trim() || `Codex exited with code ${code}.`,
-      });
-    });
-
-    child.stdin.write(prompt);
-    child.stdin.end();
-  });
-}
-
-function runCodexStructuredOutputJob({ jobId, workingDirectory, prompt, model }) {
-  return new Promise((resolve) => {
-    const logPrefix = `[crenv:codex:${jobId}]`;
-    const startedAtMs = Date.now();
-    const env = buildCodexSpawnEnv(workingDirectory);
-    const codexArgs = buildCodexExecArgs({ model, fastMode: false });
-
-    for (const directoryPath of [env.XDG_CACHE_HOME, env.XDG_CONFIG_HOME, env.XDG_STATE_HOME, env.TMPDIR]) {
-      fs.mkdirSync(directoryPath, { recursive: true });
-    }
-
-    const child = spawn('codex', codexArgs, {
-      cwd: workingDirectory,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stdoutLineBuffer = '';
-    let stderr = '';
-
-    console.info(`${logPrefix} structured spawn: codex ${codexArgs.join(' ')}`);
-    console.info(`${logPrefix} structured cwd: ${workingDirectory}`);
-    console.info(`${logPrefix} structured pid: ${child.pid ?? 'unknown'}`);
-
-    child.stdout.on('data', (chunk) => {
-      const text = chunk.toString();
-      stdout += text;
-      stdoutLineBuffer += text;
-      const lines = stdoutLineBuffer.split('\n');
-      stdoutLineBuffer = lines.pop() ?? '';
-
-      if (CODEX_DEEP_TRACE_ENABLED) {
-        console.info(`${logPrefix} structured stdout chunk (${text.length} chars) ${formatTraceElapsedMs(startedAtMs)}`);
-      }
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        console.info(`${logPrefix} structured stdout:${classifyCodexTraceLine(line)}: ${line}`);
-      }
-    });
-
-    child.stderr.on('data', (chunk) => {
-      const text = chunk.toString();
-      stderr += text;
-      if (CODEX_DEEP_TRACE_ENABLED) {
-        console.info(`${logPrefix} structured stderr chunk (${text.length} chars) ${formatTraceElapsedMs(startedAtMs)}`);
-      }
-      for (const line of text.split('\n')) {
-        if (!line.trim()) continue;
-        console.error(`${logPrefix} structured stderr:${classifyCodexTraceLine(line)}: ${line}`);
-      }
-    });
-
-    child.on('error', (error) => {
-      resolve({
-        success: false,
-        errorMessage: error.code === 'ENOENT' ? 'Codex CLI is not installed.' : error.message,
-      });
-    });
-
-    child.on('close', (code) => {
-      if (stdoutLineBuffer.trim()) {
-        console.info(
-          `${logPrefix} structured stdout:${classifyCodexTraceLine(stdoutLineBuffer)}: ${stdoutLineBuffer}`
-        );
-      }
-
-      if (code === 0) {
-        resolve({
-          success: true,
-          output: stdout,
-        });
-        return;
-      }
-
-      resolve({
-        success: false,
-        errorMessage: stderr.trim() || stdout.trim() || `Codex exited with code ${code}.`,
-      });
-    });
-
-    child.stdin.write(prompt);
-    child.stdin.end();
-  });
-}
-
-async function runAntigravityJob({
-  jobId,
-  clientRunId,
-  workingDirectory,
-  prompt,
-  requestedCount = 1,
-  threadId,
-  model,
-  onScenePlan,
-}) {
-  const profile = await prepareAntigravityHomeDirectory({
-    workingDirectory,
-    model,
-  });
-
-  return new Promise((resolve) => {
-    const logPrefix = `[crenv:antigravity:${jobId}]`;
-    const env = buildAntigravitySpawnEnv(workingDirectory, profile.homeDirectory);
-    const antigravityArgs = [...buildAntigravityExecArgs({ logFilePath: profile.logFilePath }), prompt];
-
-    for (const directoryPath of [
-      env.XDG_CACHE_HOME,
-      env.XDG_CONFIG_HOME,
-      env.XDG_STATE_HOME,
-      env.XDG_DATA_HOME,
-      env.TMPDIR,
-    ]) {
-      fs.mkdirSync(directoryPath, { recursive: true });
-    }
-
-    const stopLogTail = followAntigravityLogFile(profile.logFilePath, logPrefix);
-    const child = spawn('agy', antigravityArgs, {
-      cwd: workingDirectory,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stdoutLineBuffer = '';
-    let stderr = '';
-    let hasDispatchedScenePlan = false;
-    let manifest = null;
-
-    console.info(`${logPrefix} spawn: agy ${antigravityArgs.slice(0, -1).join(' ')}`);
-    console.info(`${logPrefix} cwd: ${workingDirectory}`);
-    console.info(`${logPrefix} logFile: ${profile.logFilePath}`);
-    console.info(`${logPrefix} projectId: ${profile.projectId}`);
-    console.info(`${logPrefix} selected reasoning model: ${model}`);
-
-    child.stdout.on('data', (chunk) => {
-      const text = chunk.toString();
-      stdoutLineBuffer += text;
-      const lines = stdoutLineBuffer.split('\n');
-      stdoutLineBuffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        processStdoutLine(line);
-      }
-    });
-
-    child.stderr.on('data', (chunk) => {
-      const text = chunk.toString();
-      stderr += text;
-      for (const line of text.split('\n')) {
-        if (line.trim()) {
-          processPotentialScenePlan(line);
-          console.error(`${logPrefix} stderr: ${line}`);
-        }
-      }
-    });
-
-    child.on('error', (error) => {
-      stopLogTail();
-      console.error(`${logPrefix} process error: ${error.message}`);
-      resolve({
-        success: false,
-        errorMessage: error.code === 'ENOENT' ? 'Antigravity CLI is not installed.' : error.message,
-      });
-    });
-
-    child.on('close', (code) => {
-      stopLogTail();
-      if (stdoutLineBuffer.trim()) {
-        processStdoutLine(stdoutLineBuffer);
-      }
-
-      const result = resolveAntigravityCloseResult({ code, manifest, stdout, stderr });
-
-      if (result.success) {
-        console.info(`${logPrefix} process exited successfully`);
-        resolve(result);
-        return;
-      }
-
-      console.error(`${logPrefix} process exited with code ${code}`);
-      resolve(result);
-    });
-
-    function processStdoutLine(line) {
-      const trimmedLine = line.trim();
-      if (!trimmedLine) {
-        return;
-      }
-
-      if (processPotentialScenePlan(trimmedLine)) {
-        return;
-      }
-
-      const manifestLine = parseImageManifestLine(trimmedLine);
-      if (manifestLine) {
-        manifest = manifestLine;
-      }
-
-      stdout += `${line}\n`;
-      console.info(`${logPrefix} stdout: ${line}`);
-    }
-
-    function processPotentialScenePlan(line) {
-      if (hasDispatchedScenePlan) {
-        return false;
-      }
-
-      const scenePlan = parseScenePlanLine(line.trim());
-      if (!scenePlan) {
-        return false;
-      }
-
-      hasDispatchedScenePlan = true;
-      const plannedCount = Math.max(requestedCount, scenePlan.count);
-      onScenePlan?.({
-        jobId,
-        clientRunId,
-        threadId,
-        count: plannedCount,
-        applyToShimmers: scenePlan.applyToShimmers,
-      });
-      console.info(`${logPrefix} scene plan: ${JSON.stringify({ ...scenePlan, count: plannedCount })}`);
-      return true;
-    }
-  });
-}
-
-function buildCodexSpawnEnv(
-  workingDirectory,
-  { env = process.env, homeDirectory = os.homedir() } = {}
-) {
-  const codexEnv = buildCodexAppServerSpawnEnv({ env, homeDirectory });
-  return {
-    ...codexEnv,
-    XDG_CACHE_HOME: path.join(workingDirectory, '.codex-cache'),
-    XDG_CONFIG_HOME: path.join(workingDirectory, '.codex-config'),
-    XDG_STATE_HOME: path.join(workingDirectory, '.codex-state'),
-    TMPDIR: path.join(workingDirectory, '.tmp'),
-  };
-}
-
-function buildAntigravitySpawnEnv(workingDirectory, homeDirectory) {
-  return {
-    ...process.env,
-    HOME: homeDirectory,
-    XDG_CACHE_HOME: path.join(workingDirectory, '.antigravity-cache'),
-    XDG_CONFIG_HOME: path.join(workingDirectory, '.antigravity-config'),
-    XDG_STATE_HOME: path.join(workingDirectory, '.antigravity-state'),
-    XDG_DATA_HOME: path.join(workingDirectory, '.antigravity-data'),
-    TMPDIR: path.join(workingDirectory, '.tmp'),
-  };
-}
-
-function followAntigravityLogFile(logFilePath, logPrefix) {
-  let offset = 0;
-  let stopped = false;
-  let lineBuffer = '';
-
-  function readAvailableLogLines() {
-    try {
-      const stat = fs.statSync(logFilePath);
-      if (stat.size <= offset) {
-        return;
-      }
-
-      const fd = fs.openSync(logFilePath, 'r');
-      try {
-        const buffer = Buffer.alloc(stat.size - offset);
-        fs.readSync(fd, buffer, 0, buffer.length, offset);
-        offset = stat.size;
-        lineBuffer += buffer.toString('utf8');
-      } finally {
-        fs.closeSync(fd);
-      }
-
-      const lines = lineBuffer.split('\n');
-      lineBuffer = lines.pop() ?? '';
-      for (const line of lines) {
-        logAntigravityInternalLine(logPrefix, line);
-      }
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        console.error(`${logPrefix} agy-log-tail error: ${error.message}`);
-      }
-    }
-  }
-
-  const interval = setInterval(() => {
-    if (stopped) {
-      return;
-    }
-
-    readAvailableLogLines();
-  }, 1000);
-
-  return () => {
-    stopped = true;
-    clearInterval(interval);
-    readAvailableLogLines();
-    if (lineBuffer.trim()) {
-      logAntigravityInternalLine(logPrefix, lineBuffer);
-    }
-  };
-}
-
-function logAntigravityInternalLine(logPrefix, line) {
-  const trimmedLine = line.trim();
-  if (!trimmedLine) {
-    return;
-  }
-
-  if (!shouldPrintAntigravityInternalLine(trimmedLine)) {
-    return;
-  }
-
-  console.info(`${logPrefix} agy-log: ${trimmedLine}`);
-}
-
-function shouldPrintAntigravityInternalLine(line) {
-  return /Print mode|project:|Propagating selected model|OAuth: authenticated|Tool confirmation|checkpoint model generated tool calls|failed to read project file|PlannerResponse without ModifiedResponse|text_drip|timed out|Stream completed|CLI store manager shutting down/.test(
-    line
-  );
-}
-
-function resolveAntigravityCloseResult({ code, manifest, stdout, stderr }) {
-  const stdoutText = stdout.trim();
-  const stderrText = stderr.trim();
-  const errorText = stderrText || stdoutText;
-
-  if (code !== 0) {
-    return {
-      success: false,
-      errorMessage: errorText || `Antigravity exited with code ${code}.`,
-    };
-  }
-
-  if (manifest) {
-    return {
-      success: true,
-      manifest,
-    };
-  }
-
-  if (/timed out waiting for response|Error:/i.test(stdoutText)) {
-    return {
-      success: false,
-      errorMessage: stdoutText,
-    };
-  }
-
-  return {
-    success: false,
-    errorMessage:
-      errorText ||
-      'Antigravity exited successfully without printing the expected image manifest.',
-  };
 }
 
 function parseImageManifestLine(line) {
@@ -7006,36 +4920,4 @@ function escapeSqlLiteral(value) {
 module.exports = {
   createGenerationStore,
   getAppDataPaths,
-  __test__: {
-    buildAntigravityExecArgs,
-    buildAntigravityImageGenerationPrompt,
-    buildCodexImageGenerationPrompt,
-    buildCodexSceneStructuringPrompt,
-    buildCodexExecArgs,
-    classifyCodexTraceLine,
-    buildAntigravitySpawnEnv,
-    buildCodexSpawnEnv,
-    buildSceneFrameGenerationTasks,
-    buildSceneFramePrompt,
-    buildDirectorChatPrompt,
-    buildDirectorStatusBlock,
-    prepareAntigravityHomeDirectory,
-    resolveBundledCodexSkillsDirectory,
-    resolveCodexHomeDirectory,
-    parseDirectorActionBlocks,
-    parseImageManifestLine,
-    parseScenePlanLine,
-    parseGenerationReferenceMetadata,
-    resolveAntigravityCloseResult,
-    resolveJobWorkingDirectory,
-    resolveGenerationSelection,
-    resolveSceneFrameConcurrencyLimit,
-    runWithConcurrencyLimit,
-    seedBundledCodexSkills,
-    sortDirectorMessageRecords,
-    truncateDirectorChatTitle,
-    toGenerationReferenceMetadata,
-    toRendererAsset,
-    writeExportArchive,
-  },
 };

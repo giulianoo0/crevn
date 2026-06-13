@@ -19,6 +19,7 @@ import {
   type CSSProperties,
 } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
+import { BorderBeam } from 'border-beam';
 import {
   closestCenter,
   DndContext,
@@ -42,6 +43,7 @@ import {
   Camera as CameraIcon,
   Check,
   ChevronLeft,
+  ChevronRight,
   ChevronDown,
   ChevronUp,
   ClipboardPaste,
@@ -49,28 +51,36 @@ import {
   Crop,
   Crosshair,
   Download,
+  Eye,
+  EyeOff,
   FolderPlus,
   Folder,
   GripVertical,
   ImagePlus,
+  KeyRound,
   LoaderCircle,
   Pencil,
   Minus,
   PanelLeftOpen,
   Play,
   Plus,
+  RotateCcw,
   Search,
   Settings,
+  Square,
   Trash2,
   Upload,
   WandSparkles,
   X,
   Zap,
+  AlertTriangle,
 } from 'lucide-react';
 import NumberFlow from '@number-flow/react';
 import { toast } from 'sonner';
 import { List, useDynamicRowHeight, useListRef, type RowComponentProps } from 'react-window';
 import 'streamdown/styles.css';
+import { SlotText } from 'slot-text/react';
+import 'slot-text/style.css';
 
 import birdsEyePreview from './assets/angle-previews/birds-eye.png';
 import cleanSinglePreview from './assets/angle-previews/clean-single.png';
@@ -105,14 +115,12 @@ import silhouetteShotPreview from './assets/angle-previews/silhouette-shot.png';
 import twoShotPreview from './assets/angle-previews/two-shot.png';
 import wideEstablishingPreview from './assets/angle-previews/wide-establishing.png';
 import wormsEyePreview from './assets/angle-previews/worms-eye.png';
+import geminiIcon from './assets/gemini.svg';
 import logo from './assets/logo.svg';
-import antigravityLogo from './assets/antigravity.webp';
-import codexLogo from './assets/codex.webp';
 import { ConfirmDeleteDialog } from './components/confirm-delete-dialog';
 import { CreateProjectDialog } from './components/create-project-dialog';
 import { EntityNameDialog } from './components/entity-name-dialog';
 import { GeneratedImageGrid } from './components/generated-image-grid';
-import { LiquidMetalButton } from './components/liquid-metal-button';
 import { LiquidMetalFrame } from './components/liquid-metal-frame';
 import {
   ProjectPropertiesDialog,
@@ -120,6 +128,17 @@ import {
 } from './components/project-properties-dialog';
 import { ProjectRow } from './components/project-row';
 import { TextShimmer } from './components/ai-elements/shimmer';
+import {
+  Attachment,
+  Attachments,
+  type AttachmentRecord,
+} from './components/ai-elements/attachments';
+import {
+  ChainOfThought,
+  ChainOfThoughtContent,
+  ChainOfThoughtHeader,
+} from './components/ai-elements/chain-of-thought';
+import { ToolCall, type ToolStatus } from './components/ai-elements/tool';
 import {
   Message,
   MessageActions,
@@ -129,14 +148,20 @@ import {
 } from './components/ai-elements/message';
 import { ThreadRow } from './components/thread-row';
 import { PromptComposer, type PromptComposerHandle } from './components/prompt-composer';
+import {
+  ReferenceMetadataDialog,
+  type ReferenceMetadataDraft,
+} from './components/reference-metadata-dialog';
 import { ModelPicker } from './components/model-picker';
 import { getErrorMessage } from './lib/errors';
 import {
   approveDirectorAction,
   cancelSceneGroupGeneration,
+  declineDirectorAction,
   copyGeneratedImage,
   createProject,
   createReferenceCollection,
+  createReferenceFolder,
   createReference,
   createDirectorChat,
   createSceneFrame,
@@ -145,11 +170,10 @@ import {
   deleteSceneGroup,
   deleteSceneFrame,
   deleteReference,
-  describeReferenceCollection,
-  declineDirectorAction,
   generateSceneGroup,
   listDirectorChats,
   listDirectorMessages,
+  regenerateDirectorMessage,
   updateEnvironmentReference,
   renameDirectorChat,
   sendDirectorMessage,
@@ -170,6 +194,7 @@ import {
   exportReference,
   exportThread,
   getAppInfo,
+  getProviderSettings,
   getUpdateStatus,
   generateImages,
   importCrenv,
@@ -177,6 +202,7 @@ import {
   installUpdate,
   listGeneratedImages,
   listProjectsWithThreads,
+  listReferenceFolders,
   listReferences,
   listSceneGroups,
   renameProject,
@@ -190,18 +216,26 @@ import {
   subscribeToUpdateStatus,
   type SceneGroupRecord,
   updateProjectSettings,
+  updateProviderSettings,
   updateSceneFrame,
   updateSceneGroup,
   type GeneratedImageRecord,
   type DirectorChatRecord,
   type DirectorMessageRecord,
+  type DirectorMessagePart,
   type ProjectRecord,
+  type ReferenceFolderRecord,
   type ReferenceImageRecord,
   type AppInfo,
   type UpdateStatus,
   cancelDirectorChat,
 } from './lib/electron-api';
-import { getDefaultModelOption, getModelOptionById } from './lib/model-catalog';
+import {
+  getDefaultModelOption,
+  getModelOptionById,
+  getModelsForProvider,
+  type GenerationProviderId,
+} from './lib/model-catalog';
 import { COMPOSER_SHELL_MOTION } from './lib/composer-motion';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Toaster } from '@/components/ui/sonner';
@@ -618,12 +652,83 @@ function mergeDirectorMessages(
   });
 }
 
+function isOptimisticDirectorMessage(message: DirectorMessageRecord) {
+  return message.id.startsWith('director-optimistic-');
+}
+
+function getDirectorText(parts: DirectorMessagePart[]) {
+  return parts
+    .filter((part): part is Extract<DirectorMessagePart, { type: 'text' }> => part.type === 'text')
+    .map((part) => part.text)
+    .join('');
+}
+
+function removeMatchingOptimisticDirectorMessages(
+  messages: DirectorMessageRecord[],
+  incomingMessages: DirectorMessageRecord[]
+) {
+  const incomingUserMessage = incomingMessages.find((message) => message.role === 'user');
+  const incomingAssistantMessage = incomingMessages.find((message) => message.role === 'assistant');
+
+  return messages.filter((message) => {
+    if (!isOptimisticDirectorMessage(message)) {
+      return true;
+    }
+
+    if (
+      incomingUserMessage &&
+      message.role === 'user' &&
+      getDirectorText(message.parts).trim() === getDirectorText(incomingUserMessage.parts).trim()
+    ) {
+      return false;
+    }
+
+    if (
+      incomingAssistantMessage &&
+      message.role === 'assistant' &&
+      message.status === 'streaming' &&
+      message.parts.length === 0
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+interface DirectorRenderableActionStatus {
+  rawStatus: string;
+  title?: string | null;
+  detail?: string | null;
+  progress?: {
+    generated: number;
+    total: number;
+  } | null;
+  result?: unknown;
+}
+
+interface DirectorRenderableAction {
+  id: string;
+  actionIndex: number;
+  kind: string;
+  summary: string;
+  payload?: unknown;
+  source: 'legacy-action' | 'tool-call';
+  approval?: {
+    id: string;
+    needsApproval: boolean;
+    approved?: boolean;
+  } | null;
+  latestStatus: DirectorRenderableActionStatus | null;
+}
+
 function updateDirectorMessageContent(
   messages: DirectorMessageRecord[],
   messageId: string,
-  contentMarkdown: string,
+  parts: DirectorMessagePart[],
   status: DirectorMessageRecord['status'],
-  updatedAt?: string
+  updatedAt?: string,
+  errorMessage?: string | null
 ) {
   let didUpdate = false;
   const nextMessages = messages.map((message) => {
@@ -632,7 +737,7 @@ function updateDirectorMessageContent(
     }
 
     if (
-      message.contentMarkdown === contentMarkdown &&
+      message.parts === parts &&
       message.status === status &&
       (!updatedAt || message.updatedAt === updatedAt)
     ) {
@@ -642,9 +747,10 @@ function updateDirectorMessageContent(
     didUpdate = true;
     return {
       ...message,
-      contentMarkdown,
+      parts,
       status,
       ...(updatedAt ? { updatedAt } : null),
+      ...(errorMessage !== undefined ? { errorMessage } : null),
     };
   });
 
@@ -655,12 +761,20 @@ function updateDirectorMessagesByChat(
   messagesByChatId: Record<string, DirectorMessageRecord[]>,
   chatId: string,
   messageId: string,
-  contentMarkdown: string,
+  parts: DirectorMessagePart[],
   status: DirectorMessageRecord['status'],
-  updatedAt?: string
+  updatedAt?: string,
+  errorMessage?: string | null
 ) {
   const currentMessages = messagesByChatId[chatId] ?? [];
-  const nextMessages = updateDirectorMessageContent(currentMessages, messageId, contentMarkdown, status, updatedAt);
+  const nextMessages = updateDirectorMessageContent(
+    currentMessages,
+    messageId,
+    parts,
+    status,
+    updatedAt,
+    errorMessage
+  );
 
   if (nextMessages === currentMessages) {
     return messagesByChatId;
@@ -753,7 +867,7 @@ function createLoadingEntries(
   prefix: string,
   count: number,
   metadata?: {
-    provider: 'codex' | 'antigravity';
+    provider: string;
     modelId: string;
     modelLabel: string;
     generationStartedAt: string;
@@ -797,8 +911,8 @@ function toSavedReferenceImage(reference: ReferenceImageRecord): SavedReferenceI
     id: reference.id,
     name: reference.name,
     title: reference.title,
-    groupTitle: reference.groupTitle ?? undefined,
     description: reference.description ?? undefined,
+    groupTitle: reference.groupTitle ?? undefined,
     groupDescription: reference.groupDescription ?? undefined,
     mimeType: reference.mimeType,
     bytesBase64: reference.bytesBase64,
@@ -808,8 +922,53 @@ function toSavedReferenceImage(reference: ReferenceImageRecord): SavedReferenceI
     category: reference.category,
     collectionId: reference.collectionId ?? reference.environmentId ?? undefined,
     environmentId: reference.environmentId ?? undefined,
+    parentFolderId: reference.parentFolderId ?? undefined,
     section: reference.section ?? undefined,
     shouldRevokePreviewUrl: true,
+  };
+}
+
+function sortReferenceFolders(folders: ReferenceFolderRecord[]) {
+  return [...folders].sort((a, b) => {
+    if (a.createdAt === b.createdAt) {
+      return b.id.localeCompare(a.id);
+    }
+    return b.createdAt.localeCompare(a.createdAt);
+  });
+}
+
+function upsertReferenceFolderRecord(folders: ReferenceFolderRecord[], folder: ReferenceFolderRecord) {
+  const nextFolders = new Map(folders.map((entry) => [entry.id, entry]));
+  nextFolders.set(folder.id, folder);
+  return sortReferenceFolders([...nextFolders.values()]);
+}
+
+function removeReferenceFolderRecord(folders: ReferenceFolderRecord[], folderId: string) {
+  const idsToRemove = new Set([folderId]);
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    for (const folder of folders) {
+      if (folder.parentFolderId && idsToRemove.has(folder.parentFolderId) && !idsToRemove.has(folder.id)) {
+        idsToRemove.add(folder.id);
+        changed = true;
+      }
+    }
+  }
+
+  return folders.filter((folder) => !idsToRemove.has(folder.id));
+}
+
+function toReferenceCollectionAttachment(img: SavedReferenceImage) {
+  return {
+    id: img.id,
+    name: img.name,
+    title: img.title,
+    mimeType: img.mimeType,
+    bytesBase64: img.bytesBase64,
+    description: img.description,
+    section: img.section,
   };
 }
 
@@ -831,27 +990,45 @@ type ComposerReferenceImage = {
 
 type SavedReferenceImage = ComposerReferenceImage & {
   title: string;
-  groupTitle?: string;
   description?: string;
+  groupTitle?: string;
   groupDescription?: string;
   createdAt: string;
   category: ReferenceLibraryRoute;
   collectionId?: string;
   environmentId?: string;
-  section?: ReferenceImageBucket;
+  parentFolderId?: string;
+  section?: 'primary' | 'angles';
 };
 
-type SavedReferenceMentionGroup = {
+// A node in the composer's reference mention tree. Mirrors the Reference
+// Library folder tree: organizational folders (ReferenceFolderRecord) plus
+// collections / solo images keyed by `collectionId ?? environmentId ?? id`,
+// all linked through `parentFolderId`. Top-level nodes have `parentFolderId`
+// === null.
+type ReferenceTreeNode = {
   id: string;
   title: string;
   description: string;
   previewUrl: string;
-  references: SavedReferenceImage[];
+  parentFolderId: string | null;
+  kind: 'folder' | 'collection';
+  images: SavedReferenceImage[];
 };
 
 type ReferenceLibraryRoute = 'characters' | 'environment' | 'objects';
 
-type ReferenceImageBucket = 'primary' | 'angles';
+const referenceRouteLabels: Record<ReferenceLibraryRoute, string> = {
+  characters: 'Characters',
+  environment: 'Environment',
+  objects: 'Objects',
+};
+
+const referenceRouteHeaderLabels: Record<ReferenceLibraryRoute, string> = {
+  characters: 'Character',
+  environment: 'Environment',
+  objects: 'Item',
+};
 
 function getSavedReferenceMentionGroupId(reference: SavedReferenceImage) {
   return reference.collectionId ?? reference.environmentId ?? reference.id;
@@ -862,17 +1039,9 @@ function getSharedReferenceTitle(reference: Pick<SavedReferenceImage, 'title' | 
 }
 
 function getReferenceMentionLookupQuery(query: string) {
-  return query.split(/[#/:]/, 1)[0]?.toLowerCase() ?? '';
+  return query.split(/[#/:.]/, 1)[0]?.toLowerCase() ?? '';
 }
 
-function splitReferenceMentionQuery(query: string) {
-  const match = query.match(/^([^#/:]*)([#/:]?)(.*)$/);
-  return {
-    baseQuery: match?.[1]?.toLowerCase() ?? '',
-    separator: match?.[2] ?? '',
-    selectorQuery: match?.[3]?.toLowerCase() ?? '',
-  };
-}
 
 function normalizeReferenceSelectorValue(value: string) {
   return value
@@ -899,8 +1068,12 @@ function extractReferenceSelectorMatches(promptText: string, mentionTitle: strin
     return [];
   }
 
+  // The selector group allows internal separators (`.`/`#`/`/`/`:`) so a full
+  // nested path like `.subfolder.image` is captured in one go. It still stops
+  // at whitespace and sentence punctuation; a dangling trailing separator is
+  // dropped later when the path is split into segments.
   const pattern = new RegExp(
-    `(^|[\\s([{'"\`])${allowPlainMention ? '@?' : '@'}(${escapeRegExp(mentionTitle)})([#/:][^\\s.,!?;:()\\[\\]{}'"\\\`]+)`,
+    `(^|[\\s([{'"\`])${allowPlainMention ? '@?' : '@'}(${escapeRegExp(mentionTitle)})([#/:.][^\\s,!?;()\\[\\]{}'"\\\`]+)`,
     'gi',
   );
   const matches: Array<{ matchText: string; selectorText: string }> = [];
@@ -943,7 +1116,6 @@ function referenceMatchesSelector(reference: SavedReferenceImage, selectorText: 
     reference.title,
     deriveReferenceAttachmentTitle(reference.name),
     reference.name,
-    reference.description ?? '',
   ]
     .map(normalizeReferenceSelectorValue)
     .filter((value) => value.length > 0);
@@ -959,6 +1131,7 @@ function referenceMatchesSelector(reference: SavedReferenceImage, selectorText: 
 type ResolvedSavedReferenceSelection = {
   reference: SavedReferenceImage;
   mentionTitle: string;
+  mentionDescription?: string;
   groupSize: number;
   selectorApplied: boolean;
   matchText: string;
@@ -972,74 +1145,189 @@ type ReferenceSelectorOption = {
   insertId: string;
   insertTitle: string;
   selectorSuffix?: string;
+  folderTitle?: string;
+  selectorSlug?: string;
   section?: 'primary' | 'angles';
+  // Navigable folders/collections keep the caret on the chip after insertion so
+  // typing the next `.` keeps drilling instead of landing after a space.
+  keepSelectorOpen?: boolean;
 };
-
-function resolveReferenceSelectorGroup(
-  groups: SavedReferenceMentionGroup[],
-  baseQuery: string,
-): SavedReferenceMentionGroup | null {
-  if (!baseQuery) {
-    return null;
-  }
-
-  const normalizedBaseQuery = normalizeReferenceSelectorValue(baseQuery);
-  if (!normalizedBaseQuery) {
-    return null;
-  }
-
-  const exactMatch =
-    groups.find((group) => normalizeReferenceSelectorValue(group.title) === normalizedBaseQuery) ?? null;
-  if (exactMatch) {
-    return exactMatch;
-  }
-
-  const partialMatches = groups.filter((group) =>
-    normalizeReferenceSelectorValue(group.title).includes(normalizedBaseQuery),
-  );
-  return partialMatches.length === 1 ? partialMatches[0] : null;
-}
 
 function getReferencePrimaryTabLabel(route: ReferenceLibraryRoute) {
   return route === 'environment' ? 'Ambiente' : route === 'characters' ? 'Personagem' : 'Objeto';
 }
 
-function buildSavedReferenceMentionGroups(savedReferences: SavedReferenceImage[]): SavedReferenceMentionGroup[] {
-  const groups = new Map<string, SavedReferenceImage[]>();
+function buildReferenceMentionTree(
+  savedReferences: SavedReferenceImage[],
+  referenceFolders: ReferenceFolderRecord[],
+): ReferenceTreeNode[] {
+  const map = new Map<string, ReferenceTreeNode>();
 
-  for (const reference of savedReferences) {
-    const groupId = getSavedReferenceMentionGroupId(reference);
-    groups.set(groupId, [...(groups.get(groupId) ?? []), reference]);
+  // Organizational folders first so collections/images can attach under them.
+  for (const folder of referenceFolders) {
+    map.set(folder.id, {
+      id: folder.id,
+      title: folder.title,
+      description: folder.description ?? '',
+      previewUrl: '',
+      parentFolderId: folder.parentFolderId ?? null,
+      kind: 'folder',
+      images: [],
+    });
   }
 
-  return [...groups.entries()].map(([id, references]) => {
-    const representative = [...references].sort((left, right) => {
-      if (left.createdAt !== right.createdAt) {
-        return left.createdAt < right.createdAt ? -1 : 1;
+  for (const reference of savedReferences) {
+    const nodeId = getSavedReferenceMentionGroupId(reference);
+    const existing = map.get(nodeId);
+    if (existing && existing.kind === 'collection') {
+      existing.images.push(reference);
+      existing.title = getSharedReferenceTitle(reference);
+      if (reference.groupDescription) {
+        existing.description = reference.groupDescription;
       }
-      return left.id.localeCompare(right.id);
-    })[0] ?? references[0];
-    const descriptions = references
-      .map((reference) => reference.description?.trim())
-      .filter((description): description is string => Boolean(description));
-    const sharedTitle = getSharedReferenceTitle(representative);
+      if (!existing.previewUrl) {
+        existing.previewUrl = reference.previewUrl;
+      }
+      existing.parentFolderId = reference.parentFolderId ?? existing.parentFolderId ?? null;
+      continue;
+    }
+    map.set(nodeId, {
+      id: nodeId,
+      title: getSharedReferenceTitle(reference),
+      description: reference.groupDescription ?? reference.description ?? '',
+      previewUrl: reference.previewUrl,
+      parentFolderId: reference.parentFolderId ?? null,
+      kind: 'collection',
+      images: [reference],
+    });
+  }
 
-    return {
-      id,
-      title: sharedTitle,
-      description:
-        references.length > 1
-          ? `${references.length} angles${descriptions.length > 0 ? ` · ${descriptions[0]}` : ''}`
-          : representative.description ?? 'Saved library reference',
-      previewUrl: representative.previewUrl,
-      references,
-    };
-  });
+  const nodes = [...map.values()];
+  // Give organizational folders a thumbnail from their first descendant image.
+  for (const node of nodes) {
+    if (node.kind === 'folder' && !node.previewUrl) {
+      node.previewUrl = getReferenceSubtreeImages(node, nodes)[0]?.previewUrl ?? '';
+    }
+  }
+  return nodes;
+}
+
+function getReferenceTreeChildren(
+  nodes: ReferenceTreeNode[],
+  parentId: string | null,
+): ReferenceTreeNode[] {
+  return nodes.filter((node) => node.parentFolderId === parentId);
+}
+
+function getReferenceSubtreeImages(
+  node: ReferenceTreeNode,
+  nodes: ReferenceTreeNode[],
+): SavedReferenceImage[] {
+  const result: SavedReferenceImage[] = [...node.images];
+  for (const child of nodes) {
+    if (child.parentFolderId === node.id) {
+      result.push(...getReferenceSubtreeImages(child, nodes));
+    }
+  }
+  return result;
+}
+
+// Resolve a single path segment to a node among the given candidates, using the
+// same exact-then-unique-partial strategy as `resolveReferenceSelectorGroup`.
+function resolveReferenceTreeNodeByTitle(
+  candidates: ReferenceTreeNode[],
+  segment: string,
+): ReferenceTreeNode | null {
+  const normalized = normalizeReferenceSelectorValue(segment);
+  if (!normalized) {
+    return null;
+  }
+  const exact = candidates.find(
+    (node) => normalizeReferenceSelectorValue(node.title) === normalized,
+  );
+  if (exact) {
+    return exact;
+  }
+  const partial = candidates.filter((node) =>
+    normalizeReferenceSelectorValue(node.title).includes(normalized),
+  );
+  return partial.length === 1 ? partial[0] : null;
+}
+
+// Walk a `base.step1.step2...` path through the tree, descending only into
+// folder/collection nodes. Returns the node the path lands inside, or null if
+// any segment fails to resolve uniquely.
+function resolveReferenceMentionPathNode(
+  nodes: ReferenceTreeNode[],
+  base: string,
+  steps: string[],
+): ReferenceTreeNode | null {
+  // The base matches the current chip, which may be a top-level node or a
+  // subfolder the user already drilled into (its chip replaced the parent), so
+  // resolve it against every node by title.
+  let current =
+    resolveReferenceTreeNodeByTitle(getReferenceTreeChildren(nodes, null), base) ??
+    resolveReferenceTreeNodeByTitle(nodes, base);
+  if (!current) {
+    return null;
+  }
+  for (const step of steps) {
+    const next = resolveReferenceTreeNodeByTitle(getReferenceTreeChildren(nodes, current.id), step);
+    if (!next) {
+      return null;
+    }
+    current = next;
+  }
+  return current;
+}
+
+// A node is navigable (the user drills into it with `.`) when it is an
+// organizational folder, a multi-image collection, or has any child nodes.
+function isNavigableReferenceNode(node: ReferenceTreeNode, nodes: ReferenceTreeNode[]): boolean {
+  return (
+    node.kind === 'folder' ||
+    node.images.length > 1 ||
+    getReferenceTreeChildren(nodes, node.id).length > 0
+  );
+}
+
+// Titles from the top-level ancestor down to `node` (inclusive).
+function getReferenceNodeTitlePath(node: ReferenceTreeNode, nodes: ReferenceTreeNode[]): string[] {
+  const chain: ReferenceTreeNode[] = [];
+  let current: ReferenceTreeNode | null = node;
+  while (current) {
+    chain.unshift(current);
+    current = current.parentFolderId
+      ? nodes.find((entry) => entry.id === current?.parentFolderId) ?? null
+      : null;
+  }
+  return chain.map((entry) => entry.title);
+}
+
+function splitReferenceMentionPath(query: string): {
+  base: string;
+  steps: string[];
+  trailing: string;
+  hasSeparator: boolean;
+} {
+  if (!/[#/:.]/.test(query)) {
+    return { base: query.toLowerCase(), steps: [], trailing: '', hasSeparator: false };
+  }
+  const parts = query.split(/[#/:.]/);
+  const base = (parts.shift() ?? '').toLowerCase();
+  const remaining = parts.map((part) => part.toLowerCase());
+  const endsWithSeparator = /[#/:.]$/.test(query);
+  const trailing = endsWithSeparator ? '' : (remaining.pop() ?? '');
+  // Drop empty segments left by consecutive/trailing separators so completed
+  // path steps stay resolvable.
+  const steps = remaining.filter((part) => part.length > 0);
+  return { base, steps, trailing, hasSeparator: true };
 }
 
 function resolveSavedReferencesFromMentionIds(
   savedReferences: SavedReferenceImage[],
-  selectedReferenceIds: string[]
+  selectedReferenceIds: string[],
+  referenceFolders: ReferenceFolderRecord[] = [],
 ) {
   const selectedIds = new Set(selectedReferenceIds);
   const resolved = new Map<string, SavedReferenceImage>();
@@ -1050,77 +1338,150 @@ function resolveSavedReferencesFromMentionIds(
     }
   }
 
+  // A selected id can be an organizational folder chip — expand it to every
+  // image in that folder's subtree.
+  if (referenceFolders.length > 0) {
+    const tree = buildReferenceMentionTree(savedReferences, referenceFolders);
+    for (const node of tree) {
+      if (node.kind === 'folder' && selectedIds.has(node.id)) {
+        for (const image of getReferenceSubtreeImages(node, tree)) {
+          resolved.set(image.id, image);
+        }
+      }
+    }
+  }
+
   return [...resolved.values()];
+}
+
+// Walk a selector path (`segments`) starting inside `startNode`, descending
+// through folder/collection nodes. Returns the specific image the path lands
+// on, the sub-node it lands on, or null when it cannot be resolved.
+function resolveReferencePathTarget(
+  startNode: ReferenceTreeNode,
+  nodes: ReferenceTreeNode[],
+  segments: string[],
+): { image: SavedReferenceImage } | { node: ReferenceTreeNode } | null {
+  let current = startNode;
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    const isLast = index === segments.length - 1;
+    const childNode = resolveReferenceTreeNodeByTitle(
+      getReferenceTreeChildren(nodes, current.id),
+      segment,
+    );
+    if (childNode) {
+      current = childNode;
+      continue;
+    }
+    // Not a folder/collection: the last segment may name a direct image.
+    const image = current.images.find((reference) => referenceMatchesSelector(reference, segment));
+    if (image && isLast) {
+      return { image };
+    }
+    return null;
+  }
+  return { node: current };
 }
 
 function resolveSavedReferenceSelections(
   savedReferences: SavedReferenceImage[],
   selectedReferenceIds: string[],
   promptText: string,
+  referenceFolders: ReferenceFolderRecord[] = [],
 ): ResolvedSavedReferenceSelection[] {
   const selectedIds = new Set(selectedReferenceIds);
-  const groups = new Map<string, SavedReferenceImage[]>();
-
-  for (const reference of savedReferences) {
-    const groupId = getSavedReferenceMentionGroupId(reference);
-    groups.set(groupId, [...(groups.get(groupId) ?? []), reference]);
-  }
-
+  const nodes = buildReferenceMentionTree(savedReferences, referenceFolders);
   const resolved = new Map<string, ResolvedSavedReferenceSelection>();
 
-  for (const [groupId, references] of groups.entries()) {
-    const exactSelections = references.filter((reference) => selectedIds.has(reference.id));
-    const mentionTitle = getSharedReferenceTitle(references[0]);
-    const isGroupSelectedById = selectedIds.has(groupId);
-    const isGroupSelected =
-      isGroupSelectedById || promptContainsReferenceMention(promptText, mentionTitle);
-
-    if (!isGroupSelected && exactSelections.length === 0) {
-      continue;
+  // A more specific (selector-applied) selection must not be clobbered by a
+  // broader whole-folder fallback for the same image.
+  const register = (selection: ResolvedSavedReferenceSelection) => {
+    const existing = resolved.get(selection.reference.id);
+    if (existing && existing.selectorApplied && !selection.selectorApplied) {
+      return;
     }
+    resolved.set(selection.reference.id, selection);
+  };
 
-    const selectorMatches = isGroupSelected
-      ? extractReferenceSelectorMatches(promptText, mentionTitle, isGroupSelectedById)
-      : [];
-    const matchedBySelector = new Map<string, { reference: SavedReferenceImage; matchText: string }>();
+  for (const node of nodes) {
+    const subtreeImages = getReferenceSubtreeImages(node, nodes);
+    const isNodeSelectedById = selectedIds.has(node.id);
+    const isNodeSelected =
+      isNodeSelectedById || promptContainsReferenceMention(promptText, node.title);
 
-    for (const selectorMatch of selectorMatches) {
-      const matchedReference = references.find((reference) =>
-        referenceMatchesSelector(reference, selectorMatch.selectorText),
-      );
-      if (!matchedReference || matchedBySelector.has(matchedReference.id)) {
+    // A folded image chip is selected by the image's own id (not the node).
+    // The chip renders the image title, so label it with the folder context.
+    for (const reference of node.images) {
+      if (!selectedIds.has(reference.id)) {
         continue;
       }
-      matchedBySelector.set(matchedReference.id, {
-        reference: matchedReference,
-        matchText: selectorMatch.matchText,
+      register({
+        reference,
+        mentionTitle: node.title,
+        mentionDescription: node.description || undefined,
+        groupSize: node.images.length,
+        selectorApplied: node.images.length > 1,
+        matchText: reference.title,
       });
     }
 
-    if (matchedBySelector.size > 0) {
-      for (const { reference, matchText } of matchedBySelector.values()) {
-        resolved.set(reference.id, {
-          reference,
-          mentionTitle,
-          groupSize: references.length,
-          selectorApplied: true,
-          matchText,
-        });
-      }
+    if (!isNodeSelected) {
       continue;
     }
 
-    const fallbackReferences = isGroupSelected ? references : exactSelections;
-    for (const reference of fallbackReferences) {
-      if (resolved.has(reference.id)) {
+    // Selector paths attached to this node's mention, e.g. `@Root.Sub.image`.
+    const selectorMatches = extractReferenceSelectorMatches(promptText, node.title, isNodeSelectedById);
+    let matchedSelector = false;
+
+    for (const selectorMatch of selectorMatches) {
+      const segments = selectorMatch.selectorText.split(/[#/:.]/).filter(Boolean);
+      if (segments.length === 0) {
         continue;
       }
-      resolved.set(reference.id, {
-        reference,
-        mentionTitle,
-        groupSize: references.length,
+      const target = resolveReferencePathTarget(node, nodes, segments);
+      if (!target) {
+        continue;
+      }
+      matchedSelector = true;
+      if ('image' in target) {
+        register({
+          reference: target.image,
+          mentionTitle: node.title,
+          mentionDescription: node.description || undefined,
+          groupSize: subtreeImages.length,
+          selectorApplied: true,
+          matchText: selectorMatch.matchText,
+        });
+      } else {
+        // The path lands on a sub-folder/collection — send its whole subtree.
+        const targetImages = getReferenceSubtreeImages(target.node, nodes);
+        for (const image of targetImages) {
+          register({
+            reference: image,
+            mentionTitle: target.node.title,
+            mentionDescription: target.node.description || undefined,
+            groupSize: targetImages.length,
+            selectorApplied: false,
+            matchText: selectorMatch.matchText,
+          });
+        }
+      }
+    }
+
+    if (matchedSelector) {
+      continue;
+    }
+
+    // Fallback: a bare folder/collection mention sends every subtree image.
+    for (const image of subtreeImages) {
+      register({
+        reference: image,
+        mentionTitle: node.title,
+        mentionDescription: node.description || undefined,
+        groupSize: subtreeImages.length,
         selectorApplied: false,
-        matchText: mentionTitle,
+        matchText: node.title,
       });
     }
   }
@@ -1129,18 +1490,16 @@ function resolveSavedReferenceSelections(
 }
 
 function buildSavedReferenceDescription(selection: ResolvedSavedReferenceSelection) {
-  const parts = [];
   if (selection.groupSize > 1) {
-    parts.push(`Reference set: ${selection.mentionTitle}.`);
-    parts.push(`Image title: ${selection.reference.title}.`);
+    const folderContext = selection.mentionDescription?.trim()
+      ? ` ${selection.mentionDescription.trim()}`
+      : '';
+    const imageContext = selection.reference.description?.trim()
+      ? ` ${selection.reference.description.trim()}`
+      : '';
+    return `Reference set: ${selection.mentionTitle}.${folderContext} Image: ${selection.reference.title}.${imageContext}`;
   }
-  if (selection.reference.groupDescription?.trim()) {
-    parts.push(selection.reference.groupDescription.trim());
-  }
-  if (selection.reference.description?.trim()) {
-    parts.push(selection.reference.description.trim());
-  }
-  return parts.join(' ').trim() || undefined;
+  return selection.reference.description ?? undefined;
 }
 
 type ComposerGenerationMode = (typeof generationModeOptions)[number]['value'];
@@ -1176,12 +1535,12 @@ type SceneReferenceAttachment = {
   description?: string;
   shouldRevokePreviewUrl?: boolean;
 };
-type GenerationMode = ComposerGenerationMode | 'pinpoint' | 'camera';
+type GenerationMode = ComposerGenerationMode | 'pinpoint' | 'camera' | 'director';
 type ActiveGenerationRun = {
   clientRunId: string;
   threadId: string;
   mode: GenerationMode;
-  provider: 'codex' | 'antigravity';
+  provider: string;
   modelId: string;
   modelLabel: string;
   generationStartedAt: string;
@@ -1191,7 +1550,7 @@ type ActiveGenerationRun = {
 type ActiveSceneGenerationRun = {
   sceneGroupId: string;
   frameIds: string[];
-  provider: 'codex' | 'antigravity';
+  provider: string;
   modelId: string;
   modelLabel: string;
   generationStartedAt: string;
@@ -1212,7 +1571,7 @@ type PlayerImageSource = {
   bytesBase64?: string;
   sourceImageId?: string;
   origin: 'generated' | 'attached';
-  provider?: 'codex' | 'antigravity' | null;
+  provider?: string | null;
   modelId?: string | null;
   modelLabel?: string | null;
   prompt?: string | null;
@@ -1339,7 +1698,7 @@ function toSceneWorkspaceImage(
     fileName: `${frame.title} · ${asset.outputIndex + 1}`,
     fileUrl: `crenv-asset://generated?path=${encodeURIComponent(asset.storedPath)}`,
     createdAt: asset.createdAt,
-    provider: run?.provider ?? 'codex',
+    provider: run?.provider ?? null,
     modelId: run?.modelId ?? null,
     modelLabel: run?.modelLabel ?? null,
     durationMs: run?.durationMs ?? null,
@@ -1355,9 +1714,9 @@ function toSceneWorkspaceLoadingImage(
     id: `scene-loading-${frame.id}`,
     fileName: `${frame.title} · ${index + 1}`,
     createdAt: metadata?.generationStartedAt ?? new Date().toISOString(),
-    provider: metadata?.provider ?? 'codex',
-    modelId: metadata?.modelId ?? 'codex-gpt-5-4-mini',
-    modelLabel: metadata?.modelLabel ?? 'GPT-5.4 Mini',
+    provider: metadata?.provider ?? null,
+    modelId: metadata?.modelId ?? null,
+    modelLabel: metadata?.modelLabel ?? null,
     generationStartedAt: metadata?.generationStartedAt,
     isLoading: true,
   };
@@ -1369,11 +1728,6 @@ type SceneWorkspaceFrameCard = {
   images: GeneratedImageRecord[];
   isGenerating: boolean;
 };
-
-type DirectorRenderedBlock =
-  | { type: 'markdown'; content: string }
-  | { type: 'action'; content: string; data: Record<string, unknown> | null }
-  | { type: 'status'; content: string; data: Record<string, unknown> | null };
 
 type DirectorChatUi = DirectorChatRecord & {
   isStreaming: boolean;
@@ -1392,51 +1746,11 @@ type DirectorActiveRun = {
 type DirectorMessageStreamSnapshot = {
   chatId: string;
   messageId: string;
-  content: string;
+  parts: DirectorMessagePart[];
   status: DirectorMessageRecord['status'];
 };
 
 type DirectorMessageStreamListener = (snapshot: DirectorMessageStreamSnapshot) => void;
-
-function parseDirectorJsonBlock(content: string): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(content);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
-  } catch {
-    return null;
-  }
-}
-
-function parseDirectorRenderedBlocks(markdown: string): DirectorRenderedBlock[] {
-  const blocks: DirectorRenderedBlock[] = [];
-  const pattern = /```(imagen-action|imagen-status)\s*\n([\s\S]*?)```/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(markdown)) !== null) {
-    const leading = markdown.slice(lastIndex, match.index);
-    if (leading.trim()) {
-      blocks.push({ type: 'markdown', content: leading });
-    }
-
-    const type = match[1] === 'imagen-status' ? 'status' : 'action';
-    const content = match[2]?.trim() ?? '';
-    blocks.push({ type, content, data: parseDirectorJsonBlock(content) });
-    lastIndex = pattern.lastIndex;
-  }
-
-  const trailing = markdown.slice(lastIndex);
-  if (trailing.trim()) {
-    blocks.push({ type: 'markdown', content: trailing });
-  }
-
-  return blocks.length > 0 ? blocks : [{ type: 'markdown', content: markdown }];
-}
-
-function getDirectorBlockText(data: Record<string, unknown> | null, key: string, fallback = '') {
-  const value = data?.[key];
-  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
-}
 
 export function App() {
   const inputId = useId();
@@ -1477,7 +1791,7 @@ export function App() {
   const [selectedAngle, setSelectedAngle] = useState<(typeof angleOptions)[number]['name']>('Low Angle');
   const [isAngleEnabled, setIsAngleEnabled] = useState(false);
   const [isFastModeEnabled, setIsFastModeEnabled] = useState(true);
-  const [selectedModelId, setSelectedModelId] = useState(getDefaultModelOption().id);
+  const [selectedModelId, setSelectedModelId] = useState(getDefaultModelOption('image').id);
   const [generatedImages, setGeneratedImages] = useState<GeneratedImageRecord[]>([]);
   const [isCreateProjectDialogOpen, setIsCreateProjectDialogOpen] = useState(false);
   const [sidebarEntityAction, setSidebarEntityAction] = useState<SidebarEntityAction>(null);
@@ -1499,29 +1813,14 @@ export function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
-  const [activeStudioView, setActiveStudioView] = useState<'generation' | 'references'>('generation');
+  const [activeStudioView, setActiveStudioView] = useState<'generation' | 'references' | 'providers'>('generation');
   const [activeReferenceLibraryRoute, setActiveReferenceLibraryRoute] = useState<ReferenceLibraryRoute>('characters');
-  const [isAddReferenceDialogOpen, setIsAddReferenceDialogOpen] = useState(false);
-  const [addReferenceDialogRoute, setAddReferenceDialogRoute] = useState<ReferenceLibraryRoute>('characters');
-  const [addReferenceDialogSeedFiles, setAddReferenceDialogSeedFiles] = useState<File[]>([]);
+  const [providerGeminiApiKey, setProviderGeminiApiKey] = useState('');
+  const [providerGeminiApiKeyDraft, setProviderGeminiApiKeyDraft] = useState('');
+  const [isProviderKeyVisible, setIsProviderKeyVisible] = useState(false);
+  const [isSavingProviderSettings, setIsSavingProviderSettings] = useState(false);
   const [isPreparingSelectedImagesReference, setIsPreparingSelectedImagesReference] = useState(false);
-  const [editingReference, setEditingReference] = useState<{
-    id: string;
-    category: ReferenceLibraryRoute;
-    collectionId?: string;
-    environmentId?: string;
-    title: string;
-    description?: string;
-    attachments?: Array<{
-      id?: string;
-      name: string;
-      title?: string;
-      mimeType: string;
-      bytesBase64: string;
-      description?: string;
-      section?: ReferenceImageBucket;
-    }>;
-  } | null>(null);
+  const [referenceSeedFiles, setReferenceSeedFiles] = useState<File[]>([]);
   const [deletingReference, setDeletingReference] = useState<{
     id: string;
     category: ReferenceLibraryRoute;
@@ -1534,6 +1833,7 @@ export function App() {
   const [referenceImages, setReferenceImages] = useState<ComposerReferenceImage[]>([]);
   const [playerSession, setPlayerSession] = useState<PlayerSession | null>(null);
   const [savedReferences, setSavedReferences] = useState<SavedReferenceImage[]>([]);
+  const [referenceFolders, setReferenceFolders] = useState<ReferenceFolderRecord[]>([]);
   const [selectedPromptReferenceIds, setSelectedPromptReferenceIds] = useState<string[]>([]);
   const [localRunningCountsByThreadId, setLocalRunningCountsByThreadId] = useState<Record<string, number>>({});
   const [activeRunsById, setActiveRunsById] = useState<Record<string, ActiveGenerationRun>>({});
@@ -1562,7 +1862,9 @@ export function App() {
   const workspaceTabsRef = useRef<HTMLDivElement>(null);
   const isReferencePickerOpenRef = useRef(false);
   const activeRunsRef = useRef<Record<string, ActiveGenerationRun>>({});
-  const pendingDirectorDeltaByMessageIdRef = useRef<Record<string, { chatId: string; content: string }>>({});
+  const pendingDirectorDeltaByMessageIdRef = useRef<
+    Record<string, { chatId: string; parts: DirectorMessagePart[] }>
+  >({});
   const directorDeltaFlushTimerRef = useRef<number | null>(null);
   const directorMessageStreamListenersRef = useRef(new Set<DirectorMessageStreamListener>());
   const latestDirectorMessageStreamSnapshotsRef = useRef(new Map<string, DirectorMessageStreamSnapshot>());
@@ -1570,11 +1872,20 @@ export function App() {
   const selectedThreadIdRef = useRef<string | null>(null);
   const activeSceneGroupIdRef = useRef<string | null>(null);
   const selectedModel = useMemo(
-    () => getModelOptionById(selectedModelId) ?? getDefaultModelOption(),
+    () => getModelOptionById(selectedModelId) ?? getDefaultModelOption('image'),
     [selectedModelId]
   );
   const selectedProviderId = selectedModel.providerId;
-  const effectiveFastMode = selectedProviderId === 'codex' ? isFastModeEnabled : false;
+  const effectiveFastMode = false;
+
+  useEffect(() => {
+    if (generationWorkspaceMode === 'classic' && !selectedModel.capabilities.includes('image')) {
+      setSelectedModelId(getDefaultModelOption('image').id);
+    }
+    if (generationWorkspaceMode === 'director' && !selectedModel.capabilities.includes('text')) {
+      setSelectedModelId(getDefaultModelOption('text').id);
+    }
+  }, [generationWorkspaceMode, selectedModel]);
 
   useEffect(() => {
     referenceImagesRef.current = referenceImages;
@@ -1924,6 +2235,17 @@ export function App() {
         console.error('[crevn:renderer] update status failed', error);
       });
 
+    void getProviderSettings()
+      .then((settings) => {
+        if (isMounted) {
+          setProviderGeminiApiKey(settings.text.gemini.apiKey);
+          setProviderGeminiApiKeyDraft(settings.text.gemini.apiKey);
+        }
+      })
+      .catch((error) => {
+        console.error('[crevn:renderer] provider settings failed', error);
+      });
+
     const unsubscribe = subscribeToUpdateStatus((status) => {
       setUpdateStatus(status);
     });
@@ -1933,6 +2255,26 @@ export function App() {
       unsubscribe();
     };
   }, []);
+
+  const handleSaveProviderSettings = useCallback(async () => {
+    setIsSavingProviderSettings(true);
+    try {
+      const settings = await updateProviderSettings({
+        text: {
+          gemini: {
+            apiKey: providerGeminiApiKeyDraft,
+          },
+        },
+      });
+      setProviderGeminiApiKey(settings.text.gemini.apiKey);
+      setProviderGeminiApiKeyDraft(settings.text.gemini.apiKey);
+      toast.success('Provider key saved');
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to save provider key.'));
+    } finally {
+      setIsSavingProviderSettings(false);
+    }
+  }, [providerGeminiApiKeyDraft]);
 
   useEffect(() => {
     activeDirectorChatIdRef.current = activeDirectorChatId;
@@ -1953,19 +2295,15 @@ export function App() {
     };
   }, []);
 
-  const savedReferenceMentionGroups = useMemo(
-    () => buildSavedReferenceMentionGroups(savedReferences),
-    [savedReferences]
+  const referenceMentionTree = useMemo(
+    () => buildReferenceMentionTree(savedReferences, referenceFolders),
+    [savedReferences, referenceFolders]
   );
   const referenceMentionOptions = useMemo<ReferenceSelectorOption[]>(() => {
     if (!referenceMentionMatch) return [];
 
-    const { baseQuery, separator, selectorQuery } = splitReferenceMentionQuery(referenceMentionMatch.query);
-    const selectorGroup =
-      separator !== '' ? resolveReferenceSelectorGroup(savedReferenceMentionGroups, baseQuery) : null;
-
-    if (selectorGroup) {
-      const sortedReferences = [...selectorGroup.references].sort((left, right) => {
+    const sortImages = (images: SavedReferenceImage[]) =>
+      [...images].sort((left, right) => {
         const leftSection = left.section ?? 'angles';
         const rightSection = right.section ?? 'angles';
         if (leftSection !== rightSection) {
@@ -1976,36 +2314,99 @@ export function App() {
         }
         return left.id.localeCompare(right.id);
       });
-      return sortedReferences
-        .map((reference, index) => ({
-          id: `${selectorGroup.id}:${reference.id}`,
-          title: reference.title,
-          description: reference.description ?? selectorGroup.description,
-          previewUrl: reference.previewUrl,
-          insertId: selectorGroup.id,
-          insertTitle: selectorGroup.title,
-          selectorSuffix: `#${slugifyReferenceSelectorValue(reference.title || deriveReferenceAttachmentTitle(reference.name))}`,
-          section: reference.section ?? (index === 0 ? 'primary' : 'angles'),
-        }))
+
+    const describeNode = (node: ReferenceTreeNode) => {
+      if (node.kind === 'folder') {
+        const childCount = getReferenceTreeChildren(referenceMentionTree, node.id).length;
+        return childCount > 0
+          ? `Pasta · ${childCount} ${childCount === 1 ? 'item' : 'itens'} — digite "." para abrir`
+          : 'Pasta · digite "." para abrir';
+      }
+      if (node.images.length > 1) {
+        const detail = node.description?.trim();
+        return `${node.images.length} angles${detail ? ` · ${detail}` : ''}`;
+      }
+      return node.description?.trim() || 'Saved library reference';
+    };
+
+    const { base, steps, trailing, hasSeparator } = splitReferenceMentionPath(referenceMentionMatch.query);
+
+    // --- Drill-down mode: a separator was typed after a mention chip. ---
+    if (hasSeparator) {
+      const currentNode = resolveReferenceMentionPathNode(referenceMentionTree, base, steps);
+      if (!currentNode) return [];
+
+      const folderTitle = getReferenceNodeTitlePath(currentNode, referenceMentionTree).join(' › ');
+
+      const childNodes = getReferenceTreeChildren(referenceMentionTree, currentNode.id);
+      const childOptions: ReferenceSelectorOption[] = childNodes.map((child) => {
+        if (isNavigableReferenceNode(child, referenceMentionTree)) {
+          // Replace the current chip with this folder's chip (no dangling
+          // dotted text) and keep the caret on it so the next `.` drills in.
+          return {
+            id: `${currentNode.id}:${child.id}`,
+            title: child.title,
+            description: describeNode(child),
+            previewUrl: child.previewUrl,
+            insertId: child.id,
+            insertTitle: child.title,
+            selectorSuffix: '',
+            folderTitle,
+            keepSelectorOpen: true,
+          };
+        }
+        // Single-image collection / solo image child: fold straight to it.
+        const image = child.images[0];
+        return {
+          id: `${currentNode.id}:${child.id}`,
+          title: image?.title ?? child.title,
+          description: image?.description ?? child.description,
+          previewUrl: image?.previewUrl ?? child.previewUrl,
+          insertId: image?.id ?? child.id,
+          insertTitle: image?.title ?? child.title,
+          selectorSuffix: '',
+          folderTitle,
+        };
+      });
+
+      const imageOptions: ReferenceSelectorOption[] = sortImages(currentNode.images).map((reference, index) => ({
+        id: `${currentNode.id}:${reference.id}`,
+        title: reference.title,
+        description: reference.description ?? currentNode.description,
+        previewUrl: reference.previewUrl,
+        // Fold the chosen image into the mention chip itself and clear the
+        // dangling `.suffix` so nothing trails after the chip.
+        insertId: reference.id,
+        insertTitle: reference.title,
+        selectorSuffix: '',
+        folderTitle,
+        selectorSlug: slugifyReferenceSelectorValue(reference.title || deriveReferenceAttachmentTitle(reference.name)),
+        section: reference.section ?? (index === 0 ? 'primary' : 'angles'),
+      }));
+
+      return [...childOptions, ...imageOptions]
         .filter((option) =>
-          selectorQuery
-            ? option.title.toLowerCase().includes(selectorQuery) ||
-              option.selectorSuffix?.slice(1).includes(slugifyReferenceSelectorValue(selectorQuery))
+          trailing
+            ? option.title.toLowerCase().includes(trailing) ||
+              (option.selectorSlug ?? '').includes(slugifyReferenceSelectorValue(trailing))
             : true,
         )
         .slice(0, 24);
     }
 
-    const savedOpts = savedReferenceMentionGroups.map((group) => ({
-      id: group.id,
-      title: group.title,
-      description: group.description,
-      previewUrl: group.previewUrl,
-      insertId: group.id,
-      insertTitle: group.title,
+    // --- Top level: list top-level folders / collections / solo images. ---
+    const topNodes = getReferenceTreeChildren(referenceMentionTree, null);
+    const savedOpts: ReferenceSelectorOption[] = topNodes.map((node) => ({
+      id: node.id,
+      title: node.title,
+      description: describeNode(node),
+      previewUrl: node.previewUrl,
+      insertId: node.id,
+      insertTitle: node.title,
+      keepSelectorOpen: isNavigableReferenceNode(node, referenceMentionTree),
     }));
 
-    const attachedOpts = referenceImages.map((img) => {
+    const attachedOpts: ReferenceSelectorOption[] = referenceImages.map((img) => {
       const titleWithoutExt = img.name.replace(/\.[^/.]+$/, "");
       return {
         id: img.id,
@@ -2017,26 +2418,24 @@ export function App() {
       };
     });
 
-    const combined = [...savedOpts, ...attachedOpts];
-
-    return combined
-      .filter((option) =>
-        option.title.toLowerCase().includes(getReferenceMentionLookupQuery(referenceMentionMatch.query)),
-      )
+    return [...savedOpts, ...attachedOpts]
+      .filter((option) => option.title.toLowerCase().includes(base))
       .slice(0, 24);
-  }, [referenceMentionMatch, savedReferenceMentionGroups, referenceImages]);
+  }, [referenceMentionMatch, referenceMentionTree, referenceImages]);
   const referenceMentionCandidates = useMemo(
     () => [
-      ...savedReferenceMentionGroups.map((group) => ({
-        id: group.id,
-        title: group.title,
+      ...referenceMentionTree.map((node) => ({
+        id: node.id,
+        title: node.title,
+        previewUrl: node.previewUrl,
       })),
       ...referenceImages.map((image) => ({
         id: image.id,
         title: image.name.replace(/\.[^/.]+$/, ''),
+        previewUrl: image.previewUrl,
       })),
     ],
-    [referenceImages, savedReferenceMentionGroups]
+    [referenceImages, referenceMentionTree]
   );
 
   useEffect(() => {
@@ -2055,7 +2454,7 @@ export function App() {
   }, [activeReferenceMentionIndex, referenceMentionOptions]);
 
   const selectedPromptReferences = useMemo(() => {
-    const savedRefs = resolveSavedReferencesFromMentionIds(savedReferences, selectedPromptReferenceIds);
+    const savedRefs = resolveSavedReferencesFromMentionIds(savedReferences, selectedPromptReferenceIds, referenceFolders);
     const attachedRefs = referenceImages
       .filter((img) => selectedPromptReferenceIds.includes(img.id))
       .map((img) => ({
@@ -2086,12 +2485,14 @@ export function App() {
       option.insertTitle,
       range,
       option.selectorSuffix,
+      option.previewUrl,
+      option.keepSelectorOpen,
     );
     holdComposerOpen();
   }, [activeComposerRef, cursorIndex, holdComposerOpen, referenceMentionMatch]);
 
   const handleReferenceMentionNavigation = useCallback(
-    (key: 'ArrowDown' | 'ArrowUp' | 'Enter' | 'Escape') => {
+    (key: 'ArrowDown' | 'ArrowUp' | 'Enter' | 'Escape' | 'Tab') => {
       if (referenceMentionOptions.length === 0) return false;
 
       if (key === 'ArrowDown') {
@@ -2106,7 +2507,7 @@ export function App() {
         return true;
       }
 
-      if (key === 'Enter') {
+      if (key === 'Enter' || key === 'Tab') {
         const selectedOption =
           referenceMentionOptions[Math.min(activeReferenceMentionIndex, referenceMentionOptions.length - 1)];
         if (!selectedOption) return false;
@@ -2213,7 +2614,7 @@ export function App() {
     threadId: string;
     mode: GenerationMode;
     count: number;
-    provider: 'codex' | 'antigravity';
+    provider: string;
     modelId: string;
     modelLabel: string;
   }) => {
@@ -2443,12 +2844,6 @@ export function App() {
     );
   }, [selectedGeneratedImages]);
 
-  const openAddReferenceDialog = useCallback((route: ReferenceLibraryRoute, files: File[] = []) => {
-    setAddReferenceDialogRoute(route);
-    setAddReferenceDialogSeedFiles(files);
-    setIsAddReferenceDialogOpen(true);
-  }, []);
-
   const buildReferenceFilesFromGeneratedImages = useCallback(async (images: GeneratedImageRecord[]) => {
     return Promise.all(
       images.map(async (image, index) => {
@@ -2470,64 +2865,297 @@ export function App() {
     setIsPreparingSelectedImagesReference(true);
     try {
       const files = await buildReferenceFilesFromGeneratedImages(selectedGeneratedImages);
-      openAddReferenceDialog('objects', files);
+      setReferenceSeedFiles(files);
+      setActiveStudioView('references');
+      setActiveReferenceLibraryRoute('objects');
     } finally {
       setIsPreparingSelectedImagesReference(false);
     }
-  }, [buildReferenceFilesFromGeneratedImages, openAddReferenceDialog, selectedGeneratedImages]);
+  }, [buildReferenceFilesFromGeneratedImages, selectedGeneratedImages]);
 
-  const handleAddSavedReference = useCallback(async ({
-    files,
-    title,
-    description,
-    route,
-    attachmentMetadata,
-    attachmentBuckets,
+  const handleCreateReferenceFolder = useCallback(async (
+    title: string,
+    route: ReferenceLibraryRoute,
+    parentFolderId?: string | null,
+  ) => {
+    const folder = await createReferenceFolder({ category: route, title, parentFolderId });
+    setReferenceFolders((current) => upsertReferenceFolderRecord(current, folder));
+    return folder;
+  }, []);
+
+  const handleAddImagesToFolder = useCallback(async ({
+    folderId,
+    category,
+    folderTitle,
+    newFiles,
+    existingImages,
   }: {
-    files: File[];
-    title: string;
-    description?: string;
-    route: ReferenceLibraryRoute;
-    attachmentMetadata?: Record<string, { title: string; description: string }>;
-    attachmentBuckets?: Record<string, ReferenceImageBucket>;
+    folderId: string;
+    category: ReferenceLibraryRoute;
+    folderTitle: string;
+    newFiles: File[];
+    existingImages: SavedReferenceImage[];
   }) => {
-    const attachments = await Promise.all(
-      files.map(async (file) => {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const key = `${file.name}-${file.size}-${file.lastModified}`;
-        return {
-          name: file.name,
-          title: attachmentMetadata?.[key]?.title?.trim() || deriveReferenceAttachmentTitle(file.name),
-          mimeType: file.type || 'image/png',
-          bytesBase64: bytesToBase64(bytes),
-          description: attachmentMetadata?.[key]?.description?.trim() || undefined,
-          section: attachmentBuckets?.[key] ?? 'angles',
-        };
-      })
+    const newAttachments = await Promise.all(newFiles.map(async (file) => {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      return {
+        name: file.name,
+        title: deriveReferenceAttachmentTitle(file.name),
+        mimeType: file.type || 'image/png',
+        bytesBase64: bytesToBase64(bytes),
+      };
+    }));
+    const existingAttachments = existingImages.map((img) => ({
+      ...toReferenceCollectionAttachment(img),
+    }));
+    const folderDescription = existingImages[0]?.groupDescription;
+    const updatedReferences = await updateReferenceCollection({
+      category,
+      collectionId: folderId,
+      title: folderTitle,
+      description: folderDescription,
+      attachments: [...existingAttachments, ...newAttachments],
+    });
+    setSavedReferences((current) => [
+      ...updatedReferences.map(toSavedReferenceImage),
+      ...current.filter((ref) => ref.collectionId !== folderId && ref.environmentId !== folderId),
+    ]);
+  }, []);
+
+  const handleRenameFolder = useCallback(async ({
+    folderId,
+    category,
+    newTitle,
+  }: {
+    folderId: string;
+    category: ReferenceLibraryRoute;
+    newTitle: string;
+  }) => {
+    const existingImages = savedReferencesRef.current.filter(
+      (ref) => (ref.collectionId ?? ref.environmentId) === folderId
     );
-    const nextReferences =
-      route === 'environment' || files.length > 1
-        ? await createReferenceCollection({
-            category: route,
-            title,
-            description: description?.trim() || undefined,
-            attachments,
-          })
-        : await Promise.all(
-            files.map(async (file) => {
-              const bytes = new Uint8Array(await file.arrayBuffer());
-              return createReference({
-                name: file.name,
-                title,
-                description: description?.trim() || undefined,
-                mimeType: file.type || 'image/png',
-                bytesBase64: bytesToBase64(bytes),
-                category: route,
-              });
-            })
-          );
-    setSavedReferences((current) => [...nextReferences.map(toSavedReferenceImage), ...current]);
-    toast.message(nextReferences.length > 1 ? `${nextReferences.length} references added` : 'Reference added');
+    const attachments = existingImages.map(toReferenceCollectionAttachment);
+    const folderDescription = existingImages[0]?.groupDescription;
+    const updatedReferences = await updateReferenceCollection({
+      category,
+      collectionId: folderId,
+      title: newTitle,
+      description: folderDescription,
+      attachments,
+    });
+    setSavedReferences((current) => [
+      ...updatedReferences.map(toSavedReferenceImage),
+      ...current.filter((ref) => ref.collectionId !== folderId && ref.environmentId !== folderId),
+    ]);
+    setReferenceFolders((current) => {
+      const existingFolder = current.find((folder) => folder.id === folderId);
+      if (!existingFolder) {
+        return current;
+      }
+      return upsertReferenceFolderRecord(current, { ...existingFolder, title: newTitle });
+    });
+  }, []);
+
+  const handleDeleteImageFromFolder = useCallback(async ({
+    imageId,
+    folderId,
+    category,
+    folderTitle,
+  }: {
+    imageId: string;
+    folderId: string;
+    category: ReferenceLibraryRoute;
+    folderTitle: string;
+  }) => {
+    const remainingImages = savedReferencesRef.current.filter(
+      (ref) => (ref.collectionId ?? ref.environmentId) === folderId && ref.id !== imageId
+    );
+    if (remainingImages.length === 0) {
+      await deleteReference({ id: imageId, category, collectionId: folderId });
+      setSavedReferences((current) =>
+        current.filter((ref) => ref.collectionId !== folderId && ref.environmentId !== folderId)
+      );
+      setReferenceFolders((current) => removeReferenceFolderRecord(current, folderId));
+      return;
+    }
+    const attachments = remainingImages.map(toReferenceCollectionAttachment);
+    const folderDescription = remainingImages[0]?.groupDescription;
+    const updatedReferences = await updateReferenceCollection({
+      category,
+      collectionId: folderId,
+      title: folderTitle,
+      description: folderDescription,
+      attachments,
+    });
+    setSavedReferences((current) => [
+      ...updatedReferences.map(toSavedReferenceImage),
+      ...current.filter((ref) => ref.collectionId !== folderId && ref.environmentId !== folderId),
+    ]);
+  }, []);
+
+  const handleRenameReferenceImage = useCallback(async ({
+    imageId,
+    folderId,
+    category,
+    newTitle,
+  }: {
+    imageId: string;
+    folderId: string;
+    category: ReferenceLibraryRoute;
+    newTitle: string;
+  }) => {
+    const folderImages = savedReferencesRef.current.filter(
+      (ref) => (ref.collectionId ?? ref.environmentId ?? ref.id) === folderId
+    );
+    const isCollection = folderImages.some((ref) => ref.collectionId || ref.environmentId);
+    if (!isCollection) {
+      const currentImage = folderImages.find((img) => img.id === imageId);
+      const updated = await updateReference({
+        id: imageId,
+        category,
+        title: newTitle,
+        description: currentImage?.description,
+      });
+      setSavedReferences((current) =>
+        current.map((ref) => (ref.id === imageId ? toSavedReferenceImage(updated) : ref))
+      );
+      return;
+    }
+    const folderTitle = folderImages[0]?.groupTitle?.trim() || folderImages[0]?.title || '';
+    const attachments = folderImages.map((img) => ({
+      ...toReferenceCollectionAttachment(img),
+      title: img.id === imageId ? newTitle : img.title,
+    }));
+    const folderDescription = folderImages[0]?.groupDescription;
+    const updatedReferences = await updateReferenceCollection({
+      category,
+      collectionId: folderId,
+      title: folderTitle,
+      description: folderDescription,
+      attachments,
+    });
+    setSavedReferences((current) => [
+      ...updatedReferences.map(toSavedReferenceImage),
+      ...current.filter((ref) => ref.collectionId !== folderId && ref.environmentId !== folderId),
+    ]);
+  }, []);
+
+  const handleGroupReferenceImages = useCallback(async ({
+    imageIds,
+    category,
+    newFolderTitle,
+    sourceFolderId,
+  }: {
+    imageIds: string[];
+    category: ReferenceLibraryRoute;
+    newFolderTitle: string;
+    sourceFolderId: string;
+  }) => {
+    const sourceImages = savedReferencesRef.current.filter(
+      (ref) => (ref.collectionId ?? ref.environmentId ?? ref.id) === sourceFolderId
+    );
+    const selected = sourceImages.filter((img) => imageIds.includes(img.id));
+    if (selected.length === 0) return;
+
+    // 1. Create the new folder and populate it with copies of the selected images.
+    const folder = await createReferenceFolder({ category, title: newFolderTitle, parentFolderId: sourceFolderId });
+    const createdRefs = await updateReferenceCollection({
+      category,
+      collectionId: folder.id,
+      title: newFolderTitle,
+      attachments: selected.map((img) => ({
+        name: img.name,
+        title: img.title,
+        mimeType: img.mimeType,
+        bytesBase64: img.bytesBase64,
+        description: img.description,
+        section: img.section,
+      })),
+    });
+
+    // 2. Remove the selected images from the source folder.
+    const remaining = sourceImages.filter((img) => !imageIds.includes(img.id));
+    const sourceTitle = sourceImages[0]?.groupTitle?.trim() || sourceImages[0]?.title || '';
+    const remainingRefs = await updateReferenceCollection({
+      category,
+      collectionId: sourceFolderId,
+      title: sourceTitle,
+      description: sourceImages[0]?.groupDescription,
+      attachments: remaining.map(toReferenceCollectionAttachment),
+    });
+
+    setSavedReferences((current) => [
+      ...createdRefs.map(toSavedReferenceImage),
+      ...remainingRefs.map(toSavedReferenceImage),
+      ...current.filter(
+        (ref) =>
+          (ref.collectionId ?? ref.environmentId) !== sourceFolderId &&
+          (ref.collectionId ?? ref.environmentId) !== folder.id
+      ),
+    ]);
+    setReferenceFolders((current) => upsertReferenceFolderRecord(current, folder));
+  }, []);
+
+  const handleUpdateReferenceMetadata = useCallback(async ({
+    folderId,
+    category,
+    draft,
+  }: {
+    folderId: string;
+    category: ReferenceLibraryRoute;
+    draft: ReferenceMetadataDraft;
+  }) => {
+    const folderImages = savedReferencesRef.current.filter(
+      (ref) => (ref.collectionId ?? ref.environmentId ?? ref.id) === folderId
+    );
+    const isCollection = folderImages.some((ref) => ref.collectionId || ref.environmentId);
+
+    if (!isCollection && draft.images.length === 1) {
+      const imageDraft = draft.images[0];
+      if (!imageDraft) return;
+      const updated = await updateReference({
+        id: imageDraft.id,
+        category,
+        title: imageDraft.title,
+        description: imageDraft.description,
+      });
+      setSavedReferences((current) =>
+        current.map((ref) => (ref.id === imageDraft.id ? toSavedReferenceImage(updated) : ref))
+      );
+      return;
+    }
+
+    const updatedReferences = await updateReferenceCollection({
+      category,
+      collectionId: folderId,
+      title: draft.title,
+      description: draft.description,
+      attachments: draft.images.map((imageDraft) => {
+        const currentImage = folderImages.find((image) => image.id === imageDraft.id);
+        return {
+          id: imageDraft.id,
+          name: currentImage?.name ?? imageDraft.name,
+          title: imageDraft.title,
+          mimeType: currentImage?.mimeType ?? 'image/png',
+          bytesBase64: currentImage?.bytesBase64 ?? '',
+          description: imageDraft.description,
+          section: currentImage?.section,
+        };
+      }),
+    });
+    setSavedReferences((current) => [
+      ...updatedReferences.map(toSavedReferenceImage),
+      ...current.filter((ref) => ref.collectionId !== folderId && ref.environmentId !== folderId),
+    ]);
+    setReferenceFolders((current) => {
+      const existingFolder = current.find((folder) => folder.id === folderId);
+      if (!existingFolder) return current;
+      return upsertReferenceFolderRecord(current, {
+        ...existingFolder,
+        title: draft.title,
+        description: draft.description,
+      });
+    });
   }, []);
 
   const upsertDirectorChatsForThread = useCallback((threadId: string, chats: DirectorChatRecord[]) => {
@@ -2707,6 +3335,245 @@ export function App() {
     );
   }, []);
 
+  const runDirectorTurn = useCallback(async ({
+    chatId,
+    threadId,
+    promptText,
+    optimisticReferences,
+    optimisticModelId,
+    optimisticModelLabel,
+    replaceAssistantMessageId,
+    performRequest,
+  }: {
+    chatId: string;
+    threadId: string;
+    promptText: string;
+    optimisticReferences: AttachmentRecord[];
+    optimisticModelId?: string | null;
+    optimisticModelLabel?: string | null;
+    replaceAssistantMessageId?: string | null;
+    performRequest: () => Promise<Awaited<ReturnType<typeof sendDirectorMessage>>>;
+  }) => {
+    const optimisticRunId = `director-optimistic-${Date.now()}`;
+    const optimisticTimestamp = new Date().toISOString();
+    const optimisticUserMessage: DirectorMessageRecord = {
+      id: `${optimisticRunId}-user`,
+      chatId,
+      role: 'user',
+      parts: [{ type: 'text', text: promptText }],
+      status: 'completed',
+      modelId: null,
+      modelLabel: null,
+      fastMode: false,
+      references: optimisticReferences,
+      createdAt: optimisticTimestamp,
+      updatedAt: optimisticTimestamp,
+    };
+    const optimisticAssistantMessage: DirectorMessageRecord = {
+      id: `${optimisticRunId}-assistant`,
+      chatId,
+      role: 'assistant',
+      parts: [],
+      status: 'streaming',
+      modelId: optimisticModelId ?? null,
+      modelLabel: optimisticModelLabel ?? null,
+      fastMode: effectiveFastMode,
+      references: [],
+      createdAt: optimisticTimestamp,
+      updatedAt: optimisticTimestamp,
+    };
+
+    setActiveDirectorRunsByChatId((current) => ({
+      ...current,
+      [chatId]: {
+        chatId,
+        threadId,
+        messageId: replaceAssistantMessageId ?? optimisticAssistantMessage.id,
+        modelId: optimisticAssistantMessage.modelId,
+        modelLabel: optimisticAssistantMessage.modelLabel,
+        fastMode: false,
+        startedAt: optimisticAssistantMessage.createdAt,
+      },
+    }));
+    setDirectorMessagesByChatId((current) => {
+      const currentMessages =
+        current[chatId] ??
+        directorMessagesByChatIdRef.current[chatId] ??
+        directorMessagesCacheRef.current[chatId] ??
+        [];
+      const nextAssistantMessage = replaceAssistantMessageId
+        ? { ...optimisticAssistantMessage, id: replaceAssistantMessageId }
+        : optimisticAssistantMessage;
+      const nextMessages = replaceAssistantMessageId
+        ? mergeDirectorMessages(currentMessages, [nextAssistantMessage])
+        : mergeDirectorMessages(currentMessages, [
+            optimisticUserMessage,
+            nextAssistantMessage,
+          ]);
+      return limitDirectorMessagesByChatId({
+        ...current,
+        [chatId]: nextMessages,
+      }, chatId);
+    });
+
+    let result: Awaited<ReturnType<typeof sendDirectorMessage>>;
+    try {
+      result = await performRequest();
+    } catch (error) {
+      setActiveDirectorRunsByChatId((current) => {
+        const next = { ...current };
+        delete next[chatId];
+        return next;
+      });
+      setDirectorMessagesByChatId((current) =>
+        limitDirectorMessagesByChatId({
+          ...current,
+          [chatId]: mergeDirectorMessages(
+            (current[chatId] ?? []).filter((message) =>
+              replaceAssistantMessageId ? message.id !== replaceAssistantMessageId : message.id !== optimisticAssistantMessage.id
+            ),
+            [
+              {
+                ...optimisticAssistantMessage,
+                id: replaceAssistantMessageId ?? optimisticAssistantMessage.id,
+                status: 'failed',
+                parts: [
+                  {
+                    type: 'text',
+                    text: error instanceof Error ? error.message : 'Director failed to start.',
+                  },
+                ],
+                updatedAt: new Date().toISOString(),
+              },
+            ]
+          ),
+        }, chatId)
+      );
+      throw error;
+    }
+
+    if (result.chat) {
+      setDirectorChatsByThreadId((current) => ({
+        ...current,
+        [threadId]: [
+          { ...result.chat, isStreaming: false },
+          ...(current[threadId] ?? []).filter((chat) => chat.id !== result.chat?.id),
+        ],
+      }));
+    }
+
+    setActiveDirectorRunsByChatId((current) => {
+      const next = { ...current };
+      delete next[chatId];
+      return next;
+    });
+
+    setDirectorMessagesByChatId((current) =>
+      limitDirectorMessagesByChatId({
+        ...current,
+        [chatId]: mergeDirectorMessages(
+          (current[chatId] ?? []).filter(
+            (message) =>
+              message.id !== optimisticUserMessage.id &&
+              message.id !== optimisticAssistantMessage.id &&
+              message.id !== replaceAssistantMessageId
+          ),
+          [result.userMessage, result.assistantMessage]
+        ),
+      }, chatId)
+    );
+
+    return result;
+  }, [effectiveFastMode, limitDirectorMessagesByChatId]);
+
+  const applyUpdatedDirectorMessage = useCallback((message: DirectorMessageRecord | null) => {
+    if (!message) {
+      return;
+    }
+
+    setDirectorMessagesByChatId((current) => {
+      const currentMessages =
+        current[message.chatId] ??
+        directorMessagesByChatIdRef.current[message.chatId] ??
+        directorMessagesCacheRef.current[message.chatId] ??
+        [];
+      const nextMessagesByChatId = limitDirectorMessagesByChatId({
+        ...current,
+        [message.chatId]: mergeDirectorMessages(currentMessages, [message]),
+      }, message.chatId);
+      directorMessagesByChatIdRef.current = nextMessagesByChatId;
+      directorMessagesCacheRef.current[message.chatId] = nextMessagesByChatId[message.chatId] ?? [];
+      return nextMessagesByChatId;
+    });
+  }, [limitDirectorMessagesByChatId]);
+
+  const handleApproveDirectorAction = useCallback(async (messageId: string, actionIndex: number) => {
+    const clientRunId = `director-${messageId}-${actionIndex}`;
+    const messages =
+      (activeDirectorChatId ? directorMessagesByChatIdRef.current[activeDirectorChatId] : null) ??
+      Object.values(directorMessagesByChatIdRef.current).find((entries) =>
+        entries.some((message) => message.id === messageId)
+      ) ??
+      [];
+    const sourceMessage = messages.find((message) => message.id === messageId);
+    const toolParts = sourceMessage?.parts.filter(
+      (part): part is Extract<DirectorMessagePart, { type: 'tool-generateImages' }> =>
+        part.type === 'tool-generateImages'
+    ) ?? [];
+    const targetPart = toolParts[actionIndex] ?? null;
+    const requestedCount = Math.max(1, targetPart?.input.count ?? 1);
+    const generationStartedAt = new Date().toISOString();
+    const loadingEntries = createLoadingEntries(clientRunId, requestedCount, {
+      provider: 'codex',
+      modelId: 'codex-gpt-5-4-mini',
+      modelLabel: 'GPT-5.4 Mini',
+      generationStartedAt,
+    });
+
+    if (selectedThreadId) {
+      setActiveRunsById((current) => {
+        const nextState = {
+          ...current,
+          [clientRunId]: {
+            clientRunId,
+            threadId: selectedThreadId,
+            mode: 'director' as const,
+            provider: 'codex',
+            modelId: 'codex-gpt-5-4-mini',
+            modelLabel: 'GPT-5.4 Mini',
+            generationStartedAt,
+            loadingEntries,
+          },
+        };
+        activeRunsRef.current = nextState;
+        return nextState;
+      });
+      setGeneratedImages((current) => [
+        ...loadingEntries,
+        ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId)),
+      ]);
+    }
+
+    try {
+      const updatedMessage = await approveDirectorAction({ messageId, actionIndex, clientRunId });
+      applyUpdatedDirectorMessage(updatedMessage);
+    } catch (error) {
+      setActiveRunsById((current) => {
+        const nextState = { ...current };
+        delete nextState[clientRunId];
+        activeRunsRef.current = nextState;
+        return nextState;
+      });
+      setGeneratedImages((current) => current.filter((image) => !isLoadingEntryForRun(image, clientRunId)));
+      throw error;
+    }
+  }, [activeDirectorChatId, applyUpdatedDirectorMessage, selectedThreadId]);
+
+  const handleDeclineDirectorAction = useCallback(async (messageId: string, actionIndex: number) => {
+    const updatedMessage = await declineDirectorAction({ messageId, actionIndex });
+    applyUpdatedDirectorMessage(updatedMessage);
+  }, [applyUpdatedDirectorMessage]);
+
   const handleSendDirectorPrompt = useCallback(async () => {
     const promptText = prompt.trim();
     if (!promptText || activeDirectorRun) {
@@ -2771,10 +3638,13 @@ export function App() {
       );
     }
 
+    clearComposerAfterSubmit();
+
     const selectedSavedReferences = resolveSavedReferenceSelections(
       savedReferences,
       selectedPromptReferenceIds,
       prompt.trim(),
+      referenceFolders,
     );
     const seenDirectorReferenceBytes = new Set<string>();
     const referencePayload = [
@@ -2799,132 +3669,91 @@ export function App() {
           description: savedReferences.find((reference) => reference.id === image.id)?.description,
         })),
     ];
-
-    const selectedModel = getModelOptionById(selectedModelId) ?? getDefaultModelOption();
-    const optimisticRunId = `director-optimistic-${Date.now()}`;
-    const optimisticTimestamp = new Date().toISOString();
-    const optimisticUserMessage: DirectorMessageRecord = {
-      id: `${optimisticRunId}-user`,
-      chatId: targetChatId,
-      role: 'user',
-      contentMarkdown: prompt.trim(),
-      status: 'completed',
-      modelId: selectedModel.providerId === 'codex' ? selectedModel.id : getDefaultModelOption().id,
-      modelLabel: selectedModel.providerId === 'codex' ? selectedModel.label : getDefaultModelOption().label,
-      fastMode: effectiveFastMode,
-      references: [],
-      createdAt: optimisticTimestamp,
-      updatedAt: optimisticTimestamp,
-    };
-    const optimisticAssistantMessage: DirectorMessageRecord = {
-      id: `${optimisticRunId}-assistant`,
-      chatId: targetChatId,
-      role: 'assistant',
-      contentMarkdown: '',
-      status: 'streaming',
-      modelId: optimisticUserMessage.modelId,
-      modelLabel: optimisticUserMessage.modelLabel,
-      fastMode: effectiveFastMode,
-      references: [],
-      createdAt: optimisticTimestamp,
-      updatedAt: optimisticTimestamp,
-    };
-
-    setActiveDirectorRunsByChatId((current) => ({
-      ...current,
-      [targetChatId]: {
-        chatId: targetChatId,
-        threadId: activeThreadId,
-        messageId: optimisticAssistantMessage.id,
-        modelId: optimisticAssistantMessage.modelId,
-        modelLabel: optimisticAssistantMessage.modelLabel,
-        fastMode: optimisticAssistantMessage.fastMode,
-        startedAt: optimisticAssistantMessage.createdAt,
-      },
+    const optimisticReferenceAttachments = referencePayload.map((reference) => ({
+      name: reference.name,
+      title: reference.title ?? null,
+      description: reference.description ?? null,
+      mimeType: reference.mimeType,
+      previewUrl: `data:${reference.mimeType};base64,${reference.bytesBase64}`,
     }));
-    setDirectorMessagesByChatId((current) =>
-      limitDirectorMessagesByChatId({
-        ...current,
-        [targetChatId]: mergeDirectorMessages(current[targetChatId] ?? [], [
-          optimisticUserMessage,
-          optimisticAssistantMessage,
-        ]),
-      }, targetChatId)
-    );
-
-    let result: Awaited<ReturnType<typeof sendDirectorMessage>>;
-    try {
-      result = await sendDirectorMessage({
-        chatId: targetChatId,
-        threadId: activeThreadId,
-        prompt: promptText,
-        modelId: selectedModel.providerId === 'codex' ? selectedModel.id : getDefaultModelOption().id,
-        fastMode: effectiveFastMode,
-        referenceImages: referencePayload,
-      });
-    } catch (error) {
-      setActiveDirectorRunsByChatId((current) => {
-        const next = { ...current };
-        delete next[targetChatId];
-        return next;
-      });
-      setDirectorMessagesByChatId((current) =>
-        limitDirectorMessagesByChatId({
-          ...current,
-          [targetChatId]: mergeDirectorMessages(
-            (current[targetChatId] ?? []).filter((message) => message.id !== optimisticAssistantMessage.id),
-            [
-              {
-                ...optimisticAssistantMessage,
-                status: 'failed',
-                contentMarkdown: error instanceof Error ? error.message : 'Director failed to start.',
-                updatedAt: new Date().toISOString(),
-              },
-            ]
-          ),
-        }, targetChatId)
-      );
-      throw error;
-    }
-
-    if (result.chat) {
-      setDirectorChatsByThreadId((current) => ({
-        ...current,
-        [activeThreadId]: [
-          { ...result.chat, isStreaming: true },
-          ...(current[activeThreadId] ?? []).filter((chat) => chat.id !== result.chat?.id),
-        ],
-      }));
-    }
-
-    setDirectorMessagesByChatId((current) =>
-      limitDirectorMessagesByChatId({
-        ...current,
-        [targetChatId]: mergeDirectorMessages(
-          (current[targetChatId] ?? []).filter(
-            (message) => message.id !== optimisticUserMessage.id && message.id !== optimisticAssistantMessage.id
-          ),
-          [result.userMessage, result.assistantMessage]
-        ),
-      }, targetChatId)
-    );
-    directorComposerRef.current?.clear();
-    setPrompt('');
+    await runDirectorTurn({
+      chatId: targetChatId,
+      threadId: activeThreadId,
+      promptText,
+      optimisticReferences: optimisticReferenceAttachments,
+      optimisticModelId: selectedModel.id,
+      optimisticModelLabel: selectedModel.label,
+      performRequest: () =>
+        sendDirectorMessage({
+          chatId: targetChatId,
+          threadId: activeThreadId,
+          prompt: promptText,
+          modelId: selectedModel.id,
+          referenceImages: referencePayload,
+        }),
+    });
   }, [
     activeDirectorChatId,
     activeDirectorRun,
-    effectiveFastMode,
+    clearComposerAfterSubmit,
     ensureProjectThreadWorkspace,
+    runDirectorTurn,
     prompt,
     referenceImages,
     savedReferences,
-    selectedModelId,
+    selectedModel.id,
+    selectedModel.label,
     selectedPromptReferenceIds,
     selectedProjectId,
     setSelectedThreadIdImmediately,
     selectedThreadId,
-    limitDirectorMessagesByChatId,
   ]);
+
+  const handleRegenerateDirectorResponse = useCallback(async (assistantMessageId: string) => {
+    const activeThreadId = selectedThreadId;
+    const chatId = activeDirectorChatId;
+    if (!activeThreadId || !chatId || activeDirectorRunsRef.current[chatId]) {
+      return;
+    }
+
+    const messages =
+      directorMessagesByChatIdRef.current[chatId] ??
+      directorMessagesCacheRef.current[chatId] ??
+      [];
+    const assistantIndex = messages.findIndex(
+      (message) => message.id === assistantMessageId && message.role === 'assistant'
+    );
+    if (assistantIndex <= 0) {
+      return;
+    }
+
+    const sourceUserMessage = messages[assistantIndex - 1];
+    const sourceAssistantMessage = messages[assistantIndex];
+    if (sourceUserMessage?.role !== 'user') {
+      return;
+    }
+
+    const promptText = getDirectorText(sourceUserMessage.parts).trim();
+    if (!promptText) {
+      return;
+    }
+
+    await runDirectorTurn({
+      chatId,
+      threadId: activeThreadId,
+      promptText,
+      optimisticReferences: (sourceUserMessage.references ?? []) as AttachmentRecord[],
+      optimisticModelId: sourceAssistantMessage?.modelId ?? null,
+      optimisticModelLabel: sourceAssistantMessage?.modelLabel ?? null,
+      replaceAssistantMessageId: assistantMessageId,
+      performRequest: () =>
+        regenerateDirectorMessage({
+          chatId,
+          threadId: activeThreadId,
+          assistantMessageId,
+        }),
+    });
+  }, [activeDirectorChatId, runDirectorTurn, selectedThreadId]);
 
   const handleCancelActiveDirectorChat = useCallback(async () => {
     if (!activeDirectorChatId) {
@@ -2932,42 +3761,6 @@ export function App() {
     }
     await cancelDirectorChat(activeDirectorChatId);
   }, [activeDirectorChatId]);
-
-  const handleApproveDirectorAction = useCallback(async (messageId: string, actionIndex: number) => {
-    try {
-      const updatedMessage = await approveDirectorAction({ messageId, actionIndex });
-      if (!updatedMessage) {
-        return;
-      }
-      setDirectorMessagesByChatId((current) =>
-        limitDirectorMessagesByChatId({
-          ...current,
-          [updatedMessage.chatId]: mergeDirectorMessages(current[updatedMessage.chatId] ?? [], [updatedMessage]),
-        }, updatedMessage.chatId)
-      );
-    } catch (error) {
-      console.error('Failed to approve Director action', error);
-      toast.error(getErrorMessage(error, 'Failed to approve Director action.'));
-    }
-  }, [limitDirectorMessagesByChatId]);
-
-  const handleDeclineDirectorAction = useCallback(async (messageId: string, actionIndex: number) => {
-    try {
-      const updatedMessage = await declineDirectorAction({ messageId, actionIndex });
-      if (!updatedMessage) {
-        return;
-      }
-      setDirectorMessagesByChatId((current) =>
-        limitDirectorMessagesByChatId({
-          ...current,
-          [updatedMessage.chatId]: mergeDirectorMessages(current[updatedMessage.chatId] ?? [], [updatedMessage]),
-        }, updatedMessage.chatId)
-      );
-    } catch (error) {
-      console.error('Failed to decline Director action', error);
-      toast.error(getErrorMessage(error, 'Failed to decline Director action.'));
-    }
-  }, [limitDirectorMessagesByChatId]);
 
   const appendReferenceImages = useCallback(async (files: FileList | File[]) => {
     const imageFiles = Array.from(files).filter((file) => file.type.startsWith('image/'));
@@ -3602,7 +4395,7 @@ export function App() {
     try {
       const structured = await structureScenePrompt({
         sourceText: clipboardText,
-        modelId: 'codex-gpt-5-4-mini',
+        modelId: selectedModel.capabilities.includes('text') ? selectedModel.id : getDefaultModelOption('text').id,
       });
 
       let workingSceneGroup = activeSceneGroup;
@@ -3833,13 +4626,17 @@ export function App() {
         return;
       }
 
-      const references = await listReferences();
+      const [references, folders] = await Promise.all([
+        listReferences(),
+        listReferenceFolders(),
+      ]);
       setSavedReferences((current) => {
         for (const reference of current) {
           revokeReferencePreviewUrl(reference);
         }
         return references.map(toSavedReferenceImage);
       });
+      setReferenceFolders(sortReferenceFolders(folders));
 
       toast.success('Reference imported');
     } catch (error) {
@@ -3935,14 +4732,12 @@ export function App() {
     }
 
     const clientRunId = createClientRunId();
-    const currentGenerationMode = generationMode;
     const currentShotCount = shotCount;
     const currentSelectedAspectRatio = selectedAspectRatio;
-    const currentIsAngleEnabled = isAngleEnabled;
-    const currentSelectedAngle = selectedAngle;
     let currentReferenceImages = [...referenceImages];
     const currentGeneratedImages = [...generatedImages];
     const currentSavedReferences = [...savedReferences];
+    const currentReferenceFolders = [...referenceFolders];
     const currentSelectedPromptReferenceIds = [...selectedPromptReferenceIds];
 
     try {
@@ -3984,6 +4779,7 @@ export function App() {
         currentSavedReferences,
         currentSelectedPromptReferenceIds,
         trimmedPrompt,
+        currentReferenceFolders,
       );
       for (const selection of selectedSavedReferences) {
         const ref = selection.reference;
@@ -4052,22 +4848,12 @@ export function App() {
         bytesBase64: ref.bytesBase64,
       }));
 
-      const generationPrompt =
-        currentGenerationMode === 'scene'
-          ? `${mappedPrompt}\n\nAspect ratio: ${currentSelectedAspectRatio}\nMode: Scene`
-          : [
-              mappedPrompt,
-              '',
-              `Aspect ratio: ${currentSelectedAspectRatio}`,
-              currentIsAngleEnabled ? buildAngleDirective(currentSelectedAngle) : null,
-            ]
-              .filter((line): line is string => line !== null)
-              .join('\n');
+      const generationPrompt = [mappedPrompt, '', `Aspect ratio: ${currentSelectedAspectRatio}`].join('\n');
 
       registerActiveRun({
         clientRunId,
         threadId: activeThreadId,
-        mode: currentGenerationMode,
+        mode: 'manual',
         count: currentShotCount,
         provider: selectedProviderId,
         modelId: selectedModel.id,
@@ -4081,7 +4867,7 @@ export function App() {
         fastMode: effectiveFastMode,
         provider: selectedProviderId,
         modelId: selectedModel.id,
-        mode: currentGenerationMode,
+        mode: 'manual',
         prompt: generationPrompt,
         count: currentShotCount,
         threadId: activeThreadId,
@@ -4126,16 +4912,13 @@ export function App() {
     createClientRunId,
     decrementLocalRunningThread,
     buildGeneratedImageReference,
-    generationMode,
     generatedImages,
-    isAngleEnabled,
     effectiveFastMode,
     prompt,
     referenceImages,
     refreshProjects,
     registerActiveRun,
     savedReferences,
-    selectedAngle,
     selectedProjectId,
     selectedAspectRatio,
     setSelectedThreadIdImmediately,
@@ -4211,6 +4994,8 @@ export function App() {
     if (!session || !session.point) {
       return;
     }
+    const imageModel = selectedModel.capabilities.includes('image') ? selectedModel : getDefaultModelOption('image');
+    const imageProviderId = imageModel.providerId;
 
     let activeProjectId = selectedProjectId;
     let activeThreadId = selectedThreadId;
@@ -4288,9 +5073,9 @@ export function App() {
       threadId: activeThreadId,
       mode: 'pinpoint',
       count: 1,
-      provider: selectedProviderId,
-      modelId: selectedModel.id,
-      modelLabel: selectedModel.label,
+      provider: imageProviderId,
+      modelId: imageModel.id,
+      modelLabel: imageModel.label,
     });
     closePlayer();
     toast.message('Generation started');
@@ -4299,8 +5084,8 @@ export function App() {
       const result = await generateImages({
         clientRunId,
         fastMode: effectiveFastMode,
-        provider: selectedProviderId,
-        modelId: selectedModel.id,
+        provider: imageProviderId,
+        modelId: imageModel.id,
         mode: 'pinpoint',
         prompt: [
           'Pin Point source image: RefImage1',
@@ -4368,7 +5153,6 @@ export function App() {
     registerActiveRun,
     selectedAspectRatio,
     selectedModel,
-    selectedProviderId,
     selectedProjectId,
     setSelectedThreadIdImmediately,
     selectedThreadId,
@@ -4379,6 +5163,8 @@ export function App() {
     if (!session) {
       return;
     }
+    const imageModel = selectedModel.capabilities.includes('image') ? selectedModel : getDefaultModelOption('image');
+    const imageProviderId = imageModel.providerId;
 
     let activeProjectId = selectedProjectId;
     let activeThreadId = selectedThreadId;
@@ -4446,9 +5232,9 @@ export function App() {
       threadId: activeThreadId,
       mode: 'camera',
       count: outputCount,
-      provider: selectedProviderId,
-      modelId: selectedModel.id,
-      modelLabel: selectedModel.label,
+      provider: imageProviderId,
+      modelId: imageModel.id,
+      modelLabel: imageModel.label,
     });
     closePlayer();
     toast.message('Generation started');
@@ -4457,8 +5243,8 @@ export function App() {
       const result = await generateImages({
         clientRunId,
         fastMode: effectiveFastMode,
-        provider: selectedProviderId,
-        modelId: selectedModel.id,
+        provider: imageProviderId,
+        modelId: imageModel.id,
         mode: 'camera',
         prompt: [
           'Camera source image: RefImage1',
@@ -4527,7 +5313,6 @@ export function App() {
     refreshProjects,
     registerActiveRun,
     selectedModel,
-    selectedProviderId,
     selectedProjectId,
     setSelectedThreadIdImmediately,
     selectedThreadId,
@@ -4554,7 +5339,10 @@ export function App() {
         const workspace = await ensureProjectThreadWorkspace();
         const nextProjects = await listProjectsWithThreads();
         const images = await listGeneratedImages(workspace.thread.id);
-        const references = await listReferences();
+        const [references, folders] = await Promise.all([
+          listReferences(),
+          listReferenceFolders(),
+        ]);
         if (!cancelled) {
           setProjects(nextProjects);
           setOpenProjects((current) => {
@@ -4575,6 +5363,7 @@ export function App() {
             }
             return references.map(toSavedReferenceImage);
           });
+          setReferenceFolders(sortReferenceFolders(folders));
         }
       } catch (error) {
         console.error('Failed to load workspace', error);
@@ -4786,9 +5575,14 @@ export function App() {
         },
       }));
       setDirectorMessagesByChatId((current) => {
+        const incomingMessages = [event.userMessage, event.assistantMessage];
+        const currentMessages = removeMatchingOptimisticDirectorMessages(
+          current[event.chatId] ?? [],
+          incomingMessages
+        );
         const nextMessagesByChatId = limitDirectorMessagesByChatId({
           ...current,
-          [event.chatId]: mergeDirectorMessages(current[event.chatId] ?? [], [event.userMessage, event.assistantMessage]),
+          [event.chatId]: mergeDirectorMessages(currentMessages, incomingMessages),
         }, event.chatId);
         directorMessagesByChatIdRef.current = nextMessagesByChatId;
         directorMessagesCacheRef.current[event.chatId] = nextMessagesByChatId[event.chatId] ?? [];
@@ -4801,7 +5595,7 @@ export function App() {
     return subscribeToDirectorMessageDelta((event) => {
       pendingDirectorDeltaByMessageIdRef.current[event.messageId] = {
         chatId: event.chatId,
-        content: event.content,
+        parts: event.parts,
       };
 
       if (directorDeltaFlushTimerRef.current !== null) {
@@ -4828,7 +5622,7 @@ export function App() {
             nextMessagesByChatId,
             pendingDelta.chatId,
             messageId,
-            pendingDelta.content,
+            pendingDelta.parts,
             'streaming'
           );
           directorMessagesCacheRef.current[pendingDelta.chatId] =
@@ -4836,7 +5630,7 @@ export function App() {
           emitDirectorMessageStreamSnapshot({
             chatId: pendingDelta.chatId,
             messageId,
-            content: pendingDelta.content,
+            parts: pendingDelta.parts,
             status: 'streaming',
           });
         }
@@ -4872,7 +5666,7 @@ export function App() {
             current,
             event.chatId,
             event.messageId,
-            event.content,
+            event.parts,
             'completed',
             new Date().toISOString()
           ),
@@ -4901,9 +5695,10 @@ export function App() {
             current,
             event.chatId,
             event.messageId,
-            event.content,
+            event.parts,
             'failed',
-            new Date().toISOString()
+            new Date().toISOString(),
+            event.errorMessage
           ),
           event.chatId
         );
@@ -5060,75 +5855,6 @@ export function App() {
         />
       ) : null}
 
-      <AddReferenceDialog
-        open={isAddReferenceDialogOpen}
-        onOpenChange={(open) => {
-          setIsAddReferenceDialogOpen(open);
-          if (!open) {
-            setAddReferenceDialogSeedFiles([]);
-          }
-        }}
-        onSubmit={handleAddSavedReference}
-        initialRoute={addReferenceDialogRoute}
-        initialFiles={addReferenceDialogSeedFiles}
-        onGenerateDescriptions={async (input) => describeReferenceCollection(input)}
-      />
-      <EditReferenceDialog
-        open={editingReference !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setEditingReference(null);
-          }
-        }}
-        reference={editingReference}
-        onSubmit={async (input) => {
-          if ((input.category === 'environment' && input.environmentId) || input.collectionId) {
-            const updatedReferences = input.collectionId
-              ? await updateReferenceCollection({
-                  category: input.category,
-                  collectionId: input.collectionId,
-                  title: input.title,
-                  description: input.description,
-                  attachments: input.attachments ?? [],
-                })
-              : await updateEnvironmentReference({
-                  environmentId: input.environmentId!,
-                  title: input.title,
-                  description: input.description,
-                  attachments: input.attachments ?? [],
-                });
-            setSavedReferences((current) => [
-              ...updatedReferences.map(toSavedReferenceImage),
-              ...current.filter(
-                (reference) => reference.collectionId !== (input.collectionId ?? input.environmentId)
-              ),
-            ]);
-            toast.success('Reference updated');
-            return;
-          }
-
-          const updated = await updateReference(input);
-          setSavedReferences((current) =>
-            current.map((reference) => {
-              if (input.category === 'environment') {
-                if (reference.environmentId !== input.environmentId) return reference;
-                return {
-                  ...reference,
-                  title: updated.title,
-                  description: updated.description ?? undefined,
-                };
-              }
-              if (reference.id !== input.id) return reference;
-              return {
-                ...reference,
-                title: updated.title,
-                description: updated.description ?? undefined,
-              };
-            })
-          );
-          toast.success('Reference updated');
-        }}
-      />
       {deletingReference ? (
         <ConfirmDeleteDialog
           open={deletingReference !== null}
@@ -5162,6 +5888,14 @@ export function App() {
                 ? current.filter((reference) => reference.environmentId !== deletingReference.environmentId)
                 : current.filter((reference) => reference.id !== deletingReference.id)
             );
+            if (deletingReference.collectionId || deletingReference.environmentId) {
+              setReferenceFolders((current) =>
+                removeReferenceFolderRecord(
+                  current,
+                  deletingReference.collectionId ?? deletingReference.environmentId ?? deletingReference.id,
+                ),
+              );
+            }
             setDeletingReference(null);
             toast.success('Reference deleted');
           }}
@@ -5170,79 +5904,69 @@ export function App() {
 
       <div
         className={[
-          'absolute inset-0 z-0 overflow-y-auto pt-[60px]',
+          'absolute inset-0 z-0',
+          isDirectorWorkspace ? 'overflow-hidden' : 'overflow-y-auto pt-[60px]',
           'transition-[padding-left,padding-right,padding-bottom] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
-          activeStudioView === 'generation'
-            ? isClassicWorkspace || isDirectorWorkspace
-              ? isExpanded
-                ? 'pb-[360px]'
-                : 'pb-[180px]'
-              : 'pb-10'
-            : 'pb-10',
+          isDirectorWorkspace
+            ? ''
+            : activeStudioView === 'generation'
+              ? isClassicWorkspace
+                ? isExpanded
+                  ? 'pb-[360px]'
+                  : 'pb-[180px]'
+                : 'pb-10'
+              : 'pb-10',
           isSidebarCollapsed ? 'pl-0' : 'pl-[260px]',
         ].join(' ')}
-        style={{ paddingRight: isScenesWorkspace || isDirectorWorkspace ? scenesSidebarWidth + 24 : 0 }}
+        style={{ paddingRight: isScenesWorkspace || isDirectorWorkspace || activeStudioView === 'references' ? scenesSidebarWidth + 24 : 0 }}
       >
         <AnimatePresence initial={false}>
           {activeStudioView === 'references' ? (
             <ReferencesWorkspace
               key="references-workspace"
+              folders={referenceFolders}
               references={savedReferences}
               route={activeReferenceLibraryRoute}
-              onAddReference={() => openAddReferenceDialog(activeReferenceLibraryRoute)}
-              onEditReference={(reference) =>
-                setEditingReference({
-                  id: reference.id,
-                  category: reference.category,
-                  collectionId: reference.collectionId,
-                  environmentId: reference.environmentId,
-                  title: getSharedReferenceTitle(reference),
-                  groupTitle: reference.groupTitle,
-                  previewUrl: reference.previewUrl,
-                  description: reference.groupDescription ?? reference.description,
-                  attachments: reference.collectionId
-                    ? savedReferences
-                        .filter((item) => item.collectionId === reference.collectionId)
-                        .map((item) => ({
-                          id: item.id,
-                          name: item.name,
-                          title: item.title,
-                          mimeType: item.mimeType,
-                          bytesBase64: item.bytesBase64,
-                          description: item.description,
-                          section: item.section,
-                        }))
-                    : reference.category === 'environment'
-                      ? savedReferences
-                          .filter((item) => item.environmentId === reference.environmentId)
-                          .map((item) => ({
-                            id: item.id,
-                            name: item.name,
-                            title: item.title,
-                            mimeType: item.mimeType,
-                            bytesBase64: item.bytesBase64,
-                            description: item.description,
-                            section: item.section,
-                          }))
-                      : undefined,
-                })
-              }
+              sidebarWidth={scenesSidebarWidth}
+              isSidebarCollapsed={isSidebarCollapsed}
+              isSidebarResizing={isScenesSidebarResizing}
+              onStartSidebarResize={startScenesSidebarResize}
+              seedFiles={referenceSeedFiles}
+              onSeedFilesConsumed={() => setReferenceSeedFiles([])}
+              onCreateFolder={handleCreateReferenceFolder}
+              onAddImages={handleAddImagesToFolder}
+              onRenameFolder={handleRenameFolder}
+              onRenameImage={handleRenameReferenceImage}
+              onGroupImages={handleGroupReferenceImages}
+              onUpdateReferenceMetadata={handleUpdateReferenceMetadata}
+              onDeleteImageFromFolder={handleDeleteImageFromFolder}
               onDeleteReference={(reference) =>
                 setDeletingReference({
                   id: reference.id,
                   category: reference.category,
                   collectionId: reference.collectionId,
                   environmentId: reference.environmentId,
-                  title: reference.title,
+                  title: getSharedReferenceTitle(reference),
                 })
               }
               onExportReference={handleExportReference}
               onImportReference={() => void handleImportReference()}
             />
+          ) : activeStudioView === 'providers' ? (
+            <ProvidersWorkspace
+              key="providers-workspace"
+              geminiApiKey={providerGeminiApiKey}
+              geminiApiKeyDraft={providerGeminiApiKeyDraft}
+              isKeyVisible={isProviderKeyVisible}
+              isSaving={isSavingProviderSettings}
+              onGeminiApiKeyChange={setProviderGeminiApiKeyDraft}
+              onKeyVisibleChange={setIsProviderKeyVisible}
+              onSave={() => void handleSaveProviderSettings()}
+            />
           ) : (
             <div
               key="generation-workspace"
-              className="min-h-full w-full"
+              className={isDirectorWorkspace ? 'h-full w-full' : 'min-h-full w-full'}
             >
               <AnimatePresence mode="wait" initial={false}>
                 {isClassicWorkspace ? (
@@ -5257,6 +5981,7 @@ export function App() {
                     <GeneratedImageGrid
                       images={generatedImages}
                       className="min-h-full w-full"
+                      loadingEffect="img-fx"
                       selectedImageIds={selectedGeneratedImageIds}
                       onImageSelect={(image) => {
                         void toggleGeneratedImageReference(image as GeneratedImageRecord).catch((error) => {
@@ -5331,15 +6056,23 @@ export function App() {
                     animate={{ opacity: 1, x: 0, filter: 'blur(0px)' }}
                     exit={{ opacity: 0, x: -10, filter: 'blur(6px)' }}
                     transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                    className="min-h-full w-full"
+                    className="h-full w-full"
                   >
                     <DirectorWorkspace
                       chatId={activeDirectorChatId}
                       messages={activeDirectorMessages}
+                      isComposerExpanded={isExpanded}
+                      hasReferenceImages={hasReferenceImages}
                       onSubscribeMessageStream={subscribeToDirectorMessageStream}
                       onGetMessageStreamSnapshots={getDirectorMessageStreamSnapshots}
-                      onApproveDirectorAction={handleApproveDirectorAction}
-                      onDeclineDirectorAction={handleDeclineDirectorAction}
+                      onApproveAction={handleApproveDirectorAction}
+                      onDeclineAction={handleDeclineDirectorAction}
+                      onRegenerateMessage={(messageId) => {
+                        void handleRegenerateDirectorResponse(messageId).catch((error) => {
+                          console.error('Failed to regenerate Director response', error);
+                          toast.error(getErrorMessage(error, 'Failed to regenerate Director response.'));
+                        });
+                      }}
                     />
                   </motion.section>
                 ) : null}
@@ -5809,6 +6542,25 @@ export function App() {
                   </button>
                 ))}
               </div>
+              <div className="mt-6 space-y-2 px-2">
+                <div className="px-3 text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
+                  Providers
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveStudioView('providers');
+                  }}
+                  className={[
+                    'flex h-10 w-full items-center rounded-[12px] px-3 text-left text-[14px] transition-colors',
+                    activeStudioView === 'providers'
+                      ? 'bg-[var(--surface2)] text-[var(--foreground)]'
+                      : 'text-[var(--foreground)] hover:bg-[var(--surface2)]',
+                  ].join(' ')}
+                >
+                  Text
+                </button>
+              </div>
               <div className="mt-6 space-y-3 px-2">
                 <div className="px-3 text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
                   Updates
@@ -6086,81 +6838,6 @@ export function App() {
       >
         <div className="relative mx-auto w-full max-w-[620px]">
           <AnimatePresence initial={false}>
-            {isExpanded && isAnglePanelOpen ? (
-              <>
-                <motion.button
-                  key="angle-panel-scrim"
-                  type="button"
-                  aria-label="Fechar painel de angulos"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.18, ease: 'easeOut' }}
-                  className="fixed inset-0 z-20 cursor-default bg-transparent"
-                  onClick={() => setIsAnglePanelOpen(false)}
-                />
-
-                <motion.div
-                  key="angle-panel"
-                  initial={{ opacity: 1 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 1 }}
-                  transition={{ duration: 0 }}
-                  className="absolute left-1/2 z-30 -translate-x-1/2"
-                  style={{ bottom: 'calc(100% + 12px)' }}
-                  onMouseDown={holdComposerOpen}
-                >
-                  <AnglePanelErrorBoundary>
-                    <AnglePanel
-                      selectedAngle={selectedAngle}
-                      onClose={closeAnglePanel}
-                      onSelectAngle={handleSelectAngle}
-                      onKeepOpen={keepAnglePanelOpen}
-                      onInteract={holdComposerOpen}
-                    />
-                  </AnglePanelErrorBoundary>
-                </motion.div>
-              </>
-            ) : null}
-          </AnimatePresence>
-
-          <AnimatePresence initial={false}>
-            {isExpanded && !isAnglePanelOpen && referenceMentionOptions.length === 0 ? (
-              <motion.div
-                key="floating-mode-angle-controls"
-                initial={{ opacity: 1 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 1 }}
-                transition={{ duration: 0 }}
-                className="absolute left-5 z-20 flex items-center gap-2.5"
-                style={{ bottom: 'calc(100% + 12px)' }}
-                onMouseDown={holdComposerOpen}
-              >
-                <FloatingModeChip
-                  selectedMode={generationMode}
-                  open={isModePickerOpen}
-                  onOpenChange={setIsModePickerOpen}
-                  onSelectMode={(mode) => {
-                    setGenerationMode(mode);
-                    setIsModePickerOpen(false);
-                  }}
-                  onInteract={holdComposerOpen}
-                />
-
-                {generationMode === 'manual' ? (
-                  <FloatingAngleChip
-                    selectedAngle={selectedAngle}
-                    enabled={isAngleEnabled}
-                    onClick={openAnglePanel}
-                    onEnabledChange={setIsAngleEnabled}
-                    onInteract={holdComposerOpen}
-                  />
-                ) : null}
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
-
-          <AnimatePresence initial={false}>
             {referenceMentionOptions.length > 0 ? (
               <motion.div
                 key="reference-mention-popover"
@@ -6174,6 +6851,13 @@ export function App() {
                 style={{ bottom: `${popoverBottom}px` }}
                 onMouseDown={holdComposerOpen}
               >
+                {referenceMentionOptions[0]?.folderTitle ? (
+                  <div className="flex items-center gap-1.5 px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-[var(--muted-foreground)]">
+                    <Folder className="size-3" />
+                    <span className="truncate">{referenceMentionOptions[0].folderTitle}</span>
+                    <span className="opacity-60">· escolha uma imagem ou abra uma subpasta</span>
+                  </div>
+                ) : null}
                 {referenceMentionOptions.map((reference, index) => (
                   <Fragment key={reference.id}>
                     {index > 0 && reference.section && reference.section !== referenceMentionOptions[index - 1]?.section ? (
@@ -6292,7 +6976,7 @@ export function App() {
             >
               <PromptComposer
                 ref={classicComposerRef}
-                placeholder="Escreva algo..."
+                placeholder="Type anything"
                 isExpanded={isExpanded}
                 hasReferenceImages={hasReferenceImages}
                 mentionCandidates={referenceMentionCandidates}
@@ -6371,7 +7055,7 @@ export function App() {
               className={[
                 'pointer-events-none absolute inset-x-0 bottom-0 z-20 flex items-center justify-between',
                 'transition-[left,right,bottom] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
-                isExpanded ? 'left-5 right-5 bottom-4' : 'left-4 right-4 bottom-3',
+                isExpanded ? 'left-5 right-5 bottom-4' : 'left-4 right-4 bottom-2.5',
               ].join(' ')}
             >
               <div className="flex min-w-0 flex-1 items-center">
@@ -6381,18 +7065,23 @@ export function App() {
                     isExpanded ? 'mr-0 w-0 opacity-0' : 'mr-2.5 w-10 opacity-100',
                   ].join(' ')}
                 >
-                  <button
-                    ref={plusButtonRef}
-                    type="button"
-                    aria-label="Adicionar"
-                    onClick={openReferencePicker}
-                    tabIndex={isExpanded ? -1 : 0}
-                    aria-hidden={isExpanded}
-                    className="pointer-events-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] text-[var(--foreground)] backdrop-blur-xl transition-[background-color,border-color] duration-200 hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)]"
-                  >
-                    <Plus className="size-4" />
-                  </button>
-                </div>
+                <button
+                  ref={plusButtonRef}
+                  type="button"
+                  aria-label="Adicionar"
+                  onClick={openReferencePicker}
+                  tabIndex={isExpanded ? -1 : 0}
+                  aria-hidden={isExpanded}
+                  className={[
+                    'pointer-events-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[var(--foreground)] transition-[background-color,border-color,color,transform] duration-200',
+                    isExpanded
+                      ? 'border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] backdrop-blur-xl hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)]'
+                      : 'border border-transparent bg-transparent hover:text-[var(--foreground)]',
+                  ].join(' ')}
+                >
+                  <Plus className="size-4" />
+                </button>
+              </div>
 
                 <div
                   className={[
@@ -6402,18 +7091,14 @@ export function App() {
                   aria-hidden={!isExpanded}
                 >
                   <ModelPicker
+                    capability="image"
                     isOpen={isModelPickerOpen}
                     selectedModel={selectedModel}
                     selectedProviderId={selectedProviderId}
                     onOpenChange={setIsModelPickerOpen}
                     onProviderChange={(providerId) => {
-                      const fallbackModel =
-                        providerId === 'codex'
-                          ? getModelOptionById('codex-gpt-5-4-mini')
-                          : getModelOptionById('antigravity-gemini-3-5-flash-low');
-                      if (fallbackModel) {
-                        setSelectedModelId(fallbackModel.id);
-                      }
+                      const fallbackModel = getModelsForProvider(providerId, 'image')[0] ?? getDefaultModelOption('image');
+                      setSelectedModelId(fallbackModel.id);
                     }}
                     onModelSelect={setSelectedModelId}
                     onKeepOpen={holdComposerOpen}
@@ -6474,10 +7159,11 @@ export function App() {
 
                   <button
                     type="button"
+                    hidden
                     tabIndex={isExpanded ? 0 : -1}
                     aria-label="Fast"
                     aria-pressed={effectiveFastMode}
-                    disabled={selectedProviderId !== 'codex'}
+                    disabled
                     onPointerDown={(event) => {
                       event.preventDefault();
                       holdComposerOpen();
@@ -6623,13 +7309,8 @@ export function App() {
         onKeepOpen={holdComposerOpen}
         onOpenModelPicker={setIsModelPickerOpen}
         onProviderChange={(providerId) => {
-          const fallbackModel =
-            providerId === 'codex'
-              ? getModelOptionById('codex-gpt-5-4-mini')
-              : getModelOptionById('antigravity-gemini-3-5-flash-low');
-          if (fallbackModel) {
-            setSelectedModelId(fallbackModel.id);
-          }
+          const fallbackModel = getModelsForProvider(providerId, 'text')[0] ?? getDefaultModelOption('text');
+          setSelectedModelId(fallbackModel.id);
         }}
         onModelSelect={setSelectedModelId}
         onToggleFastMode={() => setIsFastModeEnabled((current) => !current)}
@@ -6691,21 +7372,44 @@ function SendButton({
   hostRef,
   onClick,
   disabled,
+  state = 'send',
+  ariaLabel = 'Enviar',
 }: {
   hostRef: RefObject<HTMLDivElement | null>;
   onClick: () => void;
   disabled: boolean;
+  state?: 'send' | 'stop';
+  ariaLabel?: string;
 }) {
+  const colorVariant = state === 'stop' ? 'sunset' : 'colorful';
+
   return (
-    <LiquidMetalButton
+    <BorderBeam
       ref={hostRef}
-      className="pointer-events-auto"
-      aria-label="Enviar"
-      onClick={onClick}
-      disabled={disabled}
+      borderRadius={999}
+      className="pointer-events-auto relative z-30 h-10 w-10 shrink-0"
+      colorVariant={colorVariant}
+      data-send-button-state={state}
+      data-send-button-variant={colorVariant}
+      size="sm"
+      strength={1}
+      theme="dark"
     >
-      <ArrowUp className="size-4" />
-    </LiquidMetalButton>
+      <div className="relative h-10 w-10 rounded-full bg-[rgba(15,16,16,0.92)] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
+        <button
+          type="button"
+          aria-label={ariaLabel}
+          onClick={onClick}
+          disabled={disabled}
+          className="absolute inset-0 inline-flex items-center justify-center rounded-full text-[var(--foreground)] transition-[opacity,transform] duration-200 hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <span className="t-icon-swap size-4" data-state={state} aria-hidden="true">
+            <ArrowUp className="t-icon size-4" data-icon="send" />
+            <Square className="t-icon size-4" data-icon="stop" />
+          </span>
+        </button>
+      </div>
+    </BorderBeam>
   );
 }
 
@@ -7258,29 +7962,38 @@ function SortableSceneRailItem({
 function DirectorWorkspace({
   chatId,
   messages,
+  isComposerExpanded,
+  hasReferenceImages,
   onSubscribeMessageStream,
   onGetMessageStreamSnapshots,
-  onApproveDirectorAction,
-  onDeclineDirectorAction,
+  onRegenerateMessage,
+  onApproveAction,
+  onDeclineAction,
 }: {
   chatId: string | null;
   messages: DirectorMessageRecord[];
+  isComposerExpanded: boolean;
+  hasReferenceImages: boolean;
   onSubscribeMessageStream: (listener: DirectorMessageStreamListener) => () => void;
   onGetMessageStreamSnapshots: (chatId: string) => DirectorMessageStreamSnapshot[];
-  onApproveDirectorAction: (messageId: string, actionIndex: number) => void;
-  onDeclineDirectorAction: (messageId: string, actionIndex: number) => void;
+  onRegenerateMessage: (messageId: string) => void;
+  onApproveAction: (messageId: string, actionIndex: number) => Promise<void>;
+  onDeclineAction: (messageId: string, actionIndex: number) => Promise<void>;
 }) {
   return (
-    <div data-testid="director-workspace" className="h-[calc(100vh-60px)] w-full overflow-hidden">
+    <div data-testid="director-workspace" className="h-full w-full overflow-hidden">
       <div className="mx-auto h-full w-full max-w-[1400px]">
         <div className="h-full min-w-0">
           <DirectorMessageList
             chatId={chatId}
             messages={messages}
+            isComposerExpanded={isComposerExpanded}
+            hasReferenceImages={hasReferenceImages}
             onSubscribeMessageStream={onSubscribeMessageStream}
             onGetMessageStreamSnapshots={onGetMessageStreamSnapshots}
-            onApproveDirectorAction={onApproveDirectorAction}
-            onDeclineDirectorAction={onDeclineDirectorAction}
+            onRegenerateMessage={onRegenerateMessage}
+            onApproveAction={onApproveAction}
+            onDeclineAction={onDeclineAction}
           />
         </div>
       </div>
@@ -7445,49 +8158,326 @@ function DirectorChatThreadRow({
   );
 }
 
+function directorActionToolStatus(rawStatus: string | null): ToolStatus {
+  if (rawStatus === 'running') {
+    return 'running';
+  }
+  if (rawStatus === 'succeeded' || rawStatus === 'completed') {
+    return 'completed';
+  }
+  if (rawStatus === 'failed' || rawStatus === 'declined') {
+    return 'failed';
+  }
+  return 'pending';
+}
+
+function directorActionStatusLabel(status: DirectorRenderableActionStatus | null) {
+  if (!status?.progress) {
+    if (status?.rawStatus === 'declined') {
+      return 'Declined';
+    }
+    return null;
+  }
+
+  if (status.rawStatus === 'running') {
+    return `Gerando ${status.progress.generated} / ${status.progress.total}`;
+  }
+
+  if (status.rawStatus === 'succeeded' || status.rawStatus === 'completed') {
+    return `Gerado ${status.progress.generated} / ${status.progress.total}`;
+  }
+
+  return null;
+}
+
+function directorActionResultAssets(action: DirectorRenderableAction) {
+  if (!action.latestStatus?.result || typeof action.latestStatus.result !== 'object') {
+    return [] as GeneratedImageRecord[];
+  }
+
+  const resultRecord = action.latestStatus.result as Record<string, unknown>;
+  return Array.isArray(resultRecord.assets) ? (resultRecord.assets as GeneratedImageRecord[]) : [];
+}
+
+function DirectorActionCard({
+  messageId,
+  action,
+  onApprove,
+  onDecline,
+}: {
+  messageId: string;
+  action: DirectorRenderableAction;
+  onApprove?: ((messageId: string, actionIndex: number) => Promise<void>) | null;
+  onDecline?: ((messageId: string, actionIndex: number) => Promise<void>) | null;
+}) {
+  const [activeFrameIndex, setActiveFrameIndex] = useState(0);
+  const [pendingDecision, setPendingDecision] = useState<'approve' | 'decline' | null>(null);
+  const [generationStartedAt] = useState(() => new Date().toISOString());
+  const hasAutoApprovedRef = useRef(false);
+  const payload =
+    action.payload && typeof action.payload === 'object' && !Array.isArray(action.payload)
+      ? (action.payload as Record<string, unknown>)
+      : null;
+  const frames = Array.isArray(payload?.frames)
+    ? payload.frames.filter(
+        (frame): frame is { title?: string; prompt?: string } =>
+          Boolean(frame) && typeof frame === 'object' && !Array.isArray(frame)
+      )
+    : [];
+  const activeFrame = frames[activeFrameIndex] ?? null;
+  const actionStatus = action.latestStatus;
+  const statusLabel = directorActionStatusLabel(actionStatus);
+  const resultAssets = directorActionResultAssets(action);
+  const loadingAssets =
+    pendingDecision === 'approve' || actionStatus?.rawStatus === 'running'
+      ? createLoadingEntries(
+          `director-${messageId}-${action.actionIndex}`,
+          typeof payload?.count === 'number' ? payload.count : 1,
+          {
+            provider: 'codex',
+            modelId: 'codex-gpt-5-4-mini',
+            modelLabel: 'GPT-5.4 Mini',
+            generationStartedAt,
+          }
+        )
+      : [];
+  const displayedAssets = resultAssets.length > 0 ? resultAssets : loadingAssets;
+  const showPayloadDetails = displayedAssets.length === 0;
+  const isAwaitingApproval =
+    actionStatus === null &&
+    (action.kind === 'generateImages' || action.kind === 'generate_classic') &&
+    action.approval?.needsApproval === true;
+
+  useEffect(() => {
+    if (isAwaitingApproval && onApprove && !hasAutoApprovedRef.current) {
+      hasAutoApprovedRef.current = true;
+      void handleApprove();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAwaitingApproval]);
+
+  const payloadTitle =
+    action.kind === 'create_scene' && typeof payload?.title === 'string' ? payload.title.trim() : '';
+  const cardTitle = actionStatus?.title?.trim() || payloadTitle || action.summary;
+
+  async function handleApprove() {
+    if (!onApprove) {
+      return;
+    }
+    setPendingDecision('approve');
+    try {
+      await onApprove(messageId, action.actionIndex);
+    } finally {
+      setPendingDecision(null);
+    }
+  }
+
+  async function handleDecline() {
+    if (!onDecline) {
+      return;
+    }
+    setPendingDecision('decline');
+    try {
+      await onDecline(messageId, action.actionIndex);
+    } finally {
+      setPendingDecision(null);
+    }
+  }
+
+  return (
+    <ToolCall
+      name={action.kind === 'generate_classic' ? 'generateImages' : action.kind}
+      status={directorActionToolStatus(actionStatus?.rawStatus ?? null)}
+      className="overflow-visible"
+    >
+      <div className="grid gap-3">
+        <div className="grid gap-1">
+          <div className="text-[13px] font-medium text-[var(--foreground)]">{cardTitle}</div>
+          {actionStatus?.detail ? (
+            <div className="text-[12px] leading-5 text-[var(--muted-foreground)]">{actionStatus.detail}</div>
+          ) : action.summary && action.summary !== cardTitle ? (
+            <div className="text-[12px] leading-5 text-[var(--muted-foreground)]">{action.summary}</div>
+          ) : null}
+        </div>
+
+        {statusLabel ? (
+          <div
+            data-testid="director-action-status"
+            className="inline-flex w-fit rounded-full border border-[var(--border-soft)] bg-[var(--surface2)]/75 px-2.5 py-1 text-[11px] font-medium text-[var(--foreground)]"
+          >
+            {statusLabel}
+          </div>
+        ) : null}
+
+        {action.kind === 'create_scene' ? (
+          <div className="grid gap-2">
+            <div className="flex flex-wrap gap-2">
+              {frames.map((frame, index) => (
+                <button
+                  key={`${action.id}-frame-${index}`}
+                  type="button"
+                  onClick={() => setActiveFrameIndex(index)}
+                  className={[
+                    'inline-flex rounded-full border px-3 py-1.5 text-[12px] transition-colors',
+                    index === activeFrameIndex
+                      ? 'border-[var(--accent)] bg-[var(--surface2)] text-[var(--foreground)]'
+                      : 'border-[var(--border-soft)] bg-[var(--surface)]/72 text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
+                  ].join(' ')}
+                >
+                  {frame.title?.trim() || `Frame ${index + 1}`}
+                </button>
+              ))}
+            </div>
+            {activeFrame?.prompt ? (
+              <div className="rounded-[16px] border border-[var(--border-soft)] bg-[var(--surface2)]/60 p-3 text-[12px] leading-5 text-[var(--muted-foreground)]">
+                {activeFrame.prompt}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {showPayloadDetails && payload && (action.kind === 'generateImages' || action.kind === 'generate_classic') ? (
+          <div className="grid gap-2 rounded-[16px] border border-[var(--border-soft)] bg-[var(--surface2)]/60 p-3">
+            {typeof payload.prompt === 'string' && payload.prompt.trim() ? (
+              <div className="text-[12px] leading-5 text-[var(--foreground)]">{payload.prompt}</div>
+            ) : null}
+            <div className="flex flex-wrap gap-2 text-[11px] text-[var(--muted-foreground)]">
+              {typeof payload.count === 'number' ? (
+                <span className="rounded-full border border-[var(--border-soft)] px-2 py-1">{payload.count} image</span>
+              ) : null}
+              {typeof payload.aspectRatio === 'string' ? (
+                <span className="rounded-full border border-[var(--border-soft)] px-2 py-1">{payload.aspectRatio}</span>
+              ) : null}
+              {Array.isArray(payload.references) && payload.references.length > 0 ? (
+                <span className="rounded-full border border-[var(--border-soft)] px-2 py-1">
+                  {(payload.references as string[]).join(', ')}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        {displayedAssets.length > 0 ? (
+          <GeneratedImageGrid
+            images={displayedAssets}
+            columnCount={Math.min(3, Math.max(1, displayedAssets.length))}
+            fitHeight
+            loadingEffect="shimmer"
+            className="overflow-hidden rounded-[20px] border border-[var(--border-soft)] bg-[var(--surface2)]/45 py-2"
+          />
+        ) : null}
+
+      </div>
+    </ToolCall>
+  );
+}
+
+function DirectorMessageErrorAlert({ reason }: { reason: string }) {
+  return (
+    <div
+      role="alert"
+      className="rounded-[18px] border border-[rgba(245,118,118,0.28)] bg-[rgba(52,24,24,0.52)] px-4 py-3 text-[13px] leading-5 text-[rgb(248,214,214)]"
+    >
+      <div className="mb-1 flex items-center gap-2 text-[13px] font-medium text-[rgb(255,226,226)]">
+        <AlertTriangle className="size-4 shrink-0" />
+        <span>Director stream failed</span>
+      </div>
+      <div className="whitespace-pre-wrap break-words text-[rgb(238,184,184)]">{reason}</div>
+    </div>
+  );
+}
+
+type DirectorReasoningPart = Extract<DirectorMessagePart, { type: 'reasoning' }>;
+
+function DirectorReasoningBlock({
+  hasReasoning,
+  isThinking,
+  messageId,
+  reasoningParts,
+  storageKey,
+  title,
+}: {
+  hasReasoning: boolean;
+  isThinking: boolean;
+  messageId: string;
+  reasoningParts: DirectorReasoningPart[];
+  storageKey: string;
+  title: string;
+}) {
+  return (
+    <ChainOfThought
+      defaultOpen
+      isExpandable={hasReasoning}
+      storageKey={storageKey}
+    >
+      <ChainOfThoughtHeader isShimmering={isThinking}>{title}</ChainOfThoughtHeader>
+      {hasReasoning ? (
+        <ChainOfThoughtContent className="space-y-3">
+          {reasoningParts.map((reasoning, index) => (
+            <MessageResponse
+              key={`${messageId}-reasoning-${index}`}
+              className="director-markdown text-[13px] leading-5"
+            >
+              {reasoning.text}
+            </MessageResponse>
+          ))}
+        </ChainOfThoughtContent>
+      ) : null}
+    </ChainOfThought>
+  );
+}
+
 function DirectorMessageRow({
   message,
-  onApproveDirectorAction,
-  onDeclineDirectorAction,
+  onRegenerate,
+  onApproveAction,
+  onDeclineAction,
 }: {
   message: DirectorMessageRecord;
-  onApproveDirectorAction: (messageId: string, actionIndex: number) => void;
-  onDeclineDirectorAction: (messageId: string, actionIndex: number) => void;
+  onRegenerate?: ((messageId: string) => void) | null;
+  onApproveAction?: ((messageId: string, actionIndex: number) => Promise<void>) | null;
+  onDeclineAction?: ((messageId: string, actionIndex: number) => Promise<void>) | null;
 }) {
   const [hasCopied, setHasCopied] = useState(false);
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
   const isStreamingAssistant = isAssistant && message.status === 'streaming';
-  const hasAssistantContent = message.contentMarkdown.trim().length > 0;
-  const isThinking = isStreamingAssistant && !hasAssistantContent;
-  const isCompleteAssistant = isAssistant && message.status === 'completed' && message.contentMarkdown.trim().length > 0;
-  const durationLabel = isCompleteAssistant ? formatDurationBetween(message.createdAt, message.updatedAt) : null;
-  const renderedBlocks = useMemo(
-    () => (isAssistant ? parseDirectorRenderedBlocks(message.contentMarkdown) : []),
-    [isAssistant, message.contentMarkdown]
+  const textContent = getDirectorText(message.parts);
+  const reasoningParts = message.parts.filter(
+    (part): part is Extract<DirectorMessagePart, { type: 'reasoning' }> => part.type === 'reasoning'
   );
-  const statusByActionIndex = useMemo(() => {
-    const nextStatusByActionIndex = new Map<number, Record<string, unknown>>();
-    for (const block of renderedBlocks) {
-      if (block.type !== 'status' || !block.data) {
-        continue;
-      }
-      const actionIndex = Number(block.data.actionIndex);
-      if (Number.isInteger(actionIndex)) {
-        nextStatusByActionIndex.set(actionIndex, block.data);
-      }
-    }
-    return nextStatusByActionIndex;
-  }, [renderedBlocks]);
-  let actionBlockIndex = -1;
-
+  const toolParts = message.parts.filter(
+    (part): part is Extract<DirectorMessagePart, { type: 'tool-generateImages' }> =>
+      part.type === 'tool-generateImages'
+  );
+  const isCompleteAssistant = isAssistant && message.status === 'completed' && message.parts.length > 0;
+  const isSettledAssistant = isAssistant && message.status !== 'streaming';
+  const durationLabel = isSettledAssistant ? formatDurationBetween(message.createdAt, message.updatedAt) : null;
+  const referenceAttachments = (message.references ?? []) as AttachmentRecord[];
+  const hasReferenceAttachments = referenceAttachments.length > 0;
+  const visibleReasoningParts = reasoningParts.filter((part) => part.text.trim().length > 0);
+  const hasReasoning = visibleReasoningParts.length > 0;
+  const hasVisibleAssistantContent = textContent.trim().length > 0;
+  const failureReason =
+    message.status === 'failed'
+      ? message.errorMessage?.trim() || textContent.trim() || 'The Director stream ended before returning a response.'
+      : null;
+  const showAssistantMarkdown =
+    hasVisibleAssistantContent && (!failureReason || textContent.trim() !== failureReason);
+  const showReasoningBlock = isAssistant && (isStreamingAssistant || hasReasoning || Boolean(durationLabel));
+  const chainOfThoughtStorageKey = `director-message-cot:${message.id}`;
+  const reasoningDurationLabel =
+    message.status !== 'streaming' && durationLabel
+      ? `Thought for ${durationLabel}`
+      : 'Thinking';
+  const isReasoningTitleShimmering = isStreamingAssistant;
   async function copyMessage() {
-    if (!message.contentMarkdown.trim()) {
+    if (!textContent.trim()) {
       return;
     }
 
     try {
-      await navigator.clipboard?.writeText(message.contentMarkdown);
+      await navigator.clipboard?.writeText(textContent);
       setHasCopied(true);
       window.setTimeout(() => setHasCopied(false), 1400);
     } catch (error) {
@@ -7497,11 +8487,11 @@ function DirectorMessageRow({
   }
 
   return (
-    <div className="px-6 py-3">
+    <div data-testid="director-message-row" className="mx-auto w-full max-w-[920px] px-6 py-3">
       <Message
         from={isUser ? 'user' : 'assistant'}
         className={[
-          isUser ? 'ml-auto max-w-[min(680px,78%)] items-end' : 'max-w-[min(900px,100%)] items-start py-3',
+          isUser ? 'ml-auto max-w-[min(680px,78%)] items-end' : 'w-full items-start py-3',
         ].join(' ')}
       >
         <MessageContent
@@ -7509,84 +8499,130 @@ function DirectorMessageRow({
           style={{ userSelect: 'text', WebkitUserSelect: 'text' }}
           className={
             isUser
-              ? 'select-text whitespace-pre-wrap rounded-full bg-[var(--foreground)] px-4 py-2.5 text-[14px] leading-5 text-[var(--background)] shadow-[0_12px_30px_rgba(0,0,0,0.24)]'
+              ? 'select-text whitespace-pre-wrap rounded-[24px] bg-[var(--surface2)]/86 px-4 py-3 text-[14px] leading-5 text-[var(--foreground)] shadow-[0_12px_30px_rgba(0,0,0,0.18)]'
               : 'w-full select-text overflow-visible text-[14px] leading-6 text-[var(--foreground)]'
           }
         >
-          {isThinking ? (
-            <TextShimmer className="text-[14px] leading-6" duration={1.6}>
-              Thinking...
-            </TextShimmer>
-          ) : isUser ? (
-            message.contentMarkdown
-          ) : (
-            <div className="space-y-3">
-              {renderedBlocks.map((block, blockIndex) => {
-                if (block.type === 'action') {
-                  actionBlockIndex += 1;
-                  const actionIndex = actionBlockIndex;
-                  return (
-                    <DirectorActionBlock
-                      key={`${message.id}-action-${blockIndex}`}
-                      messageId={message.id}
-                      actionIndex={actionIndex}
-                      data={block.data}
-                      status={statusByActionIndex.get(actionIndex) ?? null}
-                      onApprove={onApproveDirectorAction}
-                      onDecline={onDeclineDirectorAction}
+          {isUser ? (
+            <>
+              {textContent}
+              {hasReferenceAttachments ? (
+                <Attachments className={textContent.trim() ? 'mt-3' : undefined}>
+                  {referenceAttachments.map((attachment, index) => (
+                    <Attachment
+                      key={`${message.id}-attachment-${index}-${attachment.name}`}
+                      attachment={attachment}
                     />
-                  );
-                }
-                if (block.type === 'status') {
-                  const actionIndex = Number(block.data?.actionIndex);
-                  if (Number.isInteger(actionIndex)) {
-                    return null;
-                  }
-                  return <DirectorStatusBlock key={`${message.id}-status-${blockIndex}`} data={block.data} />;
-                }
-                return (
-                  <MessageResponse
-                    key={`${message.id}-markdown-${blockIndex}`}
-                    isAnimating={message.status === 'streaming'}
-                    className="director-markdown"
-                  >
-                  {block.content}
-                </MessageResponse>
-              );
-              })}
-              {isStreamingAssistant && hasAssistantContent ? (
-                <TextShimmer className="text-[14px] leading-6 text-[var(--muted-foreground)]" duration={1.6}>
-                  Thinking...
-                </TextShimmer>
+                  ))}
+                </Attachments>
               ) : null}
+            </>
+          ) : (
+            <div className="grid gap-3">
+              {showReasoningBlock ? (
+                <DirectorReasoningBlock
+                  hasReasoning={hasReasoning}
+                  isThinking={isReasoningTitleShimmering}
+                  messageId={message.id}
+                  reasoningParts={visibleReasoningParts}
+                  storageKey={chainOfThoughtStorageKey}
+                  title={reasoningDurationLabel}
+                />
+              ) : null}
+              {showAssistantMarkdown ? (
+                <MessageResponse
+                  isAnimating={message.status === 'streaming'}
+                  className="director-markdown"
+                >
+                  {textContent}
+                </MessageResponse>
+              ) : null}
+              {failureReason ? <DirectorMessageErrorAlert reason={failureReason} /> : null}
+              {toolParts.map((part, actionIndex) => (
+                <DirectorActionCard
+                  key={`${message.id}-action-${part.toolCallId}`}
+                  messageId={message.id}
+                  action={{
+                    id: part.toolCallId,
+                    actionIndex,
+                    kind: 'generateImages',
+                    summary: 'Generate images',
+                    payload: part.input,
+                    source: 'tool-call',
+                    approval: {
+                      id: part.approvalId ?? part.toolCallId,
+                      needsApproval: part.state === 'approval-requested',
+                    },
+                    latestStatus:
+                      part.state === 'approval-requested'
+                        ? null
+                        : {
+                            rawStatus:
+                              part.state === 'output-available'
+                                ? 'succeeded'
+                                : part.state === 'output-error'
+                                  ? 'failed'
+                                  : part.state,
+                            title:
+                              part.state === 'output-available'
+                                ? 'Image generation finished'
+                                : part.state === 'output-error'
+                                  ? 'Image generation failed'
+                                  : part.state === 'declined'
+                                    ? 'Image generation declined'
+                                    : 'Generating images',
+                            detail: part.errorText ?? null,
+                            progress:
+                              part.state === 'output-available' && Array.isArray(part.output?.assets)
+                                ? {
+                                    generated: part.output.assets.length,
+                                    total: part.input.count ?? part.output.assets.length,
+                                  }
+                                : null,
+                            result: part.output,
+                          },
+                  }}
+                  onApprove={onApproveAction}
+                  onDecline={onDeclineAction}
+                />
+              ))}
             </div>
           )}
-          {message.status === 'failed' ? (
-            <div className="mt-3 text-[12px] text-[rgb(245,178,178)]">This response ended with an error.</div>
-          ) : null}
         </MessageContent>
         {isCompleteAssistant ? (
           <MessageToolbar className="mt-2 justify-start text-[12px] text-[var(--muted-foreground)]">
             <div className="flex min-w-0 items-center gap-2">
-              {durationLabel ? <span>{durationLabel}</span> : null}
               {message.modelLabel ? (
-                <>
-                  <span className="text-[var(--border-soft)]">/</span>
-                  <span className="truncate">{message.modelLabel}</span>
-                </>
+                <span className="truncate">{message.modelLabel}</span>
               ) : null}
             </div>
             <MessageActions>
+              {onRegenerate ? (
+                <button
+                  type="button"
+                  aria-label="Regenerate Director response"
+                  onClick={() => onRegenerate(message.id)}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-[color,opacity,transform] duration-150 hover:text-[var(--foreground)] active:translate-y-px"
+                >
+                  <RotateCcw className="size-3.5" />
+                </button>
+              ) : null}
               <button
                 type="button"
                 aria-label="Copy Director response"
                 onClick={() => {
                   void copyMessage();
                 }}
-                className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] px-3 text-[12px] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--surface2)] hover:text-[var(--foreground)]"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-[color,opacity,transform] duration-150 hover:text-[var(--foreground)] active:translate-y-px"
               >
-                {hasCopied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-                {hasCopied ? 'Copied' : 'Copy'}
+                <span
+                  className="t-icon-swap size-3.5"
+                  data-state={hasCopied ? 'copied' : 'copy'}
+                  aria-hidden="true"
+                >
+                  <Copy className="t-icon size-3.5" data-icon="copy" />
+                  <Check className="t-icon size-3.5 text-[rgb(96,226,255)]" data-icon="copied" />
+                </span>
               </button>
             </MessageActions>
           </MessageToolbar>
@@ -7598,8 +8634,9 @@ function DirectorMessageRow({
 
 interface DirectorMessageVirtualRowProps {
   messages: DirectorMessageRecord[];
-  onApproveDirectorAction: (messageId: string, actionIndex: number) => void;
-  onDeclineDirectorAction: (messageId: string, actionIndex: number) => void;
+  onRegenerateMessage?: (messageId: string) => void;
+  onApproveAction?: (messageId: string, actionIndex: number) => Promise<void>;
+  onDeclineAction?: (messageId: string, actionIndex: number) => Promise<void>;
 }
 
 function DirectorMessageVirtualRow({
@@ -7607,8 +8644,9 @@ function DirectorMessageVirtualRow({
   index,
   style,
   messages,
-  onApproveDirectorAction,
-  onDeclineDirectorAction,
+  onRegenerateMessage,
+  onApproveAction,
+  onDeclineAction,
 }: RowComponentProps<DirectorMessageVirtualRowProps>) {
   const message = messages[index];
 
@@ -7619,198 +8657,15 @@ function DirectorMessageVirtualRow({
   return (
     <div
       {...ariaAttributes}
-      className={[index === 0 ? 'pt-8' : '', index === messages.length - 1 ? 'pb-[320px]' : ''].join(' ')}
+      className={[index === 0 ? 'pt-[68px]' : '', index === messages.length - 1 ? 'pb-[120px]' : ''].join(' ')}
       style={style as CSSProperties}
     >
       <DirectorMessageRow
         message={message}
-        onApproveDirectorAction={onApproveDirectorAction}
-        onDeclineDirectorAction={onDeclineDirectorAction}
+        onRegenerate={onRegenerateMessage}
+        onApproveAction={onApproveAction}
+        onDeclineAction={onDeclineAction}
       />
-    </div>
-  );
-}
-
-function DirectorActionBlock({
-  messageId,
-  actionIndex,
-  data,
-  status,
-  onApprove,
-  onDecline,
-}: {
-  messageId: string;
-  actionIndex: number;
-  data: Record<string, unknown> | null;
-  status: Record<string, unknown> | null;
-  onApprove: (messageId: string, actionIndex: number) => void;
-  onDecline: (messageId: string, actionIndex: number) => void;
-}) {
-  const action = getDirectorBlockText(data, 'action', 'unknown');
-  const summary = getDirectorBlockText(data, 'summary', 'Director prepared an app action.');
-  const statusValue = getDirectorBlockText(status, 'status', 'pending');
-  const payload = data?.payload && typeof data.payload === 'object' && !Array.isArray(data.payload)
-    ? data.payload as Record<string, unknown>
-    : null;
-  const progress = status?.progress && typeof status.progress === 'object' && !Array.isArray(status.progress)
-    ? status.progress as Record<string, unknown>
-    : null;
-  const generatedProgress = typeof progress?.generated === 'number' ? progress.generated : 0;
-  const totalProgress =
-    typeof progress?.total === 'number'
-      ? progress.total
-      : action === 'create_scene' && Array.isArray(payload?.frames)
-        ? payload.frames.length
-        : typeof payload?.count === 'number'
-          ? payload.count
-          : 0;
-  const sceneTitle = typeof payload?.title === 'string' ? payload.title : '';
-  const scenePrompt = typeof payload?.scenePrompt === 'string' ? payload.scenePrompt : '';
-  const frames = Array.isArray(payload?.frames)
-    ? payload.frames.filter((frame): frame is Record<string, unknown> => Boolean(frame) && typeof frame === 'object' && !Array.isArray(frame))
-    : [];
-  const targetLabel = action === 'create_scene' ? 'Scenes' : action === 'generate_classic' ? 'Classic' : 'Action';
-  const isPending = statusValue === 'pending';
-  const isRunning = statusValue === 'running';
-  const statusLabel = statusValue === 'failed' ? 'failed' : statusValue === 'declined' ? 'declined' : 'needs approval';
-  const statusTitle = status ? getDirectorBlockText(status, 'title') : '';
-  const statusDetail = status ? getDirectorBlockText(status, 'detail') : '';
-  const count =
-    action === 'create_scene' && Array.isArray(payload?.frames)
-      ? `${payload.frames.length} frame${payload.frames.length === 1 ? '' : 's'}`
-      : typeof payload?.count === 'number'
-        ? `${payload.count} image${payload.count === 1 ? '' : 's'}`
-        : null;
-
-  return (
-    <div className="rounded-[16px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] p-4 backdrop-blur-xl">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-[12px] font-medium text-[var(--muted-foreground)]">
-            <WandSparkles className="size-3.5 text-[var(--accent)]" />
-            Director action · {targetLabel}
-          </div>
-          <div className="mt-2 text-[14px] font-medium leading-5 text-[var(--foreground)]">{summary}</div>
-          {count ? <div className="mt-1 text-[12px] text-[var(--muted-foreground)]">{count}</div> : null}
-          {statusTitle ? <div className="mt-2 text-[12px] font-medium text-[var(--foreground)]">{statusTitle}</div> : null}
-          {statusDetail ? <div className="mt-1 text-[12px] leading-5 text-[var(--muted-foreground)]">{statusDetail}</div> : null}
-        </div>
-        <div
-          data-testid="director-action-status"
-          className="shrink-0 rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] px-3 py-1 text-[12px] text-[var(--foreground)]"
-        >
-          {isRunning || statusValue === 'succeeded' ? (
-            <span className="inline-flex items-center gap-1 [font-variant-numeric:tabular-nums]">
-              <span>{isRunning ? 'Gerando' : 'Gerado'}</span>
-              {' '}
-              <NumberFlow value={Math.max(0, generatedProgress)} className="inline-block" />
-              {' '}
-              <span className="text-[var(--muted-foreground)]">/ {Math.max(0, totalProgress)}</span>
-            </span>
-          ) : (
-            statusLabel
-          )}
-        </div>
-      </div>
-      {action === 'create_scene' && payload ? (
-        <div className="mt-4 space-y-3 rounded-[14px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.36)] p-3">
-          {sceneTitle ? (
-            <div>
-              <div className="text-[12px] text-[var(--muted-foreground)]">Scene</div>
-              <div className="mt-1 text-[13px] font-medium leading-5 text-[var(--foreground)]">{sceneTitle}</div>
-            </div>
-          ) : null}
-          {scenePrompt ? (
-            <div>
-              <div className="text-[12px] text-[var(--muted-foreground)]">Continuity brief</div>
-              <div className="mt-1 text-[13px] leading-5 text-[var(--foreground)]">{scenePrompt}</div>
-            </div>
-          ) : null}
-          {frames.length > 0 ? (
-            <div className="space-y-2">
-              {frames.map((frame, frameIndex) => {
-                const title = typeof frame.title === 'string' && frame.title.trim() ? frame.title.trim() : `Frame ${frameIndex + 1}`;
-                const prompt = typeof frame.prompt === 'string' ? frame.prompt.trim() : '';
-                const references = Array.isArray(frame.references)
-                  ? frame.references.filter((reference): reference is string => typeof reference === 'string' && reference.trim().length > 0)
-                  : [];
-                return (
-                  <details
-                    key={`${title}-${frameIndex}`}
-                    className="group rounded-[12px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.46)]"
-                  >
-                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-[13px] font-medium text-[var(--foreground)] marker:hidden">
-                      <span className="truncate">{title}</span>
-                      <ChevronDown className="size-3.5 shrink-0 text-[var(--muted-foreground)] transition-transform group-open:rotate-180" />
-                    </summary>
-                    <div className="border-t border-[var(--border-soft)] px-3 py-2 text-[12px] leading-5 text-[var(--muted-foreground)]">
-                      {prompt ? <div className="text-[var(--foreground)]">{prompt}</div> : null}
-                      {references.length > 0 ? (
-                        <div className="mt-2">References: {references.join(', ')}</div>
-                      ) : null}
-                    </div>
-                  </details>
-                );
-              })}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-      {isPending ? (
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => onApprove(messageId, actionIndex)}
-            className="inline-flex h-9 items-center gap-2 rounded-full border border-[color-mix(in_srgb,var(--accent)_46%,transparent)] bg-[color-mix(in_srgb,var(--accent)_20%,rgba(32,32,33,0.82))] px-4 text-[13px] font-medium text-[var(--foreground)] transition-colors hover:border-[color-mix(in_srgb,var(--accent)_62%,transparent)] hover:bg-[color-mix(in_srgb,var(--accent)_28%,rgba(32,32,33,0.88))]"
-          >
-            <Check className="size-3.5" />
-            Approve
-          </button>
-          <button
-            type="button"
-            onClick={() => onDecline(messageId, actionIndex)}
-            className="inline-flex h-9 items-center gap-2 rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-4 text-[13px] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[rgba(39,39,40,0.78)] hover:text-[var(--foreground)]"
-          >
-            <X className="size-3.5" />
-            Decline
-          </button>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function DirectorStatusBlock({ data }: { data: Record<string, unknown> | null }) {
-  const status = getDirectorBlockText(data, 'status', 'running');
-  const title = getDirectorBlockText(data, 'title', 'Director orchestration');
-  const detail = getDirectorBlockText(data, 'detail');
-  const isRunning = status === 'running';
-  const isSucceeded = status === 'succeeded';
-  const isDeclined = status === 'declined';
-  const Icon = isRunning ? LoaderCircle : isSucceeded ? Check : isDeclined ? X : X;
-
-  return (
-    <div
-      className={[
-        'rounded-[16px] border p-4 backdrop-blur-xl',
-        isSucceeded
-          ? 'border-[rgba(90,180,125,0.32)] bg-[rgba(28,80,48,0.16)]'
-          : status === 'failed'
-            ? 'border-[rgba(190,58,58,0.38)] bg-[rgba(90,22,22,0.18)]'
-            : isDeclined
-              ? 'border-[var(--border-soft)] bg-[rgba(32,32,33,0.32)]'
-              : 'border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)]',
-      ].join(' ')}
-    >
-      <div className="flex items-start gap-3">
-        <span className="mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-[var(--surface2)] text-[var(--foreground)]">
-          <Icon className={['size-4', isRunning ? 'animate-spin text-[var(--accent)]' : ''].join(' ')} />
-        </span>
-        <span className="min-w-0">
-          <span className="block text-[14px] font-medium leading-5 text-[var(--foreground)]">{title}</span>
-          {detail ? <span className="mt-1 block text-[12px] leading-5 text-[var(--muted-foreground)]">{detail}</span> : null}
-        </span>
-      </div>
     </div>
   );
 }
@@ -7818,20 +8673,27 @@ function DirectorStatusBlock({ data }: { data: Record<string, unknown> | null })
 function DirectorMessageList({
   chatId,
   messages,
+  isComposerExpanded,
+  hasReferenceImages,
   onSubscribeMessageStream,
   onGetMessageStreamSnapshots,
-  onApproveDirectorAction,
-  onDeclineDirectorAction,
+  onRegenerateMessage,
+  onApproveAction,
+  onDeclineAction,
 }: {
   chatId: string | null;
   messages: DirectorMessageRecord[];
+  isComposerExpanded: boolean;
+  hasReferenceImages: boolean;
   onSubscribeMessageStream: (listener: DirectorMessageStreamListener) => () => void;
   onGetMessageStreamSnapshots: (chatId: string) => DirectorMessageStreamSnapshot[];
-  onApproveDirectorAction: (messageId: string, actionIndex: number) => void;
-  onDeclineDirectorAction: (messageId: string, actionIndex: number) => void;
+  onRegenerateMessage: (messageId: string) => void;
+  onApproveAction: (messageId: string, actionIndex: number) => Promise<void>;
+  onDeclineAction: (messageId: string, actionIndex: number) => Promise<void>;
 }) {
   const listRef = useListRef(null);
   const isPinnedToBottomRef = useRef(true);
+  const [isAtBottom, setIsAtBottom] = useState(true);
   const [displayMessages, setDisplayMessages] = useState(messages);
   const rowHeight = useDynamicRowHeight({
     defaultRowHeight: 180,
@@ -7839,18 +8701,22 @@ function DirectorMessageList({
   });
   const lastMessage = displayMessages[displayMessages.length - 1] ?? null;
   const contentSignature = lastMessage
-    ? `${displayMessages.length}:${lastMessage.id}:${lastMessage.contentMarkdown.length}:${lastMessage.status}`
+    ? `${displayMessages.length}:${lastMessage.id}:${JSON.stringify(lastMessage.parts).length}:${lastMessage.status}`
     : '0';
   const rowProps = useMemo(
     () => ({
       messages: displayMessages,
-      onApproveDirectorAction,
-      onDeclineDirectorAction,
+      onRegenerateMessage,
+      onApproveAction,
+      onDeclineAction,
     }),
-    [displayMessages, onApproveDirectorAction, onDeclineDirectorAction]
+    [displayMessages, onRegenerateMessage, onApproveAction, onDeclineAction]
   );
 
   useEffect(() => {
+    isPinnedToBottomRef.current = true;
+    setIsAtBottom(true);
+
     if (!chatId) {
       setDisplayMessages(messages);
       return;
@@ -7858,11 +8724,26 @@ function DirectorMessageList({
 
     const messagesWithSnapshots = onGetMessageStreamSnapshots(chatId).reduce(
       (nextMessages, snapshot) =>
-        updateDirectorMessageContent(nextMessages, snapshot.messageId, snapshot.content, snapshot.status),
+        updateDirectorMessageContent(nextMessages, snapshot.messageId, snapshot.parts, snapshot.status),
       messages
     );
     setDisplayMessages(messagesWithSnapshots);
   }, [chatId, messages, onGetMessageStreamSnapshots]);
+
+  useEffect(() => {
+    const count = displayMessages.length;
+    if (count === 0) return;
+    // double rAF so the virtual list has time to measure rows before scrolling
+    const raf1 = requestAnimationFrame(() => {
+      const raf2 = requestAnimationFrame(() => {
+        listRef.current?.scrollToRow({ align: 'end', behavior: 'instant', index: count - 1 });
+      });
+      return () => cancelAnimationFrame(raf2);
+    });
+    return () => cancelAnimationFrame(raf1);
+  // only run when the chat switches, not on every message update
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId]);
 
   useEffect(() => {
     if (!chatId) {
@@ -7875,15 +8756,25 @@ function DirectorMessageList({
       }
 
       setDisplayMessages((current) =>
-        updateDirectorMessageContent(current, snapshot.messageId, snapshot.content, snapshot.status)
+        updateDirectorMessageContent(current, snapshot.messageId, snapshot.parts, snapshot.status)
       );
     });
   }, [chatId, onSubscribeMessageStream]);
 
   const handleScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
     const node = event.currentTarget;
-    isPinnedToBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 96;
+    const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 96;
+    isPinnedToBottomRef.current = atBottom;
+    setIsAtBottom(atBottom);
   }, []);
+
+  const scrollToBottom = useCallback(() => {
+    listRef.current?.scrollToRow({
+      align: 'end',
+      behavior: 'smooth',
+      index: displayMessages.length - 1,
+    });
+  }, [displayMessages.length]);
 
   useLayoutEffect(() => {
     if (displayMessages.length === 0) {
@@ -7913,18 +8804,44 @@ function DirectorMessageList({
   }
 
   return (
-    <List<DirectorMessageVirtualRowProps>
-      listRef={listRef}
-      rowComponent={DirectorMessageVirtualRow}
-      rowCount={displayMessages.length}
-      rowHeight={rowHeight}
-      rowProps={rowProps}
-      overscanCount={4}
-      defaultHeight={720}
-      className="h-full overscroll-contain"
-      onScroll={handleScroll}
-      style={{ height: '100%' }}
-    />
+    <div className="relative h-full">
+      <List<DirectorMessageVirtualRowProps>
+        listRef={listRef}
+        rowComponent={DirectorMessageVirtualRow}
+        rowCount={displayMessages.length}
+        rowHeight={rowHeight}
+        rowProps={rowProps}
+        overscanCount={4}
+        defaultHeight={720}
+        className="h-full overscroll-contain"
+        onScroll={handleScroll}
+        style={{ height: '100%' }}
+      />
+      <AnimatePresence>
+        {!isAtBottom ? (
+          <motion.button
+            key="scroll-to-bottom"
+            initial={{ opacity: 0, y: 6, scale: 0.9 }}
+            animate={{
+              opacity: 1,
+              y: 0,
+              scale: 1,
+              bottom: (isComposerExpanded ? (hasReferenceImages ? 248 : 208) : 60) + 16 + 24,
+            }}
+            exit={{ opacity: 0, y: 6, scale: 0.9 }}
+            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+            type="button"
+            onClick={scrollToBottom}
+            className="group absolute left-1/2 z-10 flex -translate-x-1/2 items-center overflow-hidden rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.82)] shadow-[0_8px_24px_rgba(0,0,0,0.32)] backdrop-blur-xl transition-[padding,color] duration-200 hover:text-[var(--foreground)] p-2 hover:px-3.5 hover:py-2 text-[var(--muted-foreground)]"
+          >
+            <ChevronDown className="size-4 shrink-0" />
+            <span className="max-w-0 overflow-hidden whitespace-nowrap text-[13px] transition-[max-width,margin] duration-200 group-hover:ml-1.5 group-hover:max-w-[120px]">
+              Scroll to bottom
+            </span>
+          </motion.button>
+        ) : null}
+      </AnimatePresence>
+    </div>
   );
 }
 
@@ -8210,14 +9127,14 @@ function DirectorComposerBar({
   hasReferenceImages: boolean;
   referenceImages: ComposerReferenceImage[];
   referenceMentionOptions: ReferenceSelectorOption[];
-  referenceMentionCandidates: Array<{ id: string; title: string }>;
+  referenceMentionCandidates: Array<{ id: string; title: string; previewUrl?: string }>;
   activeReferenceMentionIndex: number;
   popoverBottom: number;
   isFocused: boolean;
   isReferenceDragActive: boolean;
   isModelPickerOpen: boolean;
   selectedModel: ReturnType<typeof getDefaultModelOption>;
-  selectedProviderId: 'codex' | 'antigravity';
+  selectedProviderId: GenerationProviderId;
   effectiveFastMode: boolean;
   isStreaming: boolean;
   composerRef: RefObject<PromptComposerHandle | null>;
@@ -8239,7 +9156,7 @@ function DirectorComposerBar({
   onInsertReferenceMention: (reference: ReferenceSelectorOption) => void;
   onKeepOpen: (event?: Event | SyntheticEvent | ReactMouseEvent<HTMLElement>) => void;
   onOpenModelPicker: (open: boolean) => void;
-  onProviderChange: (providerId: 'codex' | 'antigravity') => void;
+  onProviderChange: (providerId: GenerationProviderId) => void;
   onModelSelect: (modelId: string) => void;
   onToggleFastMode: () => void;
   onSubmit: () => void;
@@ -8333,26 +9250,35 @@ function DirectorComposerBar({
           ) : null}
         </AnimatePresence>
 
-        <div
-          data-testid="director-composer-shell"
-          className={[
-            'prompt-composer-card relative overflow-hidden border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)]',
-            'shadow-[0_24px_72px_rgba(0,0,0,0.45)] backdrop-blur-2xl',
-            'transition-[height,padding] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
-            isExpanded
-              ? hasReferenceImages
-                ? 'h-[248px] rounded-[24px] px-5 pb-5 pt-5'
-                : 'h-[208px] rounded-[24px] px-5 pb-5 pt-5'
-              : 'h-[60px] rounded-full px-3.5 py-2.5',
-          ].join(' ')}
-          style={COMPOSER_GLASS_STYLE}
-          onPointerDown={onSurfaceInteract}
-          onClick={onSurfaceInteract}
-          onDragEnter={onReferenceDragEnter}
-          onDragOver={onReferenceDragOver}
-          onDragLeave={onReferenceDragLeave}
-          onDrop={onReferenceDrop}
+        <BorderBeam
+          active={isStreaming}
+          borderRadius={isExpanded ? 24 : 999}
+          className="w-full"
+          colorVariant="colorful"
+          size="md"
+          strength={1}
+          theme="dark"
         >
+          <div
+            data-testid="director-composer-shell"
+            className={[
+              'prompt-composer-card relative overflow-hidden border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)]',
+              'shadow-[0_24px_72px_rgba(0,0,0,0.45)] backdrop-blur-2xl',
+              'transition-[height,padding] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
+              isExpanded
+                ? hasReferenceImages
+                  ? 'h-[248px] rounded-[24px] px-5 pb-5 pt-5'
+                  : 'h-[208px] rounded-[24px] px-5 pb-5 pt-5'
+                : 'h-[60px] rounded-full px-3.5 py-2.5',
+            ].join(' ')}
+            style={COMPOSER_GLASS_STYLE}
+            onPointerDown={onSurfaceInteract}
+            onClick={onSurfaceInteract}
+            onDragEnter={onReferenceDragEnter}
+            onDragOver={onReferenceDragOver}
+            onDragLeave={onReferenceDragLeave}
+            onDrop={onReferenceDrop}
+          >
           <input
             ref={referenceInputRef}
             type="file"
@@ -8376,7 +9302,7 @@ function DirectorComposerBar({
           >
             <PromptComposer
               ref={composerRef}
-              placeholder="Ask Director to write coverage, beats, or continuity..."
+              placeholder="Type anything"
               isExpanded={isExpanded}
               hasReferenceImages={hasReferenceImages}
               mentionCandidates={referenceMentionCandidates}
@@ -8432,7 +9358,7 @@ function DirectorComposerBar({
             className={[
               'pointer-events-none absolute inset-x-0 bottom-0 z-20 flex items-center justify-between',
               'transition-[left,right,bottom] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
-              isExpanded ? 'left-5 right-5 bottom-4' : 'left-4 right-4 bottom-3',
+              isExpanded ? 'left-5 right-5 bottom-4' : 'left-4 right-4 bottom-2.5',
             ].join(' ')}
           >
             <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -8449,7 +9375,12 @@ function DirectorComposerBar({
                   onClick={onAddReference}
                   tabIndex={isExpanded ? -1 : 0}
                   aria-hidden={isExpanded}
-                  className="pointer-events-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] text-[var(--foreground)] backdrop-blur-xl transition-[background-color,border-color] duration-200 hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)]"
+                  className={[
+                    'pointer-events-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[var(--foreground)] transition-[background-color,border-color,color,transform] duration-200',
+                    isExpanded
+                      ? 'border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] backdrop-blur-xl hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)]'
+                      : 'border border-transparent bg-transparent hover:text-[var(--foreground)]',
+                  ].join(' ')}
                 >
                   <Plus className="size-4" />
                 </button>
@@ -8463,6 +9394,7 @@ function DirectorComposerBar({
                 aria-hidden={!isExpanded}
               >
                 <ModelPicker
+                  capability="text"
                   isOpen={isModelPickerOpen}
                   selectedModel={selectedModel}
                   selectedProviderId={selectedProviderId}
@@ -8474,10 +9406,11 @@ function DirectorComposerBar({
 
                 <button
                   type="button"
+                  hidden
                   tabIndex={isExpanded ? 0 : -1}
                   aria-label="Fast"
                   aria-pressed={effectiveFastMode}
-                  disabled={selectedProviderId !== 'codex'}
+                  disabled
                   onPointerDown={(event) => {
                     event.preventDefault();
                     onKeepOpen(event);
@@ -8496,19 +9429,16 @@ function DirectorComposerBar({
               </div>
             </div>
 
-            {isStreaming ? (
-              <button
-                type="button"
-                onClick={onStop}
-                className="pointer-events-auto inline-flex h-10 min-w-[92px] items-center justify-center rounded-full bg-[rgba(190,58,58,0.18)] px-4 text-[13px] font-medium text-[rgb(245,178,178)] transition-[width,background-color,color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-[rgba(190,58,58,0.24)]"
-              >
-                Stop
-              </button>
-            ) : (
-              <SendButton hostRef={sendButtonRef} onClick={onSubmit} disabled={!prompt.trim()} />
-            )}
+            <SendButton
+              hostRef={sendButtonRef}
+              onClick={isStreaming ? onStop : onSubmit}
+              disabled={!isStreaming && !prompt.trim()}
+              state={isStreaming ? 'stop' : 'send'}
+              ariaLabel={isStreaming ? 'Stop' : 'Enviar'}
+            />
           </div>
-        </div>
+          </div>
+        </BorderBeam>
       </div>
     </motion.div>
   );
@@ -8613,8 +9543,8 @@ function SceneInputCard({
     };
   }, [attachedReferences]);
 
-  const insertMention = useCallback((option: { id: string; title: string }) => {
-    composerRef.current?.insertMention(option.id, option.title);
+  const insertMention = useCallback((option: { id: string; title: string; previewUrl?: string }) => {
+    composerRef.current?.insertMention(option.id, option.title, undefined, undefined, option.previewUrl);
   }, []);
 
   const handleMentionNavigation = useCallback(
@@ -9243,7 +10173,6 @@ function ImagePlayerDialog({
   const [extraPromptScrollTop, setExtraPromptScrollTop] = useState(0);
   const isPinPointMode = session?.mode === 'pinpoint';
   const isCameraMode = session?.mode === 'camera';
-  const generationProvider = session?.image.provider === 'antigravity' ? 'antigravity' : session?.image.provider === 'codex' ? 'codex' : null;
   const generationModelLabel = session?.image.modelLabel ?? session?.image.modelId ?? null;
   const generationDuration = formatGenerationDuration(session?.image.durationMs);
   const generationReferences = session?.image.references ?? [];
@@ -9254,10 +10183,12 @@ function ImagePlayerDialog({
       ...savedReferences.map((reference) => ({
         id: reference.id,
         title: reference.title,
+        previewUrl: reference.previewUrl,
       })),
       ...session.characterReferences.map((reference) => ({
         id: reference.id,
         title: reference.name.replace(/\.[^/.]+$/, ''),
+        previewUrl: reference.previewUrl,
       })),
     ];
   }, [savedReferences, session]);
@@ -9288,8 +10219,8 @@ function ImagePlayerDialog({
     setActiveExtraPromptMentionIndex(0);
   }, [extraPromptMentionMatch?.query, extraPromptMentionOptions.length]);
 
-  const insertExtraPromptMention = useCallback((option: { id: string; title: string }) => {
-    extraPromptComposerRef.current?.insertMention(option.id, option.title);
+  const insertExtraPromptMention = useCallback((option: { id: string; title: string; previewUrl?: string }) => {
+    extraPromptComposerRef.current?.insertMention(option.id, option.title, undefined, undefined, option.previewUrl);
   }, []);
 
   const handleExtraPromptMentionNavigation = useCallback(
@@ -9436,13 +10367,6 @@ function ImagePlayerDialog({
                 <div className="mb-5 space-y-3 rounded-[22px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.64)] p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-2">
-                      {generationProvider ? (
-                        <img
-                          src={generationProvider === 'antigravity' ? antigravityLogo : codexLogo}
-                          alt={generationProvider === 'antigravity' ? 'Antigravity' : 'Codex'}
-                          className="size-6 shrink-0 rounded-[8px] object-cover"
-                        />
-                      ) : null}
                       <div className="min-w-0">
                         <div className="truncate text-[13px] font-medium text-[var(--foreground)]">
                           {generationModelLabel ?? 'Unknown model'}
@@ -9960,9 +10884,9 @@ function InlineAttachmentsRow({
         }}
         onClick={onAddReference}
         className={[
-          'inline-flex shrink-0 items-center justify-center border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] text-[var(--foreground)] backdrop-blur-xl',
-          'transition-[width,height,border-radius,background-color,border-color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)]',
-          hasReferenceImages ? 'h-20 w-20 rounded-[24px]' : 'h-8 w-8 rounded-[11px]',
+          'inline-flex shrink-0 items-center justify-center border border-[var(--border-soft)] bg-[var(--surface2)]/80 text-[var(--foreground)] backdrop-blur-xl',
+          'transition-[width,height,border-radius,background-color,border-color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:border-[var(--border-strong)] hover:bg-[var(--surface2)]',
+          hasReferenceImages ? 'h-20 w-20 rounded-[28px]' : 'h-8 w-8 rounded-[13px]',
         ].join(' ')}
       >
         <Plus className={hasReferenceImages ? 'size-5' : 'size-4'} />
@@ -9978,7 +10902,7 @@ function InlineAttachmentsRow({
           <ContextMenu key={referenceImage.id}>
             <ContextMenuTrigger asChild>
               <div
-                className="group relative h-20 w-20 shrink-0 overflow-hidden rounded-[24px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] backdrop-blur-xl transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+                className="group relative h-20 w-20 shrink-0 overflow-hidden rounded-[28px] border border-[var(--border-soft)] bg-[var(--surface2)]/80 backdrop-blur-xl transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
                 title={referenceImage.name}
               >
                 <button
@@ -9995,7 +10919,7 @@ function InlineAttachmentsRow({
                   <img
                     src={referenceImage.previewUrl}
                     alt={referenceImage.name}
-                    className="h-full w-full object-cover"
+                    className="h-full w-full object-cover opacity-90 saturate-[0.94]"
                   />
                 </button>
                 <button
@@ -10039,60 +10963,25 @@ function InlineAttachmentsRow({
   );
 }
 
-function ReferencesWorkspace({
-  references,
-  route,
-  onAddReference,
-  onEditReference,
-  onDeleteReference,
-  onExportReference,
-  onImportReference,
+function ProvidersWorkspace({
+  geminiApiKey,
+  geminiApiKeyDraft,
+  isKeyVisible,
+  isSaving,
+  onGeminiApiKeyChange,
+  onKeyVisibleChange,
+  onSave,
 }: {
-  references: SavedReferenceImage[];
-  route: ReferenceLibraryRoute;
-  onAddReference: () => void;
-  onEditReference: (reference: SavedReferenceImage) => void;
-  onDeleteReference: (reference: SavedReferenceImage) => void;
-  onExportReference: (reference: SavedReferenceImage) => void;
-  onImportReference: () => void;
+  geminiApiKey: string;
+  geminiApiKeyDraft: string;
+  isKeyVisible: boolean;
+  isSaving: boolean;
+  onGeminiApiKeyChange: (apiKey: string) => void;
+  onKeyVisibleChange: (isVisible: boolean) => void;
+  onSave: () => void;
 }) {
-  const filteredReferences = useMemo(() => {
-    const scoped = references.filter((reference) => reference.category === route);
-    const groupedReferences = new Map<string, SavedReferenceImage>();
-    for (const reference of scoped) {
-      const key = reference.collectionId ?? reference.environmentId ?? reference.id;
-      const current = groupedReferences.get(key);
-      if (!current) {
-        groupedReferences.set(key, reference);
-        continue;
-      }
-      const isEarlier =
-        reference.createdAt < current.createdAt ||
-        (reference.createdAt === current.createdAt && reference.id < current.id);
-      if (isEarlier) {
-        groupedReferences.set(key, reference);
-      }
-    }
-    return [...groupedReferences.values()];
-  }, [references, route]);
-  const copyByRoute: Record<ReferenceLibraryRoute, { title: string; description: string; addLabel: string }> = {
-    characters: {
-      title: 'Characters',
-      description: 'Save character visuals and identity notes for consistent people across generations.',
-      addLabel: 'Add character images',
-    },
-    environment: {
-      title: 'Environment',
-      description: 'Store one environment with multiple images plus shared context so AI can keep scene continuity.',
-      addLabel: 'Add environment images',
-    },
-    objects: {
-      title: 'Objects',
-      description: 'Save props, products, and object details the model should preserve between shots.',
-      addLabel: 'Add item images',
-    },
-  };
-  const routeCopy = copyByRoute[route];
+  const hasSavedGeminiKey = geminiApiKey.trim().length > 0;
+  const hasDraftChanged = geminiApiKeyDraft !== geminiApiKey;
 
   return (
     <motion.section
@@ -10103,1392 +10992,1014 @@ function ReferencesWorkspace({
       className="min-h-full px-8 pb-10 pt-8"
     >
       <div className="mx-auto flex w-full max-w-[1060px] flex-col gap-8">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-[26px] font-semibold leading-none tracking-[0] text-[var(--foreground)]">
-              {routeCopy.title}
-            </h1>
-            <p className="mt-4 text-[16px] leading-6 tracking-[0] text-[var(--muted-foreground)]">
-              {routeCopy.description}
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <Button
-              type="button"
-              variant="surface"
-              onClick={onImportReference}
-              className="h-10 rounded-full px-4"
-            >
-              <Upload className="size-4" />
-              Import reference
-            </Button>
-            <Button
-              type="button"
-              onClick={onAddReference}
-              className="h-10 rounded-full px-4"
-            >
-              <ImagePlus className="size-4" />
-              {routeCopy.addLabel}
-            </Button>
-          </div>
+        <div>
+          <h1 className="text-[26px] font-semibold leading-none tracking-[0] text-[var(--foreground)]">
+            Providers
+          </h1>
+          <p className="mt-4 max-w-[640px] text-[16px] leading-6 tracking-[0] text-[var(--muted-foreground)]">
+            Add provider credentials for Director and future text generation workflows.
+          </p>
         </div>
 
-        {filteredReferences.length > 0 ? (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3" data-testid="reference-grid">
-            {filteredReferences.map((reference) => (
-              <ContextMenu key={reference.id}>
-                <ContextMenuTrigger asChild>
-                  <article
-                    className="group overflow-hidden rounded-[22px] border border-[var(--border-soft)] bg-[var(--surface)] transition-[border-color,background-color] duration-200 hover:border-[var(--border-strong)] hover:bg-[var(--surface2)]"
-                  >
-                    <div className="relative aspect-[4/3] overflow-hidden bg-[var(--surface2)]">
-                      <img
-                        src={reference.previewUrl}
-                        alt={getSharedReferenceTitle(reference)}
-                        className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:scale-[1.025]"
-                      />
-                      <div className="absolute right-3 top-3 flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
-                        <button
-                          type="button"
-                          aria-label={`Edit ${getSharedReferenceTitle(reference)}`}
-                          onClick={() => onEditReference(reference)}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
-                        >
-                          <Pencil className="size-4" />
-                        </button>
-                        <button
-                          type="button"
-                          aria-label={`Delete ${getSharedReferenceTitle(reference)}`}
-                          onClick={() => onDeleteReference(reference)}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-[rgba(190,58,58,0.8)]"
-                        >
-                          <Trash2 className="size-4" />
-                        </button>
-                      </div>
-                    </div>
-                    <div className="space-y-2 p-4">
-                      <h2 className="line-clamp-1 text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
-                        {getSharedReferenceTitle(reference)}
-                      </h2>
-                      {reference.description ? (
-                        <p className="line-clamp-2 text-[13px] leading-5 text-[var(--muted-foreground)]">
-                          {reference.description}
-                        </p>
-                      ) : (
-                        <p className="text-[13px] leading-5 text-[var(--muted-foreground)]">
-                          No description
-                        </p>
-                      )}
-                    </div>
-                  </article>
-                </ContextMenuTrigger>
-                <ContextMenuContent>
-                  <ContextMenuItem onClick={() => onExportReference(reference)}>Export reference...</ContextMenuItem>
-                  <ContextMenuSeparator />
-                  <ContextMenuItem onClick={() => onEditReference(reference)}>Edit reference</ContextMenuItem>
-                  <ContextMenuItem
-                    className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
-                    onClick={() => onDeleteReference(reference)}
-                  >
-                    Delete reference
-                  </ContextMenuItem>
-                </ContextMenuContent>
-              </ContextMenu>
-            ))}
-          </div>
-        ) : (
-          <div className="flex min-h-[360px] items-center justify-center rounded-[28px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)]">
-            <div className="flex max-w-[340px] flex-col items-center text-center">
-              <div className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full bg-[var(--surface2)] text-[var(--muted-foreground)]">
-                <ImagePlus className="size-5" />
+        <section className="rounded-[28px] border border-[var(--border-soft)] bg-[var(--surface)] p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="inline-flex size-11 items-center justify-center rounded-[16px] bg-[var(--surface2)]">
+                <KeyRound className="size-5 text-[var(--muted-foreground)]" />
               </div>
-              <h2 className="text-[15px] font-medium tracking-[0] text-[var(--foreground)]">No references yet</h2>
-              <p className="mt-2 text-[13px] leading-5 text-[var(--muted-foreground)]">
-                Add reusable visual anchors for characters, products, palettes, and style direction.
-              </p>
+              <div>
+                <h2 className="text-[16px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                  Text provider
+                </h2>
+                <p className="mt-1 text-[13px] leading-5 text-[var(--muted-foreground)]">
+                  Only Gemini is available right now.
+                </p>
+              </div>
+            </div>
+            <span
+              className={[
+                'inline-flex h-8 items-center rounded-full border px-3 text-[12px] font-medium',
+                hasSavedGeminiKey
+                  ? 'border-[rgba(84,190,120,0.28)] bg-[rgba(84,190,120,0.12)] text-[rgb(147,220,169)]'
+                  : 'border-[var(--border-soft)] bg-[var(--surface2)] text-[var(--muted-foreground)]',
+              ].join(' ')}
+            >
+              {hasSavedGeminiKey ? 'Configured' : 'Missing key'}
+            </span>
+          </div>
+
+          <div className="mt-6 rounded-[22px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.42)] p-4">
+            <div className="flex items-center gap-3">
+              <div className="inline-flex size-10 items-center justify-center rounded-[14px] bg-[var(--surface2)]">
+                <img src={geminiIcon} alt="" aria-hidden="true" className="size-6 object-contain" />
+              </div>
+              <div>
+                <h3 className="text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                  Gemini
+                </h3>
+                <p className="text-[12px] leading-4 text-[var(--muted-foreground)]">
+                  Used by the Google model picker and Director text responses.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-5 grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+              <label className="grid gap-2">
+                <span className="text-[12px] font-medium leading-4 tracking-[0] text-[var(--muted-foreground)]">
+                  Gemini API key
+                </span>
+                <div className="flex h-11 items-center rounded-full border border-[var(--border-soft)] bg-[var(--surface)] px-3">
+                  <Input
+                    aria-label="Gemini API key"
+                    type={isKeyVisible ? 'text' : 'password'}
+                    value={geminiApiKeyDraft}
+                    onChange={(event) => onGeminiApiKeyChange(event.target.value)}
+                    placeholder="GEMINI_API_KEY"
+                    className="h-9 min-w-0 flex-1 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
+                  />
+                  <button
+                    type="button"
+                    aria-label={isKeyVisible ? 'Hide Gemini API key' : 'Show Gemini API key'}
+                    onClick={() => onKeyVisibleChange(!isKeyVisible)}
+                    className="ml-2 inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
+                  >
+                    {isKeyVisible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </button>
+                </div>
+              </label>
+
+              <Button
+                type="button"
+                onClick={onSave}
+                disabled={isSaving || !hasDraftChanged}
+                className="h-11 rounded-full px-4"
+              >
+                {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : <Check className="size-4" />}
+                Save provider key
+              </Button>
             </div>
           </div>
-        )}
+        </section>
       </div>
     </motion.section>
   );
 }
 
-function AddReferenceDialog({
-  open,
-  onOpenChange,
-  onSubmit,
-  initialRoute,
-  initialFiles,
-  onGenerateDescriptions,
+function ReferencesWorkspace({
+  folders: referenceFolders,
+  references,
+  route,
+  sidebarWidth,
+  isSidebarCollapsed,
+  isSidebarResizing,
+  onStartSidebarResize,
+  seedFiles,
+  onSeedFilesConsumed,
+  onCreateFolder,
+  onAddImages,
+  onRenameFolder,
+  onRenameImage,
+  onGroupImages,
+  onUpdateReferenceMetadata,
+  onDeleteImageFromFolder,
+  onDeleteReference,
+  onExportReference,
+  onImportReference,
 }: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onSubmit: (input: {
-    files: File[];
-    title: string;
-    description?: string;
-    route: ReferenceLibraryRoute;
-    attachmentMetadata?: Record<string, { title: string; description: string }>;
-    attachmentBuckets?: Record<string, ReferenceImageBucket>;
-  }) => void | Promise<void>;
-  initialRoute: ReferenceLibraryRoute;
-  initialFiles?: File[];
-  onGenerateDescriptions: (input: {
-    category: ReferenceLibraryRoute;
-    title?: string;
-    attachments: Array<{
+  folders: ReferenceFolderRecord[];
+  references: SavedReferenceImage[];
+  route: ReferenceLibraryRoute;
+  sidebarWidth: number;
+  isSidebarCollapsed: boolean;
+  isSidebarResizing: boolean;
+  onStartSidebarResize: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+  seedFiles: File[];
+  onSeedFilesConsumed: () => void;
+  onCreateFolder: (
+    title: string,
+    route: ReferenceLibraryRoute,
+    parentFolderId?: string | null,
+  ) => Promise<ReferenceFolderRecord>;
+  onAddImages: (args: { folderId: string; category: ReferenceLibraryRoute; folderTitle: string; newFiles: File[]; existingImages: SavedReferenceImage[] }) => Promise<void>;
+  onRenameFolder: (args: { folderId: string; category: ReferenceLibraryRoute; newTitle: string }) => Promise<void>;
+  onRenameImage: (args: { imageId: string; folderId: string; category: ReferenceLibraryRoute; newTitle: string }) => Promise<void>;
+  onGroupImages: (args: { imageIds: string[]; category: ReferenceLibraryRoute; newFolderTitle: string; sourceFolderId: string }) => Promise<void>;
+  onUpdateReferenceMetadata: (args: { folderId: string; category: ReferenceLibraryRoute; draft: ReferenceMetadataDraft }) => Promise<void>;
+  onDeleteImageFromFolder: (args: { imageId: string; folderId: string; category: ReferenceLibraryRoute; folderTitle: string }) => Promise<void>;
+  onDeleteReference: (reference: SavedReferenceImage) => void;
+  onExportReference: (reference: SavedReferenceImage) => void;
+  onImportReference: () => void;
+}) {
+  const [openFolderId, setOpenFolderId] = useState<string | null>(null);
+  const [isNewFolderDialogOpen, setIsNewFolderDialogOpen] = useState(false);
+  const [isDragActive, setIsDragActive] = useState(false);
+  const [isRenamingTitle, setIsRenamingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [selectedImageIds, setSelectedImageIds] = useState<string[]>([]);
+  const [renameImageTarget, setRenameImageTarget] = useState<SavedReferenceImage | null>(null);
+  const [renameFolderTarget, setRenameFolderTarget] = useState<{ id: string; title: string } | null>(null);
+  const [metadataTarget, setMetadataTarget] = useState<{ folderId: string; imageId: string | null } | null>(null);
+  const [isGroupDialogOpen, setIsGroupDialogOpen] = useState(false);
+  const [animatedTitleText, setAnimatedTitleText] = useState(referenceRouteHeaderLabels[route]);
+  const hasInitializedRouteRef = useRef(false);
+  const dragDepthRef = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const titleInputRef = useRef<HTMLInputElement>(null);
+
+  const toggleImageSelection = useCallback((imageId: string) => {
+    setSelectedImageIds((current) =>
+      current.includes(imageId) ? current.filter((id) => id !== imageId) : [...current, imageId]
+    );
+  }, []);
+
+  const scopedReferences = useMemo(
+    () => references.filter((r) => r.category === route),
+    [references, route]
+  );
+
+  const scopedFolderRecords = useMemo(
+    () => referenceFolders.filter((folder) => folder.category === route),
+    [referenceFolders, route]
+  );
+
+  const folders = useMemo(() => {
+    const map = new Map<string, {
       id: string;
-      name: string;
-      mimeType: string;
-      bytesBase64: string;
-    }>;
-  }) => Promise<{
+      title: string;
+      description: string;
+      images: SavedReferenceImage[];
+      isSolo: boolean;
+      parentFolderId: string | null;
+      createdAt: string;
+      latestActivityAt: string;
+    }>();
+
+    for (const folder of scopedFolderRecords) {
+      map.set(folder.id, {
+        id: folder.id,
+        title: folder.title,
+        description: folder.description ?? '',
+        images: [],
+        isSolo: false,
+        parentFolderId: folder.parentFolderId ?? null,
+        createdAt: folder.createdAt,
+        latestActivityAt: folder.createdAt,
+      });
+    }
+
+    for (const ref of scopedReferences) {
+      const folderId = ref.collectionId ?? ref.environmentId ?? ref.id;
+      const title = ref.groupTitle?.trim() || ref.title;
+      const isSolo = !ref.collectionId && !ref.environmentId;
+      if (!map.has(folderId)) {
+        map.set(folderId, {
+          id: folderId,
+          title,
+          description: ref.groupDescription ?? ref.description ?? '',
+          images: [],
+          isSolo,
+          parentFolderId: ref.parentFolderId ?? null,
+          createdAt: ref.createdAt,
+          latestActivityAt: ref.createdAt,
+        });
+      }
+      const folder = map.get(folderId)!;
+      folder.title = title;
+      folder.description = ref.groupDescription ?? folder.description ?? '';
+      folder.isSolo = isSolo;
+      folder.parentFolderId = ref.parentFolderId ?? folder.parentFolderId ?? null;
+      folder.createdAt = folder.createdAt || ref.createdAt;
+      if (ref.createdAt > folder.latestActivityAt) {
+        folder.latestActivityAt = ref.createdAt;
+      }
+      folder.images.push(ref);
+    }
+    return [...map.values()].sort((a, b) => b.latestActivityAt.localeCompare(a.latestActivityAt));
+  }, [scopedFolderRecords, scopedReferences]);
+
+  const openFolder = openFolderId ? (folders.find((f) => f.id === openFolderId) ?? null) : null;
+  const topLevelFolders = useMemo(
+    () => folders.filter((folder) => folder.parentFolderId === null),
+    [folders]
+  );
+  const displayFolder = openFolder ?? topLevelFolders[0] ?? null;
+  const activeFolderId = openFolderId ?? displayFolder?.id ?? null;
+  const activeSidebarFolderId = useMemo(() => {
+    if (!activeFolderId) {
+      return topLevelFolders[0]?.id ?? null;
+    }
+
+    let currentFolder = folders.find((folder) => folder.id === activeFolderId) ?? null;
+    while (currentFolder?.parentFolderId) {
+      currentFolder = folders.find((folder) => folder.id === currentFolder?.parentFolderId) ?? null;
+    }
+
+    return currentFolder?.id ?? activeFolderId;
+  }, [activeFolderId, folders, topLevelFolders]);
+  const openFolderPath = useMemo(() => {
+    if (!displayFolder) {
+      return [] as typeof folders;
+    }
+
+    const chain: typeof folders = [];
+    let currentFolder: (typeof folders)[number] | null = displayFolder;
+    while (currentFolder) {
+      chain.unshift(currentFolder);
+      currentFolder = currentFolder.parentFolderId
+        ? folders.find((folder) => folder.id === currentFolder?.parentFolderId) ?? null
+        : null;
+    }
+
+    return chain;
+  }, [displayFolder, folders]);
+  const parentFolder = openFolderPath.length > 1 ? openFolderPath[openFolderPath.length - 2] ?? null : null;
+  const breadcrumbAriaLabel = useMemo(() => {
+    const parts = [referenceRouteHeaderLabels[route], ...openFolderPath.map((folder) => folder.title)];
+    return parts.join(' > ');
+  }, [openFolderPath, route]);
+
+  // Clear any image selection when leaving / switching folders.
+  useEffect(() => {
+    setSelectedImageIds([]);
+  }, [openFolderId]);
+
+  useLayoutEffect(() => {
+    if (!openFolder && topLevelFolders.length > 0) {
+      setOpenFolderId(topLevelFolders[0].id);
+    }
+  }, [openFolder, topLevelFolders]);
+
+  useEffect(() => {
+    if (seedFiles.length > 0) {
+      setIsNewFolderDialogOpen(true);
+    }
+  }, [seedFiles]);
+
+  useEffect(() => {
+    if (!hasInitializedRouteRef.current) {
+      hasInitializedRouteRef.current = true;
+      return;
+    }
+    dragDepthRef.current = 0;
+    setOpenFolderId(null);
+    setIsNewFolderDialogOpen(false);
+    setIsDragActive(false);
+    setIsRenamingTitle(false);
+    setTitleDraft('');
+    setSelectedImageIds([]);
+    setRenameImageTarget(null);
+    setRenameFolderTarget(null);
+    setIsGroupDialogOpen(false);
+    setAnimatedTitleText(referenceRouteHeaderLabels[route]);
+  }, [route]);
+
+  useEffect(() => {
+    if (isRenamingTitle && titleInputRef.current) {
+      titleInputRef.current.focus();
+      titleInputRef.current.select();
+    }
+  }, [isRenamingTitle]);
+
+  useEffect(() => {
+    if (!displayFolder) {
+      setAnimatedTitleText(referenceRouteHeaderLabels[route]);
+      return;
+    }
+
+    setAnimatedTitleText('');
+    const frameId = window.requestAnimationFrame(() => {
+      setAnimatedTitleText(displayFolder.title);
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [displayFolder, route]);
+
+  async function handleCreateFolder(title: string) {
+    setIsSaving(true);
+    try {
+      const folder = await onCreateFolder(title, route);
+      setOpenFolderId(folder.id);
+      if (seedFiles.length > 0) {
+        const folderImages = references.filter(
+          (r) => (r.collectionId ?? r.environmentId) === folder.id
+        );
+        await onAddImages({
+          folderId: folder.id,
+          category: route,
+          folderTitle: title,
+          newFiles: seedFiles,
+          existingImages: folderImages,
+        });
+        onSeedFilesConsumed();
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDropFiles(fileList: FileList | File[]) {
+    if (!activeFolderId || !displayFolder) return;
+    const imageFiles = Array.from(fileList).filter((f) => f.type.startsWith('image/'));
+    if (imageFiles.length === 0) return;
+    setIsSaving(true);
+    try {
+      await onAddImages({
+        folderId: activeFolderId,
+        category: route,
+        folderTitle: displayFolder.title,
+        newFiles: imageFiles,
+        existingImages: displayFolder.images,
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function commitRename() {
+    if (!activeFolderId || !displayFolder || !titleDraft.trim()) {
+      setIsRenamingTitle(false);
+      return;
+    }
+    const newTitle = titleDraft.trim();
+    if (newTitle === displayFolder.title) {
+      setIsRenamingTitle(false);
+      return;
+    }
+    setIsRenamingTitle(false);
+    await onRenameFolder({ folderId: activeFolderId, category: route, newTitle });
+  }
+
+  function downloadReferenceImage(image: SavedReferenceImage) {
+    const ext = image.mimeType?.split('/')[1]?.split('+')[0] || 'png';
+    const baseName = (image.title || deriveReferenceAttachmentTitle(image.name) || 'referencia')
+      .replace(/[\\/:*?"<>|]+/g, '_')
+      .trim();
+    const anchor = document.createElement('a');
+    anchor.href = image.previewUrl;
+    anchor.download = `${baseName}.${ext}`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  }
+
+  const folderImages = displayFolder?.images ?? [];
+  const childFolders = displayFolder ? folders.filter((entry) => entry.parentFolderId === displayFolder.id) : [];
+  const isSoloFolder = displayFolder?.isSolo ?? false;
+  const representativeRef = folderImages[0];
+  const selectedImages = folderImages.filter((img) => selectedImageIds.includes(img.id));
+  const metadataFolder = metadataTarget
+    ? (folders.find((folder) => folder.id === metadataTarget.folderId) ?? null)
+    : null;
+  const metadataDraft = metadataFolder
+    ? {
+        title: metadataFolder.title,
+        description: metadataFolder.description,
+        images: metadataFolder.images.map((image) => ({
+          id: image.id,
+          name: image.name,
+          title: image.title,
+          description: image.description ?? '',
+          previewUrl: image.previewUrl,
+        })),
+      }
+    : null;
+
+  function openMetadataDialog(folderId: string, imageId: string | null = null) {
+    setMetadataTarget({ folderId, imageId });
+  }
+
+  function renderFolderCard(folder: {
+    id: string;
     title: string;
     description: string;
-    attachments: Array<{
-      id: string;
-      description: string;
-    }>;
-  }>;
-}) {
-  const [route, setRoute] = useState<ReferenceLibraryRoute>(initialRoute);
-  const [files, setFiles] = useState<File[]>([]);
-  const [isDragActive, setIsDragActive] = useState(false);
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [attachmentMetadata, setAttachmentMetadata] = useState<Record<string, { title: string; description: string }>>({});
-  const [attachmentBuckets, setAttachmentBuckets] = useState<Record<string, ReferenceImageBucket>>({});
-  const [isAttachmentMetadataDialogOpen, setIsAttachmentMetadataDialogOpen] = useState(false);
-  const [editingAttachmentKey, setEditingAttachmentKey] = useState<string | null>(null);
-  const [attachmentTitleDraft, setAttachmentTitleDraft] = useState('');
-  const [attachmentDescriptionDraft, setAttachmentDescriptionDraft] = useState('');
-  const [isGeneratingDescriptions, setIsGeneratingDescriptions] = useState(false);
-  const [activeImageTab, setActiveImageTab] = useState<ReferenceImageBucket>('primary');
-  const attachmentInputRef = useRef<HTMLInputElement>(null);
-  const trimmedTitle = title.trim();
-  const selectedFilePreviews = useMemo(
-    () =>
-      files.map((file) => ({
-        key: `${file.name}-${file.size}-${file.lastModified}`,
-        name: file.name,
-        previewUrl: URL.createObjectURL(file),
-      })),
-    [files]
-  );
-
-  useEffect(() => {
-      if (!open) {
-        setFiles([]);
-        setRoute(initialRoute);
-        setIsDragActive(false);
-        setTitle('');
-        setDescription('');
-        setAttachmentMetadata({});
-        setAttachmentBuckets({});
-        setIsAttachmentMetadataDialogOpen(false);
-        setEditingAttachmentKey(null);
-        setAttachmentTitleDraft('');
-        setAttachmentDescriptionDraft('');
-        setIsGeneratingDescriptions(false);
-        setActiveImageTab('primary');
-        return;
-      }
-
-      if (initialFiles && initialFiles.length > 0) {
-        setFiles(initialFiles);
-        setAttachmentMetadata(
-          Object.fromEntries(
-            initialFiles.map((file) => [
-              `${file.name}-${file.size}-${file.lastModified}`,
-              {
-                title: deriveReferenceAttachmentTitle(file.name),
-                description: '',
-              },
-            ])
-          )
-        );
-        setAttachmentBuckets(
-          Object.fromEntries(
-            initialFiles.map((file, index) => [buildAttachmentKey(file), index === 0 ? 'primary' : 'angles']),
-          ),
-        );
-      }
-  }, [initialFiles, initialRoute, open]);
-
-  useEffect(() => {
-    if (open) {
-      setRoute(initialRoute);
-    }
-  }, [initialRoute, open]);
-
-  useEffect(() => {
-    return () => {
-      for (const preview of selectedFilePreviews) {
-        URL.revokeObjectURL(preview.previewUrl);
-      }
-    };
-  }, [selectedFilePreviews]);
-
-  function buildAttachmentKey(file: File) {
-    return `${file.name}-${file.size}-${file.lastModified}`;
+    images: SavedReferenceImage[];
+  }) {
+    const coverImage = folder.images[0];
+    return (
+      <ContextMenu key={folder.id}>
+        <ContextMenuTrigger asChild>
+          <button
+            type="button"
+            onDoubleClick={() => openMetadataDialog(folder.id)}
+            className="group relative overflow-hidden rounded-[22px] border border-[var(--border-soft)] bg-[var(--surface)] text-left transition-[border-color,box-shadow] duration-200 hover:border-[var(--border-strong)] hover:shadow-md"
+          >
+            <div className="relative aspect-[4/3] overflow-hidden bg-[var(--surface2)]">
+              {coverImage ? (
+                <img
+                  src={coverImage.previewUrl}
+                  alt={folder.title}
+                  className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:scale-[1.03]"
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center">
+                  <Folder className="size-10 text-[var(--muted-foreground)]/30" />
+                </div>
+              )}
+              <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-3 pb-3 pt-10">
+                <div className="flex items-end justify-between gap-2">
+                  <h2 className="line-clamp-1 text-[14px] font-semibold text-white">
+                    {folder.title}
+                  </h2>
+                  <span className="shrink-0 text-[12px] text-white/60">
+                    {folder.images.length} {folder.images.length === 1 ? 'imagem' : 'imagens'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </button>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem onClick={() => openMetadataDialog(folder.id)}>Editar metadata...</ContextMenuItem>
+          <ContextMenuItem onClick={() => setRenameFolderTarget({ id: folder.id, title: folder.title })}>Renomear...</ContextMenuItem>
+          {coverImage ? (
+            <ContextMenuItem onClick={() => onExportReference(coverImage)}>Exportar pasta...</ContextMenuItem>
+          ) : null}
+          {coverImage ? <ContextMenuSeparator /> : null}
+          {coverImage ? (
+            <ContextMenuItem
+              className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
+              onClick={() => onDeleteReference(coverImage)}
+            >
+              Excluir pasta
+            </ContextMenuItem>
+          ) : null}
+        </ContextMenuContent>
+      </ContextMenu>
+    );
   }
-
-  function acceptFileList(nextInputFiles: FileList | File[]) {
-    const nextFiles = Array.from(nextInputFiles).filter((item) => item.type.startsWith('image/'));
-    if (nextFiles.length === 0) return;
-
-    setFiles((current) => {
-      const byKey = new Map(current.map((file) => [buildAttachmentKey(file), file]));
-      for (const file of nextFiles) {
-        byKey.set(buildAttachmentKey(file), file);
-      }
-      return [...byKey.values()];
-    });
-    setAttachmentMetadata((current) => {
-      const next = { ...current };
-      for (const file of nextFiles) {
-        const key = buildAttachmentKey(file);
-        next[key] = next[key] ?? {
-          title: deriveReferenceAttachmentTitle(file.name),
-          description: '',
-        };
-      }
-      return next;
-    });
-    setAttachmentBuckets((current) => {
-      const next = { ...current };
-      const hasPrimary = Object.values(next).includes('primary');
-      nextFiles.forEach((file, index) => {
-        const key = buildAttachmentKey(file);
-        if (!next[key]) {
-          next[key] = !hasPrimary && index === 0 ? 'primary' : 'angles';
-        }
-      });
-      return next;
-    });
-  }
-
-  function removeSelectedFile(fileKey: string) {
-    setFiles((current) => current.filter((file) => buildAttachmentKey(file) !== fileKey));
-    setAttachmentMetadata((current) => {
-      if (!(fileKey in current)) return current;
-      const next = { ...current };
-      delete next[fileKey];
-      return next;
-    });
-    setAttachmentBuckets((current) => {
-      if (!(fileKey in current)) return current;
-      const next = { ...current };
-      delete next[fileKey];
-      return next;
-    });
-    if (editingAttachmentKey === fileKey) {
-      setIsAttachmentMetadataDialogOpen(false);
-      setEditingAttachmentKey(null);
-      setAttachmentTitleDraft('');
-      setAttachmentDescriptionDraft('');
-    }
-  }
-
-  function moveAttachmentToBucket(fileKey: string, nextBucket: ReferenceImageBucket) {
-    setAttachmentBuckets((current) => {
-      const next = { ...current };
-      next[fileKey] = nextBucket;
-      return next;
-    });
-  }
-
-  function openAttachmentMetadataDialog(fileKey: string) {
-    setEditingAttachmentKey(fileKey);
-    setAttachmentTitleDraft(attachmentMetadata[fileKey]?.title ?? '');
-    setAttachmentDescriptionDraft(attachmentMetadata[fileKey]?.description ?? '');
-    setIsAttachmentMetadataDialogOpen(true);
-  }
-
-  function commitAttachmentMetadata() {
-    if (!editingAttachmentKey) return;
-    setAttachmentMetadata((current) => ({
-      ...current,
-      [editingAttachmentKey]: {
-        title: attachmentTitleDraft.trim() || deriveReferenceAttachmentTitle(files.find((file) => buildAttachmentKey(file) === editingAttachmentKey)?.name ?? ''),
-        description: attachmentDescriptionDraft.trim(),
-      },
-    }));
-    setIsAttachmentMetadataDialogOpen(false);
-    setEditingAttachmentKey(null);
-    setAttachmentTitleDraft('');
-    setAttachmentDescriptionDraft('');
-  }
-
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (files.length === 0 || !trimmedTitle) return;
-    const orderedFiles = [...files].sort((left, right) => {
-      const leftBucket = attachmentBuckets[buildAttachmentKey(left)] ?? 'angles';
-      const rightBucket = attachmentBuckets[buildAttachmentKey(right)] ?? 'angles';
-      if (leftBucket !== rightBucket) {
-        return leftBucket === 'primary' ? -1 : 1;
-      }
-      return 0;
-    });
-
-    await onSubmit({
-      files: orderedFiles,
-      title: trimmedTitle,
-      description: description.trim() || undefined,
-      route,
-      attachmentMetadata,
-      attachmentBuckets,
-    });
-    onOpenChange(false);
-  }
-
-  async function handleGenerateDescriptions() {
-    if (files.length === 0) return;
-    setIsGeneratingDescriptions(true);
-    try {
-      const attachments = await Promise.all(
-        files.map(async (file) => {
-          const bytes = new Uint8Array(await file.arrayBuffer());
-          return {
-            id: buildAttachmentKey(file),
-            name: file.name,
-            mimeType: file.type || 'image/png',
-            bytesBase64: bytesToBase64(bytes),
-          };
-        })
-      );
-      const result = await onGenerateDescriptions({
-        category: route,
-        title: trimmedTitle || undefined,
-        attachments,
-      });
-      setTitle((current) => current.trim() || result.title);
-      setDescription(result.description);
-      setAttachmentMetadata((current) => {
-        const next = { ...current };
-        for (const attachment of result.attachments) {
-          next[attachment.id] = {
-            title: next[attachment.id]?.title ?? deriveReferenceAttachmentTitle(files.find((file) => buildAttachmentKey(file) === attachment.id)?.name ?? ''),
-            description: attachment.description,
-          };
-        }
-        return next;
-      });
-      toast.success('Descriptions generated');
-    } finally {
-      setIsGeneratingDescriptions(false);
-    }
-  }
-
-  const routeCopy: Record<ReferenceLibraryRoute, { title: string; description: string; titlePlaceholder: string }> = {
-    objects: {
-      title: 'Item reference',
-      description: 'Group product, prop, or object images under one reusable reference.',
-      titlePlaceholder: 'Orange race bike',
-    },
-    environment: {
-      title: 'Environment reference',
-      description: 'Group multiple environment views under one shared continuity reference.',
-      titlePlaceholder: 'Sunlit transit hangar',
-    },
-    characters: {
-      title: 'Character reference',
-      description: 'Group multiple character images under one reusable identity reference.',
-      titlePlaceholder: 'Curly-haired pilot kid',
-    },
-  };
-  const routeOptions = [
-    { value: 'objects', label: 'Item' },
-    { value: 'environment', label: 'Environment' },
-    { value: 'characters', label: 'Character' },
-  ] as const;
-  const currentCopy = routeCopy[route];
-  const primaryTabLabel = getReferencePrimaryTabLabel(route);
-  const visibleSelectedFilePreviews = selectedFilePreviews.filter(
-    (file) => (attachmentBuckets[file.key] ?? 'angles') === activeImageTab,
-  );
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        data-testid="add-reference-dialog"
-        className="flex max-h-[calc(100vh-32px)] max-w-[1180px] flex-col overflow-hidden p-0"
+    <>
+      <EntityNameDialog
+        open={isNewFolderDialogOpen}
+        onOpenChange={(open) => {
+          setIsNewFolderDialogOpen(open);
+          if (!open) onSeedFilesConsumed();
+        }}
+        title="Nova pasta"
+        description="Dê um nome para sua pasta de referências."
+        label="Nome da pasta"
+        initialValue=""
+        submitLabel="Criar pasta"
+        onSubmit={(name) => { void handleCreateFolder(name); }}
+      />
+      <EntityNameDialog
+        open={renameFolderTarget !== null}
+        onOpenChange={(open) => { if (!open) setRenameFolderTarget(null); }}
+        title="Renomear pasta"
+        description="Dê um novo nome para esta pasta de referências."
+        label="Nome da pasta"
+        initialValue={renameFolderTarget?.title ?? ''}
+        submitLabel="Salvar"
+        onSubmit={async (name) => {
+          const target = renameFolderTarget;
+          setRenameFolderTarget(null);
+          if (!target) return;
+          await onRenameFolder({ folderId: target.id, category: route, newTitle: name });
+        }}
+      />
+      <EntityNameDialog
+        open={renameImageTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRenameImageTarget(null);
+        }}
+        title="Renomear imagem"
+        description="Dê um novo nome para esta referência."
+        label="Nome da imagem"
+        initialValue={renameImageTarget?.title ?? ''}
+        submitLabel="Salvar"
+        onSubmit={async (name) => {
+          const target = renameImageTarget;
+          setRenameImageTarget(null);
+          if (!target || !activeFolderId) return;
+          await onRenameImage({ imageId: target.id, folderId: activeFolderId, category: route, newTitle: name });
+        }}
+      />
+      <EntityNameDialog
+        open={isGroupDialogOpen}
+        onOpenChange={setIsGroupDialogOpen}
+        title="Nova subpasta"
+        description="Dê um nome para a pasta que agrupará as imagens selecionadas."
+        label="Nome da pasta"
+        initialValue=""
+        submitLabel="Agrupar"
+        onSubmit={async (name) => {
+          const ids = selectedImageIds;
+          setIsGroupDialogOpen(false);
+          if (!openFolderId || ids.length === 0) return;
+          setSelectedImageIds([]);
+          await onGroupImages({ imageIds: ids, category: route, newFolderTitle: name, sourceFolderId: activeFolderId });
+        }}
+      />
+      {metadataFolder && metadataDraft ? (
+        <ReferenceMetadataDialog
+          open
+          initialDraft={metadataDraft}
+          initialImageId={metadataTarget?.imageId ?? null}
+          onOpenChange={(open) => {
+            if (!open) setMetadataTarget(null);
+          }}
+          onSave={(draft) =>
+            onUpdateReferenceMetadata({
+              folderId: metadataFolder.id,
+              category: route,
+              draft,
+            })
+          }
+        />
+      ) : null}
+
+      <header
+        className={[
+          'fixed top-[8px] z-40',
+          'transition-[left] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
+          isSidebarCollapsed ? 'left-3' : 'left-[272px]',
+        ].join(' ')}
       >
-        <DialogHeader className="shrink-0 px-5 pt-5">
-          <DialogTitle>Add reference</DialogTitle>
-          <DialogDescription>{currentCopy.description}</DialogDescription>
-        </DialogHeader>
-
-        <form onSubmit={handleSubmit} className="mt-5 flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div
-            data-testid="add-reference-dialog-scroll"
-            className="grid min-h-0 flex-1 gap-5 overflow-y-auto px-5 pb-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]"
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.div
+            key={`reference-header-${route}-${displayFolder?.id ?? 'empty'}-${isRenamingTitle ? 'editing' : 'view'}`}
+            initial={{ opacity: 0, filter: 'blur(6px)', y: 4 }}
+            animate={{ opacity: 1, filter: 'blur(0px)', y: 0 }}
+            exit={{ opacity: 0, filter: 'blur(6px)', y: -3 }}
+            transition={{ duration: 0.24, ease: [0.23, 1, 0.32, 1] }}
+            data-testid="reference-header-chrome"
+            className="flex h-9 items-center gap-1.5 overflow-hidden rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] px-2.5 shadow-[0_10px_30px_rgba(0,0,0,0.3)] backdrop-blur-2xl"
           >
-          <div className="space-y-4">
-          <div className="space-y-2">
-            <div className="text-[13px] font-medium text-[var(--foreground)]">Type</div>
-            <div className="grid w-full grid-cols-3 gap-1 rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] p-1">
-              {routeOptions.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => setRoute(option.value)}
-                  className={[
-                    'relative inline-flex h-9 items-center justify-center overflow-hidden rounded-[14px] px-3 text-[13px] transition-colors',
-                    route === option.value ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
-                  ].join(' ')}
-                >
-                  {route === option.value ? (
-                    <motion.span
-                      layoutId="reference-route-pill"
-                      className="absolute inset-0 rounded-[14px] bg-[var(--surface)]"
-                      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                    />
-                  ) : null}
-                  <span className="relative z-10">{option.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <label htmlFor="reference-image" className="text-[13px] font-medium text-[var(--foreground)]">
-                Images
-              </label>
-              <Button
+            {parentFolder ? (
+              <button
                 type="button"
-                variant="surface"
-                size="sm"
-                className="h-8 rounded-full border-white/8 bg-[var(--surface2)] px-3 hover:bg-[var(--surface)]"
+                aria-label={`Voltar para ${parentFolder.title}`}
                 onClick={() => {
-                  void handleGenerateDescriptions().catch((error) => {
-                    console.error('Failed to generate reference descriptions', error);
-                    toast.error(getErrorMessage(error, 'Failed to generate descriptions.'));
-                  });
+                  setOpenFolderId(parentFolder.id);
+                  setIsRenamingTitle(false);
                 }}
-                disabled={files.length === 0 || isGeneratingDescriptions}
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
               >
-                {isGeneratingDescriptions ? (
-                  <LoaderCircle className="size-3.5 animate-spin" />
-                ) : (
-                  <WandSparkles className="size-3.5" />
-                )}
-                Describe all
-              </Button>
-            </div>
-            <div
-              onClick={() => {
-                if (files.length === 0) {
-                  attachmentInputRef.current?.click();
-                }
-              }}
-              onDragEnter={(event) => {
-                event.preventDefault();
-                setIsDragActive(true);
-              }}
-              onDragOver={(event) => {
-                event.preventDefault();
-                event.dataTransfer.dropEffect = 'copy';
-                setIsDragActive(true);
-              }}
-              onDragLeave={(event) => {
-                event.preventDefault();
-                setIsDragActive(false);
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                setIsDragActive(false);
-                acceptFileList(event.dataTransfer.files);
-              }}
-              className={[
-                'group relative flex min-h-[168px] cursor-pointer items-center justify-center overflow-hidden rounded-[24px] border border-dashed bg-[var(--surface2)] p-4 text-center',
-                'transition-[border-color,background-color,transform] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
-                isDragActive
-                  ? 'border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,var(--surface2))] scale-[1.01]'
-                  : 'border-[var(--border-soft)] hover:border-[var(--border-strong)] hover:bg-[var(--surface3)]',
-              ].join(' ')}
+                <ChevronLeft className="size-4" />
+              </button>
+            ) : null}
+            <h1
+              aria-label={breadcrumbAriaLabel}
+              className="min-w-0 text-[16px] font-medium leading-none tracking-[0] text-[var(--foreground)]"
             >
-                <Input
-                  id="reference-image"
-                  ref={attachmentInputRef}
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  className="sr-only"
-                  onChange={(event) => acceptFileList(event.target.files ?? [])}
-                />
-              {files.length === 0 ? (
-                <motion.div
-                  initial={false}
-                  animate={{
-                    opacity: 1,
-                    y: isDragActive ? -2 : 0,
-                    filter: 'blur(0px)',
+              {isRenamingTitle && displayFolder ? (
+                <input
+                  ref={titleInputRef}
+                  value={titleDraft}
+                  onChange={(e) => setTitleDraft(e.target.value)}
+                  onBlur={() => {
+                    void commitRename();
                   }}
-                  transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
-                  className="flex w-full flex-col items-center"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      void commitRename();
+                    }
+                    if (e.key === 'Escape') {
+                      setIsRenamingTitle(false);
+                    }
+                  }}
+                  className="min-w-[240px] bg-transparent text-[16px] font-medium leading-none tracking-[0] text-[var(--foreground)] outline-none"
+                />
+              ) : displayFolder ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTitleDraft(displayFolder.title);
+                    setIsRenamingTitle(true);
+                  }}
+                  className="group inline-flex min-w-0 max-w-full items-center text-left"
+                  title="Clique para renomear"
                 >
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      attachmentInputRef.current?.click();
-                    }}
-                    className="mb-4 inline-flex h-14 w-14 items-center justify-center rounded-[20px] border border-[var(--border-soft)] bg-[var(--surface)] text-[var(--foreground)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface3)]"
-                  >
-                    <ImagePlus className="size-5" />
-                  </button>
-                  <div className="text-[14px] font-medium text-[var(--foreground)]">
-                    {isDragActive ? 'Release to add images' : 'Drop an image here'}
-                  </div>
-                  <div className="mt-1 text-[12px] text-[var(--muted-foreground)]">
-                    Use + or drop multiple files
-                  </div>
-                </motion.div>
+                  <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--muted-foreground)]">
+                    <span className="rounded-full border border-white/8 bg-[rgba(32,32,33,0.78)] px-2.5 py-1 text-[11px] uppercase">
+                      {referenceRouteHeaderLabels[route]}
+                    </span>
+                    {openFolderPath.slice(0, -1).map((folder) => (
+                      <Fragment key={`reference-breadcrumb-parent-${folder.id}`}>
+                        <ChevronRight className="size-3.5 text-[var(--muted-foreground)]/70" />
+                        <span className="max-w-[160px] truncate text-[13px] text-[var(--muted-foreground)]">
+                          {folder.title}
+                        </span>
+                      </Fragment>
+                    ))}
+                    <ChevronRight className="size-3.5 text-[var(--muted-foreground)]/70" />
+                  </span>
+                  <span className="relative min-w-0 max-w-[320px] pr-0">
+                    <SlotText text={animatedTitleText} className="truncate text-[16px] text-[var(--foreground)]" />
+                    <span className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 opacity-0 transition-[opacity,transform] duration-200 group-hover:translate-x-4 group-hover:opacity-55">
+                      <Pencil className="size-3.5" />
+                    </span>
+                  </span>
+                </button>
               ) : (
-                <div className="w-full">
-                  <div className="mb-3 flex items-center justify-between">
-                    <div className="text-[12px] text-[var(--muted-foreground)]">{files.length} selected</div>
+                <SlotText text={animatedTitleText} className="truncate" />
+              )}
+            </h1>
+          </motion.div>
+        </AnimatePresence>
+      </header>
+
+      <AnimatePresence initial={false}>
+        <motion.div
+          key={`reference-sidebar-${route}`}
+          data-testid="reference-sidebar-shell"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+          className={[
+            'fixed bottom-0 right-0 top-0 z-20 overflow-hidden border-l border-[var(--border-soft)] bg-[var(--surface)] will-change-[width]',
+            isSidebarResizing ? '' : 'transition-[width] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]',
+          ].join(' ')}
+          style={{ width: sidebarWidth, minWidth: MIN_SCENES_SIDEBAR_WIDTH }}
+        >
+          <button
+            type="button"
+            aria-label="Resize references sidebar"
+            onPointerDown={onStartSidebarResize}
+            className="absolute bottom-0 left-0 top-0 z-30 w-4 -translate-x-1/2 cursor-col-resize touch-none bg-transparent"
+          />
+          <div data-testid="reference-sidebar" className="flex h-full w-full flex-col overflow-hidden bg-[var(--surface)]">
+            <div className="border-b border-[var(--border-soft)] p-4">
+              <div className="flex items-center justify-end gap-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
                     <button
                       type="button"
-                      onClick={() => attachmentInputRef.current?.click()}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[var(--surface)] text-[var(--foreground)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface3)]"
-                      aria-label="Add images"
+                      aria-label="Import references"
+                      onClick={onImportReference}
+                      className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
                     >
-                      <Plus className="size-4" />
+                      <Upload className="size-4" />
                     </button>
-                  </div>
-                  <div
-                    role="tablist"
-                    aria-label="Reference image buckets"
-                    className="mb-3 grid w-full grid-cols-2 gap-1 rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] p-1"
-                  >
-                    {([
-                      { value: 'primary', label: primaryTabLabel },
-                      { value: 'angles', label: 'Ângulos' },
-                    ] as const).map((tab) => (
-                      <button
-                        key={tab.value}
-                        type="button"
-                        role="tab"
-                        aria-selected={activeImageTab === tab.value}
-                        onClick={() => setActiveImageTab(tab.value)}
-                        className={[
-                          'relative inline-flex h-9 items-center justify-center overflow-hidden rounded-[14px] px-3 text-[13px] transition-colors',
-                          activeImageTab === tab.value ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
-                        ].join(' ')}
-                      >
-                        {activeImageTab === tab.value ? (
-                          <motion.span
-                            layoutId="reference-image-bucket-pill"
-                            className="absolute inset-0 rounded-[14px] bg-[var(--surface)]"
-                            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                          />
-                        ) : null}
-                        <span className="relative z-10">{tab.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                  <div className="grid max-h-[min(44vh,420px)] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
-                    {visibleSelectedFilePreviews.map((file) => (
-                      <div
-                        key={file.key}
-                        className="group relative overflow-hidden rounded-[16px] border border-[var(--border-soft)] bg-[var(--surface)]"
-                      >
-                        <div className="relative aspect-square overflow-hidden">
-                          <img
-                            src={file.previewUrl}
-                            alt={file.name}
-                            className="h-full w-full object-cover transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:scale-[1.03]"
-                          />
-                          <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1.5 pt-4">
-                            <div className="line-clamp-1 text-[11px] text-white/92">
-                              {attachmentMetadata[file.key]?.title?.trim() || deriveReferenceAttachmentTitle(file.name)}
-                            </div>
-                          </div>
-                          <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                moveAttachmentToBucket(file.key, (attachmentBuckets[file.key] ?? 'angles') === 'primary' ? 'angles' : 'primary')
+                  </TooltipTrigger>
+                  <TooltipContent>Import references</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label="Create reference folder"
+                      onClick={() => setIsNewFolderDialogOpen(true)}
+                      className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color-mix(in_srgb,var(--accent)_58%,transparent)] bg-[color-mix(in_srgb,var(--accent)_18%,rgba(32,32,33,0.82))] text-white transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_28%,rgba(32,32,33,0.88))]"
+                    >
+                      <FolderPlus className="size-4" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Create reference folder</TooltipContent>
+                </Tooltip>
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-2 py-3">
+              <div className="px-3 text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
+                {referenceRouteLabels[route]}
+              </div>
+              <div className="mt-2 space-y-1">
+                {topLevelFolders.map((topLevelFolder) => {
+                  const isActive = topLevelFolder.id === activeSidebarFolderId;
+                  return (
+                    <button
+                      key={topLevelFolder.id}
+                      type="button"
+                      onClick={() => {
+                        setOpenFolderId(topLevelFolder.id);
+                        setIsRenamingTitle(false);
+                      }}
+                      className={[
+                        'flex min-h-10 w-full items-center rounded-[12px] px-3 text-left text-[13px] transition-colors',
+                        isActive
+                          ? 'bg-[var(--surface2)] text-[var(--foreground)]'
+                          : 'text-[var(--muted-foreground)] hover:bg-white/6 hover:text-[var(--foreground)]',
+                      ].join(' ')}
+                    >
+                      <span className="truncate">{topLevelFolder.title}</span>
+                    </button>
+                  );
+                })}
+                {topLevelFolders.length === 0 ? (
+                  <p className="px-3 pt-2 text-[13px] leading-5 text-[var(--muted-foreground)]">
+                    Crie uma pasta para organizar suas referências visuais.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </motion.div>
+      </AnimatePresence>
+
+      <motion.section
+        initial={{ opacity: 0, y: 6, filter: 'blur(6px)' }}
+        animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+        exit={{ opacity: 0, y: -4, filter: 'blur(6px)' }}
+        transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+        className="min-h-full px-8 pb-10 pt-8"
+        onDragEnter={(e) => {
+          if (isSoloFolder || !displayFolder) return;
+          e.preventDefault();
+          dragDepthRef.current += 1;
+          setIsDragActive(true);
+        }}
+        onDragOver={(e) => {
+          if (isSoloFolder || !displayFolder) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+        }}
+        onDragLeave={(e) => {
+          if (isSoloFolder || !displayFolder) return;
+          e.preventDefault();
+          dragDepthRef.current -= 1;
+          if (dragDepthRef.current <= 0) {
+            dragDepthRef.current = 0;
+            setIsDragActive(false);
+          }
+        }}
+        onDrop={(e) => {
+          if (isSoloFolder || !displayFolder) return;
+          e.preventDefault();
+          dragDepthRef.current = 0;
+          setIsDragActive(false);
+          void handleDropFiles(e.dataTransfer.files);
+        }}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="sr-only"
+          onChange={(e) => {
+            void handleDropFiles(e.target.files ?? []);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+          }}
+        />
+
+        {isDragActive ? (
+          <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-[var(--accent)]/10 backdrop-blur-[2px]">
+            <div className="flex flex-col items-center gap-3 rounded-[28px] border-2 border-dashed border-[var(--accent)] bg-[var(--surface)]/90 px-10 py-8 shadow-xl">
+              <FolderPlus className="size-8 text-[var(--accent)]" />
+              <span className="text-[16px] font-medium text-[var(--foreground)]">Solte para adicionar à pasta</span>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-8 pt-6">
+          {displayFolder ? (
+            <>
+              {childFolders.length > 0 ? (
+                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 xl:grid-cols-3" data-testid="reference-subfolder-grid">
+                  {childFolders.map((childFolder) => renderFolderCard(childFolder))}
+                </div>
+              ) : null}
+
+              {folderImages.length === 0 && childFolders.length === 0 ? (
+                <div
+                  onClick={() => !isSoloFolder && fileInputRef.current?.click()}
+                  className={[
+                    'flex min-h-[420px] cursor-pointer flex-col items-center justify-center rounded-[28px] border-2 border-dashed',
+                    'transition-[border-color,background-color] duration-200',
+                    isDragActive
+                      ? 'border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_8%,var(--surface))]'
+                      : 'border-[var(--border-soft)] bg-[var(--surface)] hover:border-[var(--border-strong)]',
+                  ].join(' ')}
+                >
+                  <FolderPlus className="mb-3 size-10 text-[var(--muted-foreground)]/50" />
+                  <p className="text-[15px] font-medium text-[var(--foreground)]">Pasta vazia</p>
+                  <p className="mt-1 text-[13px] text-[var(--muted-foreground)]">
+                    {isSoloFolder ? 'Esta referência não suporta imagens adicionais.' : 'Arraste imagens ou clique para adicionar.'}
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-5 md:grid-cols-3 xl:grid-cols-4">
+                  {folderImages.map((image) => {
+                    const isSelected = selectedImageIds.includes(image.id);
+                    return (
+                      <ContextMenu key={image.id}>
+                        <ContextMenuTrigger asChild>
+                          <div
+                            role="button"
+                            aria-label={image.title || deriveReferenceAttachmentTitle(image.name)}
+                            tabIndex={0}
+                            data-selected={isSelected ? 'true' : 'false'}
+                            onClick={() => toggleImageSelection(image.id)}
+                            onDoubleClick={() => openMetadataDialog(displayFolder.id, image.id)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                toggleImageSelection(image.id);
                               }
-                              className="inline-flex h-7 items-center justify-center rounded-full border border-white/20 bg-black/55 px-2 text-[10px] text-white transition-colors hover:bg-black/70"
-                              aria-label={`Move ${file.name} to ${(attachmentBuckets[file.key] ?? 'angles') === 'primary' ? 'Ângulos' : primaryTabLabel}`}
-                            >
-                              {(attachmentBuckets[file.key] ?? 'angles') === 'primary' ? 'Ângulos' : primaryTabLabel}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => openAttachmentMetadataDialog(file.key)}
-                              className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
-                              aria-label={`Edit render metadata for ${file.name}`}
-                            >
-                              <Pencil className="size-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => removeSelectedFile(file.key)}
-                              className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-[rgba(190,58,58,0.65)]"
-                              aria-label={`Remove ${file.name}`}
-                            >
-                              <X className="size-3.5" />
-                            </button>
+                            }}
+                            className={[
+                              'group relative cursor-pointer overflow-hidden rounded-[20px] border bg-[var(--surface2)] outline-none',
+                              'transition-[border-color,box-shadow,transform] duration-200',
+                              isSelected
+                                ? 'border-[var(--accent)] shadow-[0_0_0_1px_rgba(65,130,230,0.5)] scale-[0.98]'
+                                : 'border-[var(--border-soft)] hover:border-[var(--border-strong)]',
+                            ].join(' ')}
+                            style={{ aspectRatio: '1 / 1' }}
+                          >
+                            <img
+                              src={image.previewUrl}
+                              alt={image.title}
+                              className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:scale-[1.04]"
+                              draggable={false}
+                            />
+                            <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-3 pb-3 pt-10 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                              <div className="line-clamp-1 text-[12px] font-medium text-white/90">
+                                {image.title || deriveReferenceAttachmentTitle(image.name)}
+                              </div>
+                            </div>
+                            {!isSoloFolder ? (
+                              <div className="absolute right-2 top-2 z-20 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+                                <button
+                                  type="button"
+                                  aria-label={`Remover ${image.title}`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedImageIds((current) => current.filter((id) => id !== image.id));
+                                    void onDeleteImageFromFolder({
+                                      imageId: image.id,
+                                      folderId: displayFolder.id,
+                                      category: route,
+                                      folderTitle: displayFolder.title,
+                                    });
+                                  }}
+                                  className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/60 text-white backdrop-blur-sm transition-colors hover:bg-[rgba(190,58,58,0.7)]"
+                                >
+                                  <X className="size-3.5" />
+                                </button>
+                              </div>
+                            ) : null}
                           </div>
-                        </div>
-                        <div className="border-t border-[var(--border-soft)] px-2 py-1.5 text-[11px] text-[var(--muted-foreground)]">
-                          <div className="line-clamp-2">
-                            {(attachmentMetadata[file.key]?.description ?? '').trim() || 'No description yet'}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  {visibleSelectedFilePreviews.length === 0 ? (
-                    <div className="rounded-[14px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)] px-4 py-6 text-center text-[12px] text-[var(--muted-foreground)]">
-                      No images in this tab
-                    </div>
+                        </ContextMenuTrigger>
+                        <ContextMenuContent>
+                          <ContextMenuItem onClick={() => setRenameImageTarget(image)}>Renomear...</ContextMenuItem>
+                          <ContextMenuItem onClick={() => downloadReferenceImage(image)}>Baixar</ContextMenuItem>
+                          {!isSoloFolder ? (
+                            <>
+                              <ContextMenuSeparator />
+                              <ContextMenuItem
+                                className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
+                                onClick={() => {
+                                  setSelectedImageIds((current) => current.filter((id) => id !== image.id));
+                                  void onDeleteImageFromFolder({
+                                    imageId: image.id,
+                                    folderId: displayFolder.id,
+                                    category: route,
+                                    folderTitle: displayFolder.title,
+                                  });
+                                }}
+                              >
+                                Excluir imagem
+                              </ContextMenuItem>
+                            </>
+                          ) : null}
+                        </ContextMenuContent>
+                      </ContextMenu>
+                    );
+                  })}
+                  {!isSoloFolder ? (
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      style={{ aspectRatio: '1 / 1' }}
+                      className="flex flex-col items-center justify-center rounded-[20px] border-2 border-dashed border-[var(--border-soft)] bg-[var(--surface)] text-[var(--muted-foreground)] transition-[border-color,background-color] duration-200 hover:border-[var(--border-strong)] hover:bg-[var(--surface2)] hover:text-[var(--foreground)]"
+                    >
+                      <Plus className="size-7" />
+                    </button>
                   ) : null}
                 </div>
               )}
+            </>
+          ) : (
+            <div className="flex min-h-[360px] items-center justify-center rounded-[28px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)]">
+              <div className="flex max-w-[340px] flex-col items-center text-center">
+                <div className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full bg-[var(--surface2)] text-[var(--muted-foreground)]">
+                  <FolderPlus className="size-5" />
+                </div>
+                <h2 className="text-[15px] font-medium tracking-[0] text-[var(--foreground)]">Nenhuma pasta ainda</h2>
+                <p className="mt-2 text-[13px] leading-5 text-[var(--muted-foreground)]">
+                  Crie uma pasta para organizar suas referências visuais.
+                </p>
+              </div>
             </div>
-          </div>
-          </div>
-          <div className="space-y-4">
-          <div className="space-y-2">
-            <label htmlFor="reference-title" className="text-[13px] font-medium text-[var(--foreground)]">
-              Title
-            </label>
-            <Input
-              id="reference-title"
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder={currentCopy.titlePlaceholder}
-              autoFocus
-            />
-          </div>
+          )}
+        </div>
 
-          <div className="space-y-2">
-            <label htmlFor="reference-description" className="text-[13px] font-medium text-[var(--foreground)]">
-              Description
-            </label>
-            <textarea
-              id="reference-description"
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-              placeholder="Shared guidance. Individual image notes are edited with the pencil icon."
-              className="min-h-[104px] w-full resize-none rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] px-4 py-3 text-[14px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[var(--border-strong)]"
-            />
-          </div>
-          </div>
-          </div>
-
-          <div
-            data-testid="add-reference-dialog-footer"
-            className="sticky bottom-0 flex shrink-0 items-center justify-end gap-2 border-t border-[var(--border-soft)] bg-[color-mix(in_srgb,var(--surface)_96%,transparent)] px-5 py-4 backdrop-blur-xl"
-          >
-            <Button
-              type="button"
-              variant="surface"
-              className="border-transparent bg-[var(--surface2)] hover:bg-[var(--surface3)]"
-              onClick={() => onOpenChange(false)}
+        <AnimatePresence initial={false}>
+          {selectedImages.length > 0 ? (
+            <motion.div
+              key="reference-selection-actions"
+              initial={{ opacity: 0, y: 6, filter: 'blur(8px)' }}
+              animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+              exit={{ opacity: 0, y: -4, filter: 'blur(8px)' }}
+              transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+              className="fixed left-1/2 top-[64px] z-40 -translate-x-1/2"
             >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={files.length === 0 || !trimmedTitle}>
-              Save reference
-            </Button>
-          </div>
-        </form>
-      </DialogContent>
-      <Dialog open={isAttachmentMetadataDialogOpen} onOpenChange={setIsAttachmentMetadataDialogOpen}>
-        <DialogContent className="max-w-[520px]">
-          <DialogHeader>
-            <DialogTitle>Image render metadata</DialogTitle>
-            <DialogDescription>Edit the per-image title and render description for this reference image.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3 pt-2">
-            <Input
-              data-testid="reference-attachment-title-input"
-              value={attachmentTitleDraft}
-              onChange={(event) => {
-                const nextTitle = event.target.value;
-                setAttachmentTitleDraft(nextTitle);
-                if (editingAttachmentKey) {
-                  setAttachmentMetadata((current) => ({
-                    ...current,
-                    [editingAttachmentKey]: {
-                      title: nextTitle,
-                      description: current[editingAttachmentKey]?.description ?? '',
-                    },
-                  }));
-                }
-              }}
-              placeholder="Image title"
-              autoFocus
-            />
-            <textarea
-              data-testid="reference-attachment-description-input"
-              value={attachmentDescriptionDraft}
-              onChange={(event) => {
-                const nextDescription = event.target.value;
-                setAttachmentDescriptionDraft(nextDescription);
-                if (editingAttachmentKey) {
-                  setAttachmentMetadata((current) => ({
-                    ...current,
-                    [editingAttachmentKey]: {
-                      title:
-                        current[editingAttachmentKey]?.title ??
-                        deriveReferenceAttachmentTitle(files.find((file) => buildAttachmentKey(file) === editingAttachmentKey)?.name ?? ''),
-                      description: nextDescription,
-                    },
-                  }));
-                }
-              }}
-              placeholder="Describe this image's key details, composition, or constraints."
-              className="min-h-[140px] w-full resize-none rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] px-4 py-3 text-[14px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[var(--border-strong)]"
-            />
-            <div className="flex items-center justify-end gap-2">
-              <Button
-                type="button"
-                variant="surface"
-                className="border-transparent bg-[var(--surface2)] hover:bg-[var(--surface3)]"
-                onClick={() => setIsAttachmentMetadataDialogOpen(false)}
-              >
-                Cancel
-              </Button>
-              <Button data-testid="reference-attachment-save-button" type="button" onClick={commitAttachmentMetadata}>
-                Save image metadata
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-    </Dialog>
-  );
-}
-
-function EditReferenceDialog({
-  open,
-  onOpenChange,
-  reference,
-  onSubmit,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  reference: {
-    id: string;
-    category: ReferenceLibraryRoute;
-    collectionId?: string;
-    environmentId?: string;
-    title: string;
-    description?: string;
-    groupTitle?: string;
-    previewUrl?: string;
-    attachments?: Array<{
-      id?: string;
-      name: string;
-      title?: string;
-      mimeType: string;
-      bytesBase64: string;
-      description?: string;
-      section?: ReferenceImageBucket;
-    }>;
-  } | null;
-  onSubmit: (input: {
-    id: string;
-    category: ReferenceLibraryRoute;
-    collectionId?: string;
-    environmentId?: string;
-    title: string;
-    description?: string;
-    attachments?: Array<{
-      id?: string;
-      name: string;
-      title?: string;
-      mimeType: string;
-      bytesBase64: string;
-      description?: string;
-      section?: ReferenceImageBucket;
-    }>;
-  }) => void | Promise<void>;
-}) {
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [attachments, setAttachments] = useState<
-    Array<{
-      localKey: string;
-      id?: string;
-      name: string;
-      title: string;
-      mimeType: string;
-      bytesBase64: string;
-      description?: string;
-      previewUrl: string;
-      shouldRevokePreviewUrl?: boolean;
-      bucket: ReferenceImageBucket;
-    }>
-  >([]);
-  const [editingAttachmentKey, setEditingAttachmentKey] = useState<string | null>(null);
-  const [attachmentTitleDraft, setAttachmentTitleDraft] = useState('');
-  const [attachmentDescriptionDraft, setAttachmentDescriptionDraft] = useState('');
-  const [isAttachmentMetadataDialogOpen, setIsAttachmentMetadataDialogOpen] = useState(false);
-  const [activeImageTab, setActiveImageTab] = useState<ReferenceImageBucket>('primary');
-  const [previewAttachmentKey, setPreviewAttachmentKey] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const attachmentPreviewUrlsRef = useRef<string[]>([]);
-
-  useEffect(() => {
-    const previousPreviewUrls = attachmentPreviewUrlsRef.current;
-    const nextPreviewUrls = attachments.filter((attachment) => attachment.shouldRevokePreviewUrl).map((attachment) => attachment.previewUrl);
-
-    for (const previewUrl of previousPreviewUrls) {
-      if (!nextPreviewUrls.includes(previewUrl)) {
-        URL.revokeObjectURL(previewUrl);
-      }
-    }
-
-    attachmentPreviewUrlsRef.current = nextPreviewUrls;
-  }, [attachments]);
-
-  useEffect(() => {
-    return () => {
-      for (const previewUrl of attachmentPreviewUrlsRef.current) {
-        URL.revokeObjectURL(previewUrl);
-      }
-      attachmentPreviewUrlsRef.current = [];
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!open || !reference) {
-      setTitle('');
-      setDescription('');
-      setAttachments((current) => {
-        for (const attachment of current) {
-          if (attachment.shouldRevokePreviewUrl) {
-            URL.revokeObjectURL(attachment.previewUrl);
-          }
-        }
-        return [];
-      });
-      setPreviewAttachmentKey(null);
-      return;
-    }
-    setTitle(reference.title);
-    setDescription(reference.description ?? '');
-    setAttachments((current) => {
-      for (const attachment of current) {
-        if (attachment.shouldRevokePreviewUrl) {
-          URL.revokeObjectURL(attachment.previewUrl);
-        }
-      }
-      return (reference.attachments ?? []).map((attachment, index) => ({
-        localKey: attachment.id ?? `${attachment.name}-${index}`,
-        id: attachment.id,
-        name: attachment.name,
-        title: attachment.title ?? deriveReferenceAttachmentTitle(attachment.name),
-        mimeType: attachment.mimeType,
-        bytesBase64: attachment.bytesBase64,
-        description: attachment.description,
-        previewUrl: base64ToObjectUrl(attachment.bytesBase64, attachment.mimeType),
-        shouldRevokePreviewUrl: true,
-        bucket: attachment.section ?? (index === 0 ? 'primary' : 'angles'),
-      }));
-    });
-    setActiveImageTab('primary');
-  }, [open, reference]);
-
-  const trimmedTitle = title.trim();
-  const categoryLabel =
-    reference?.category === 'environment'
-      ? 'environment'
-      : reference?.category === 'objects'
-        ? 'object'
-        : 'character';
-  const isCollection = (reference?.attachments?.length ?? 0) > 0 || Boolean(reference?.collectionId) || reference?.category === 'environment';
-
-  function openAttachmentMetadataDialog(localKey: string) {
-    const attachment = attachments.find((item) => item.localKey === localKey);
-    if (!attachment) return;
-    setEditingAttachmentKey(localKey);
-    setAttachmentTitleDraft(attachment.title);
-    setAttachmentDescriptionDraft(attachment.description ?? '');
-    setIsAttachmentMetadataDialogOpen(true);
-  }
-
-  function saveAttachmentMetadata() {
-    if (!editingAttachmentKey) return;
-    setAttachments((current) =>
-      current.map((attachment) =>
-        attachment.localKey === editingAttachmentKey
-          ? {
-              ...attachment,
-              title: attachmentTitleDraft.trim() || deriveReferenceAttachmentTitle(attachment.name),
-              description: attachmentDescriptionDraft.trim() || undefined,
-            }
-          : attachment
-      )
-    );
-    setIsAttachmentMetadataDialogOpen(false);
-    setEditingAttachmentKey(null);
-    setAttachmentTitleDraft('');
-    setAttachmentDescriptionDraft('');
-  }
-
-  function removeAttachment(localKey: string) {
-    setAttachments((current) => {
-      const next = current.filter((attachment) => {
-        if (attachment.localKey !== localKey) return true;
-        if (attachment.shouldRevokePreviewUrl) {
-          URL.revokeObjectURL(attachment.previewUrl);
-        }
-        return false;
-      });
-      return next;
-    });
-    setPreviewAttachmentKey((current) => (current === localKey ? null : current));
-  }
-
-  async function appendFiles(fileList: FileList | File[]) {
-    const imageFiles = Array.from(fileList).filter((item) => item.type.startsWith('image/'));
-    if (imageFiles.length === 0) return;
-    const prepared = await Promise.all(
-      imageFiles.map(async (file, index) => {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        return {
-          localKey: `${file.name}-${file.size}-${file.lastModified}-${Date.now()}-${index}`,
-          name: file.name,
-          title: deriveReferenceAttachmentTitle(file.name),
-          mimeType: file.type || 'image/png',
-          bytesBase64: bytesToBase64(bytes),
-          description: '',
-          previewUrl: URL.createObjectURL(file),
-          shouldRevokePreviewUrl: true,
-          inputIndex: index,
-        };
-      })
-    );
-    setAttachments((current) => {
-      const hasPrimary = current.some((attachment) => attachment.bucket === 'primary');
-      return [
-        ...current,
-        ...prepared.map(({ inputIndex, ...attachment }) => ({
-          ...attachment,
-          bucket: hasPrimary || inputIndex > 0 ? 'angles' as const : 'primary' as const,
-        })),
-      ];
-    });
-  }
-
-  function moveAttachmentToBucket(localKey: string, nextBucket: ReferenceImageBucket) {
-    setAttachments((current) =>
-      current.map((attachment) =>
-        attachment.localKey === localKey ? { ...attachment, bucket: nextBucket } : attachment
-      )
-    );
-  }
-
-  async function copyAttachmentToClipboard(attachment: {
-    previewUrl: string;
-    mimeType: string;
-  }) {
-    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
-      throw new Error('Clipboard image copy is not available in this environment.');
-    }
-
-    const response = await fetch(attachment.previewUrl);
-    const blob = await response.blob();
-    const mimeType = blob.type || attachment.mimeType || 'image/png';
-    await navigator.clipboard.write([new ClipboardItem({ [mimeType]: blob })]);
-  }
-
-  function handleCopyAttachment(attachment: {
-    previewUrl: string;
-    mimeType: string;
-  }) {
-    void copyAttachmentToClipboard(attachment)
-      .then(() => {
-        toast.success('Image copied');
-      })
-      .catch((error) => {
-        console.error('Failed to copy reference attachment', error);
-        toast.error(getErrorMessage(error, 'Failed to copy image.'));
-      });
-  }
-
-  function renderAttachmentContextMenuItems(attachment: (typeof attachments)[number]) {
-    return (
-      <>
-        <ContextMenuItem onClick={() => handleCopyAttachment(attachment)}>
-          <Copy className="mr-2 size-3.5" />
-          Copy
-        </ContextMenuItem>
-        <ContextMenuItem onClick={() => setPreviewAttachmentKey(attachment.localKey)}>
-          Open
-        </ContextMenuItem>
-        <ContextMenuItem onClick={() => openAttachmentMetadataDialog(attachment.localKey)}>
-          Edit image metadata
-        </ContextMenuItem>
-        <ContextMenuItem
-          onClick={() =>
-            moveAttachmentToBucket(
-              attachment.localKey,
-              attachment.bucket === 'primary' ? 'angles' : 'primary',
-            )
-          }
-        >
-          {attachment.bucket === 'primary' ? `Move to Ângulos` : `Move to ${primaryTabLabel}`}
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem
-          className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
-          onClick={() => removeAttachment(attachment.localKey)}
-        >
-          Remove
-        </ContextMenuItem>
-      </>
-    );
-  }
-
-  const primaryTabLabel = getReferencePrimaryTabLabel(reference?.category ?? 'environment');
-  const visibleAttachments = attachments.filter((attachment) => attachment.bucket === activeImageTab);
-  const previewAttachment = previewAttachmentKey
-    ? attachments.find((attachment) => attachment.localKey === previewAttachmentKey) ?? null
-    : null;
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className={[
-          'flex max-h-[calc(100vh-32px)] flex-col overflow-hidden p-0',
-          isCollection ? 'max-w-[1180px]' : 'max-w-[980px]',
-        ].join(' ')}
-      >
-        <DialogHeader className="shrink-0 px-5 pt-5">
-          <DialogTitle>Edit {categoryLabel}</DialogTitle>
-          <DialogDescription>Update the reference metadata.</DialogDescription>
-        </DialogHeader>
-        <form
-          className="mt-5 flex min-h-0 flex-1 flex-col overflow-hidden"
-          onSubmit={async (event) => {
-            event.preventDefault();
-            if (!reference || !trimmedTitle) return;
-            await onSubmit({
-              id: reference.id,
-              category: reference.category,
-              collectionId: reference.collectionId,
-              environmentId: reference.environmentId,
-              title: trimmedTitle,
-              description: description.trim() || undefined,
-              attachments: isCollection
-                ? [...attachments]
-                    .sort((left, right) => {
-                      if (left.bucket !== right.bucket) {
-                        return left.bucket === 'primary' ? -1 : 1;
-                      }
-                      return 0;
-                    })
-                    .map((attachment) => ({
-                      id: attachment.id,
-                      name: attachment.name,
-                      title: attachment.title,
-                      mimeType: attachment.mimeType,
-                      bytesBase64: attachment.bytesBase64,
-                      description: attachment.description,
-                      section: attachment.bucket,
-                    }))
-                : undefined,
-            });
-            onOpenChange(false);
-          }}
-        >
-          <div className={`grid min-h-0 flex-1 gap-5 overflow-y-auto px-5 pb-4 ${isCollection ? 'lg:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]' : 'lg:grid-cols-[minmax(0,1fr)_minmax(340px,0.9fr)]'}`}>
-            <div className="space-y-4">
-            {isCollection ? (
-              <div className="space-y-2">
-                <div className="text-[13px] font-medium text-[var(--foreground)]">Images</div>
-                <div className="rounded-[20px] border border-[var(--border-soft)] bg-[var(--surface2)] p-3">
-                  <Input
-                    ref={inputRef}
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    className="sr-only"
-                    onChange={(event) => {
-                      void appendFiles(event.target.files ?? []);
-                    }}
-                  />
-                  <div className="mb-3 flex items-center justify-end">
-                    <button
-                      type="button"
-                      onClick={() => inputRef.current?.click()}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[var(--surface)] text-[var(--foreground)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface3)]"
-                      aria-label="Add images"
+              <LiquidMetalFrame className="h-12 min-w-[176px]" innerClassName="bg-[rgba(15,16,16,0.9)]">
+                <div className="flex h-full items-center gap-1.5 px-2.5">
+                  <span className="px-2 text-[12px] text-white/60">
+                    {selectedImages.length} {selectedImages.length === 1 ? 'selecionada' : 'selecionadas'}
+                  </span>
+                  <Button
+                    variant="surface"
+                    size="sm"
+                    aria-label="Baixar imagens selecionadas"
+                    className="h-8 rounded-full border-white/8 bg-transparent px-3 text-[13px] hover:bg-white/6"
+                    onClick={() => selectedImages.forEach(downloadReferenceImage)}
+                  >
+                    <Download className="size-3.5" />
+                    Download
+                  </Button>
+                  {!isSoloFolder ? (
+                    <Button
+                      variant="surface"
+                      size="sm"
+                      aria-label="Agrupar imagens selecionadas em uma pasta"
+                      className="h-8 rounded-full border-white/8 bg-transparent px-3 text-[13px] hover:bg-white/6"
+                      onClick={() => setIsGroupDialogOpen(true)}
                     >
-                      <Plus className="size-4" />
-                    </button>
-                  </div>
-                  <div
-                    role="tablist"
-                    aria-label="Reference image buckets"
-                    className="mb-3 grid w-full grid-cols-2 gap-1 rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] p-1"
-                  >
-                    {([
-                      { value: 'primary', label: primaryTabLabel },
-                      { value: 'angles', label: 'Ângulos' },
-                    ] as const).map((tab) => (
-                      <button
-                        key={tab.value}
-                        type="button"
-                        role="tab"
-                        aria-selected={activeImageTab === tab.value}
-                        onClick={() => setActiveImageTab(tab.value)}
-                        className={[
-                          'relative inline-flex h-9 items-center justify-center overflow-hidden rounded-[14px] px-3 text-[13px] transition-colors',
-                          activeImageTab === tab.value ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
-                        ].join(' ')}
-                      >
-                        {activeImageTab === tab.value ? (
-                          <motion.span
-                            layoutId="edit-reference-image-bucket-pill"
-                            className="absolute inset-0 rounded-[14px] bg-[var(--surface)]"
-                            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                          />
-                        ) : null}
-                        <span className="relative z-10">{tab.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                  {attachments.length > 0 ? (
-                    visibleAttachments.length > 0 ? (
-                      <div className="grid max-h-[min(44vh,420px)] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
-                        {visibleAttachments.map((attachment) => (
-                          <ContextMenu key={attachment.localKey}>
-                            <div className="group relative overflow-hidden rounded-[16px] border border-[var(--border-soft)] bg-[var(--surface)]">
-                              <ContextMenuTrigger asChild>
-                                <button
-                                  type="button"
-                                  aria-label={`Open ${attachment.name}`}
-                                  onClick={() => setPreviewAttachmentKey(attachment.localKey)}
-                                  onDoubleClick={() => setPreviewAttachmentKey(attachment.localKey)}
-                                  className="block w-full text-left"
-                                >
-                                  <div className="relative aspect-square overflow-hidden">
-                                    <img src={attachment.previewUrl} alt={attachment.name} className="h-full w-full object-cover" />
-                                    <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1.5 pt-4">
-                                      <div className="line-clamp-1 text-[11px] text-white/92">{attachment.title}</div>
-                                    </div>
-                                  </div>
-                                </button>
-                              </ContextMenuTrigger>
-                                <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      moveAttachmentToBucket(
-                                        attachment.localKey,
-                                        attachment.bucket === 'primary' ? 'angles' : 'primary',
-                                      )
-                                    }
-                                    className="inline-flex h-7 items-center justify-center rounded-full border border-white/20 bg-black/55 px-2 text-[10px] text-white transition-colors hover:bg-black/70"
-                                    aria-label={`Move ${attachment.name} to ${attachment.bucket === 'primary' ? 'Ângulos' : primaryTabLabel}`}
-                                  >
-                                    {attachment.bucket === 'primary' ? 'Ângulos' : primaryTabLabel}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => openAttachmentMetadataDialog(attachment.localKey)}
-                                    className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-black/70"
-                                    aria-label={`Edit render metadata for ${attachment.name}`}
-                                  >
-                                    <Pencil className="size-3.5" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => removeAttachment(attachment.localKey)}
-                                    className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white transition-colors hover:bg-[rgba(190,58,58,0.65)]"
-                                    aria-label={`Remove ${attachment.name}`}
-                                  >
-                                    <X className="size-3.5" />
-                                  </button>
-                                </div>
-                                <div className="border-t border-[var(--border-soft)] px-2 py-1.5 text-[11px] text-[var(--muted-foreground)]">
-                                  <div className="line-clamp-2">{attachment.description?.trim() || 'No description yet'}</div>
-                                </div>
-                            </div>
-                            <ContextMenuContent className="min-w-[180px]">
-                              {renderAttachmentContextMenuItems(attachment)}
-                            </ContextMenuContent>
-                          </ContextMenu>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="rounded-[14px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)] px-4 py-6 text-center text-[12px] text-[var(--muted-foreground)]">
-                        No images in this tab
-                      </div>
-                    )
-                  ) : (
-                    <div className="rounded-[14px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)] px-4 py-6 text-center text-[12px] text-[var(--muted-foreground)]">
-                      No images selected
-                    </div>
-                  )}
+                      <FolderPlus className="size-3.5" />
+                      Group
+                    </Button>
+                  ) : null}
+                  {representativeRef ? (
+                    <ContextMenu>
+                      <ContextMenuTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label="Ações da pasta"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
+                        >
+                          <span className="text-[18px] leading-none">···</span>
+                        </button>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent>
+                        <ContextMenuItem onClick={() => onExportReference(representativeRef)}>Exportar pasta...</ContextMenuItem>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem
+                          className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
+                          onClick={() => {
+                            setOpenFolderId(parentFolder?.id ?? null);
+                            onDeleteReference(representativeRef);
+                          }}
+                        >
+                          Excluir pasta
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
+                  ) : null}
                 </div>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <div className="text-[13px] font-medium text-[var(--foreground)]">Preview</div>
-                <div className="overflow-hidden rounded-[24px] border border-[var(--border-soft)] bg-[var(--surface2)]">
-                  <div className="aspect-[4/3] overflow-hidden bg-[var(--surface)]">
-                    {reference?.previewUrl ? (
-                      <img
-                        src={reference.previewUrl}
-                        alt={reference.groupTitle?.trim() || reference.title}
-                        className="h-full w-full object-cover"
-                      />
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-            )}
-            </div>
-            <div className="space-y-4">
-            <div className="space-y-2">
-              <label htmlFor="edit-reference-title" className="text-[13px] font-medium text-[var(--foreground)]">
-                Reference title
-              </label>
-              <Input
-                id="edit-reference-title"
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
-                placeholder="Reference title"
-                autoFocus
-              />
-            </div>
-            <div className="space-y-2">
-              <label htmlFor="edit-reference-description" className="text-[13px] font-medium text-[var(--foreground)]">
-                Reference description
-              </label>
-              <textarea
-                id="edit-reference-description"
-                value={description}
-                onChange={(event) => setDescription(event.target.value)}
-                placeholder="Optional description"
-                className="min-h-[120px] w-full resize-none rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] px-4 py-3 text-[14px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[var(--border-strong)]"
-              />
-            </div>
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--border-soft)] bg-[color-mix(in_srgb,var(--surface)_96%,transparent)] px-5 py-4 backdrop-blur-xl">
-            <Button
-              type="button"
-              variant="surface"
-              className="border-transparent bg-[var(--surface2)] hover:bg-[var(--surface3)]"
-              onClick={() => onOpenChange(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={!trimmedTitle || (isCollection && attachments.length === 0)}>
-              Save changes
-            </Button>
-          </div>
-        </form>
-      </DialogContent>
-      <Dialog open={isAttachmentMetadataDialogOpen} onOpenChange={setIsAttachmentMetadataDialogOpen}>
-        <DialogContent className="max-w-[520px]">
-          <DialogHeader>
-            <DialogTitle>Image render metadata</DialogTitle>
-            <DialogDescription>Edit the per-image title and render description for this reference image.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3 pt-2">
-            <Input
-              data-testid="reference-attachment-title-input"
-              value={attachmentTitleDraft}
-              onChange={(event) => {
-                const nextTitle = event.target.value;
-                setAttachmentTitleDraft(nextTitle);
-                if (editingAttachmentKey) {
-                  setAttachments((current) =>
-                    current.map((attachment) =>
-                      attachment.localKey === editingAttachmentKey ? { ...attachment, title: nextTitle } : attachment
-                    )
-                  );
-                }
-              }}
-              placeholder="Image title"
-              autoFocus
-            />
-            <textarea
-              data-testid="reference-attachment-description-input"
-              value={attachmentDescriptionDraft}
-              onChange={(event) => {
-                const nextDescription = event.target.value;
-                setAttachmentDescriptionDraft(nextDescription);
-                if (editingAttachmentKey) {
-                  setAttachments((current) =>
-                    current.map((attachment) =>
-                      attachment.localKey === editingAttachmentKey
-                        ? { ...attachment, description: nextDescription || undefined }
-                        : attachment
-                    )
-                  );
-                }
-              }}
-              placeholder="Describe this image's key details, composition, or constraints."
-              className="min-h-[140px] w-full resize-none rounded-[18px] border border-[var(--border-soft)] bg-[var(--surface2)] px-4 py-3 text-[14px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[var(--border-strong)]"
-            />
-            <div className="flex items-center justify-end gap-2">
-              <Button
-                type="button"
-                variant="surface"
-                className="border-transparent bg-[var(--surface2)] hover:bg-[var(--surface3)]"
-                onClick={() => setIsAttachmentMetadataDialogOpen(false)}
-              >
-                Cancel
-              </Button>
-              <Button data-testid="reference-attachment-save-button" type="button" onClick={saveAttachmentMetadata}>
-                Save image metadata
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-      <Dialog open={Boolean(previewAttachment)} onOpenChange={(open) => !open && setPreviewAttachmentKey(null)}>
-        <DialogContent className="max-w-[min(92vw,980px)] overflow-hidden p-0">
-          <DialogHeader className="px-5 pt-5">
-            <DialogTitle>{previewAttachment?.name ?? 'Image preview'}</DialogTitle>
-            <DialogDescription>{previewAttachment?.title ?? 'Reference image preview'}</DialogDescription>
-          </DialogHeader>
-          <div className="px-5 pb-5 pt-3">
-            {previewAttachment ? (
-              <ContextMenu>
-                <ContextMenuTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label={`Preview ${previewAttachment.name}`}
-                    className="block w-full overflow-hidden rounded-[24px] border border-[var(--border-soft)] bg-[var(--surface2)] text-left"
-                  >
-                    <img
-                      src={previewAttachment.previewUrl}
-                      alt={`${previewAttachment.name} preview`}
-                      className="max-h-[72vh] w-full object-contain bg-[var(--surface)]"
-                    />
-                  </button>
-                </ContextMenuTrigger>
-                <ContextMenuContent className="min-w-[180px]">
-                  {renderAttachmentContextMenuItems(previewAttachment)}
-                </ContextMenuContent>
-              </ContextMenu>
-            ) : null}
-          </div>
-        </DialogContent>
-      </Dialog>
-    </Dialog>
+              </LiquidMetalFrame>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+      </motion.section>
+    </>
   );
 }
+
 
 
 

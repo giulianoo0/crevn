@@ -4,10 +4,10 @@ import {
   ChevronRight,
   Folder,
   Image as ImageIcon,
-  LoaderCircle,
   TriangleAlert,
 } from 'lucide-react';
 import { SlotText } from 'slot-text/react';
+import { chromatic } from 'slot-text';
 
 import {
   Dialog,
@@ -39,9 +39,9 @@ export type ReferenceMetadataDraft = {
 type SaveStatus = 'idle' | 'editing' | 'saving' | 'saved' | 'error';
 
 const saveStatusLabels: Record<SaveStatus, string> = {
-  idle: 'Ready',
+  idle: 'Saved',
   editing: 'Editing',
-  saving: 'Saving...',
+  saving: 'Editing',
   saved: 'Saved',
   error: "Couldn't save",
 };
@@ -67,16 +67,28 @@ export function ReferenceMetadataDialog({
   const [selectedImageId, setSelectedImageId] = useState<string | null>(initialImageId);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
   const draftRef = useRef(draft);
+  const popupRef = useRef<HTMLDivElement>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveChainRef = useRef(Promise.resolve());
   const lastQueuedSignatureRef = useRef(getDraftSignature(initialDraft));
+  const wasOpenRef = useRef(false);
 
   useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
 
+  // Only reset the draft and selection when the dialog transitions from closed
+  // to open. Auto-save replaces `initialDraft` with a fresh object on every
+  // keystroke, and re-running this on those changes would yank the user back to
+  // the initially selected image (or the whole group) mid-edit.
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (wasOpenRef.current) return;
+    wasOpenRef.current = true;
     setDraft(initialDraft);
     draftRef.current = initialDraft;
     setSelectedImageId(initialImageId);
@@ -89,6 +101,51 @@ export function ReferenceMetadataDialog({
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   }, []);
+
+  // Tween the popup's height when its content (selected image, preview, etc.)
+  // changes, so the modal resizes smoothly instead of snapping. Measuring with
+  // offsetHeight ignores the open/close scale transform. The height transition
+  // itself lives on `.t-modal` in index.css so it composes with scale + opacity.
+  useEffect(() => {
+    const popup = popupRef.current;
+    const grid = gridRef.current;
+    if (!open || !popup || !grid) {
+      if (popup) popup.style.height = '';
+      return;
+    }
+
+    const applyHeight = (animated: boolean) => {
+      const start = popup.offsetHeight;
+      popup.style.height = 'auto';
+      const target = popup.offsetHeight;
+      if (!animated) {
+        popup.style.transition = 'none';
+        popup.style.height = `${target}px`;
+        void popup.offsetHeight;
+        popup.style.transition = '';
+        return;
+      }
+      popup.style.height = `${start}px`;
+      void popup.offsetHeight;
+      popup.style.height = `${target}px`;
+    };
+
+    applyHeight(false);
+
+    let firstObservation = true;
+    const observer = new ResizeObserver(() => {
+      if (firstObservation) {
+        firstObservation = false;
+        return;
+      }
+      applyHeight(true);
+    });
+    observer.observe(grid);
+    return () => {
+      observer.disconnect();
+      popup.style.height = '';
+    };
+  }, [open]);
 
   const queueSave = useCallback((nextDraft: ReferenceMetadataDraft) => {
     const signature = getDraftSignature(nextDraft);
@@ -178,13 +235,13 @@ export function ReferenceMetadataDialog({
         void requestClose();
       }}
     >
-      <DialogContent className="t-modal max-h-[min(820px,calc(100vh-32px))] max-w-[min(1120px,calc(100vw-32px))] overflow-hidden border-white/8 bg-[rgba(15,16,16,0.96)] p-0 shadow-[0_28px_80px_rgba(0,0,0,0.48)]">
+      <DialogContent ref={popupRef} className="max-h-[min(820px,calc(100vh-32px))] max-w-[min(1120px,calc(100vw-32px))] overflow-hidden border-white/8 bg-[rgba(15,16,16,0.96)] p-0 shadow-[0_28px_80px_rgba(0,0,0,0.48)]">
         <DialogHeader className="sr-only">
           <DialogTitle>Edit reference metadata</DialogTitle>
           <DialogDescription>Name references and explain when each visual should be used.</DialogDescription>
         </DialogHeader>
 
-        <div className="grid min-h-[640px] grid-cols-[minmax(300px,0.85fr)_minmax(420px,1.15fr)]">
+        <div ref={gridRef} className="grid min-h-[640px] grid-cols-[minmax(300px,0.85fr)_minmax(420px,1.15fr)]">
           <aside className="flex min-h-0 flex-col border-r border-[var(--border-soft)] bg-[rgba(7,7,7,0.42)]">
             <div className="border-b border-[var(--border-soft)] px-5 pb-5 pt-5">
               <h2 className="text-[16px] font-semibold text-[var(--foreground)]">
@@ -328,7 +385,7 @@ export function ReferenceMetadataDialog({
               </div>
             </div>
 
-            <div className="flex items-center justify-between gap-3 border-t border-[var(--border-soft)] px-7 py-4">
+            <div className="flex items-center gap-3 border-t border-[var(--border-soft)] px-7 py-4">
               <div
                 role="status"
                 aria-label={saveStatusLabels[saveStatus]}
@@ -339,18 +396,12 @@ export function ReferenceMetadataDialog({
                     : 'text-[var(--muted-foreground)]'
                 )}
               >
-                {saveStatus === 'saving' ? <LoaderCircle className="size-3.5 animate-spin" /> : null}
-                {saveStatus === 'saved' ? <Check className="size-3.5 text-[var(--accent)]" /> : null}
                 {saveStatus === 'error' ? <TriangleAlert className="size-3.5" /> : null}
-                <SlotText text={saveStatusLabels[saveStatus]} />
+                <SlotText
+                  text={saveStatusLabels[saveStatus]}
+                  options={{ color: chromatic() }}
+                />
               </div>
-              <button
-                type="button"
-                onClick={() => void requestClose()}
-                className="inline-flex h-10 items-center rounded-full bg-[var(--accent)] px-6 text-[13px] font-medium text-black transition-opacity hover:opacity-90"
-              >
-                Done
-              </button>
             </div>
           </section>
         </div>

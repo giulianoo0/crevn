@@ -50,19 +50,20 @@ type MentionMatch = {
   start: number;
 };
 
-type MentionNavigationKey = 'ArrowDown' | 'ArrowUp' | 'Enter' | 'Escape';
+type MentionNavigationKey = 'ArrowDown' | 'ArrowUp' | 'Enter' | 'Escape' | 'Tab';
 
 type ClipboardPromptSegment =
   | { type: 'text'; text: string }
-  | { type: 'mention'; id: string; title: string };
+  | { type: 'mention'; id: string; title: string; previewUrl?: string };
 
 type MentionCandidate = {
   id: string;
   title: string;
+  previewUrl?: string;
 };
 
 function splitMentionSelectorToken(token: string) {
-  const separatorIndex = token.search(/[#/:]/);
+  const separatorIndex = token.search(/[#/:.]/);
   if (separatorIndex === -1) {
     return {
       mentionTitle: token,
@@ -80,7 +81,14 @@ export type PromptComposerHandle = {
   focus: () => void;
   clear: () => void;
   setText: (text: string, mentionCandidates?: MentionCandidate[]) => void;
-  insertMention: (id: string, title: string, range?: { start: number; end: number }, suffixOverride?: string) => void;
+  insertMention: (
+    id: string,
+    title: string,
+    range?: { start: number; end: number },
+    suffixOverride?: string,
+    previewUrl?: string,
+    keepSelectorOpen?: boolean
+  ) => void;
 };
 
 type PromptComposerProps = {
@@ -155,7 +163,8 @@ function parsePromptMentionHtml(html: string): ClipboardPromptSegment[] | null {
     const mentionId = node.getAttribute('data-mention-id');
     if (mentionId) {
       const mentionTitle = node.getAttribute('data-mention-title') || node.textContent || mentionId;
-      segments.push({ type: 'mention', id: mentionId, title: mentionTitle });
+      const previewUrl = node.getAttribute('data-mention-preview-url') ?? undefined;
+      segments.push({ type: 'mention', id: mentionId, title: mentionTitle, previewUrl });
       hasMention = true;
       return;
     }
@@ -180,7 +189,7 @@ function parsePromptMentionHtml(html: string): ClipboardPromptSegment[] | null {
 function createNodesFromClipboardSegments(segments: ClipboardPromptSegment[]) {
   return segments.flatMap((segment) => {
     if (segment.type === 'mention') {
-      return [$createMentionNode(segment.id, segment.title)];
+      return [$createMentionNode(segment.id, segment.title, segment.previewUrl)];
     }
 
     const textParts = segment.text.split('\n');
@@ -257,6 +266,7 @@ function parsePromptMentionText(
       type: 'mention',
       id: mentionCandidate.id,
       title: mentionCandidate.title,
+      previewUrl: mentionCandidate.previewUrl,
     });
     if (selectorSuffix) {
       segments.push({ type: 'text', text: selectorSuffix });
@@ -322,7 +332,14 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
   ) => {
     const [editor] = useLexicalComposerContext();
     const insertMentionRef = useRef<
-      ((id: string, title: string, range?: { start: number; end: number }) => void) | null
+      ((
+        id: string,
+        title: string,
+        range?: { start: number; end: number },
+        suffixOverride?: string,
+        previewUrl?: string,
+        keepSelectorOpen?: boolean
+      ) => void) | null
     >(null);
 
     useImperativeHandle(
@@ -338,8 +355,8 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
         setText: (text: string, nextMentionCandidates = mentionCandidates) => {
           writeComposerText(editor, text, nextMentionCandidates);
         },
-        insertMention: (id: string, title: string, range, suffixOverride) => {
-          insertMentionRef.current?.(id, title, range, suffixOverride);
+        insertMention: (id: string, title: string, range, suffixOverride, previewUrl, keepSelectorOpen) => {
+          insertMentionRef.current?.(id, title, range, suffixOverride, previewUrl, keepSelectorOpen);
         },
       }),
       [editor, mentionCandidates],
@@ -510,7 +527,8 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
           (event.key === 'ArrowDown' ||
             event.key === 'ArrowUp' ||
             event.key === 'Enter' ||
-            event.key === 'Escape') &&
+            event.key === 'Escape' ||
+            event.key === 'Tab') &&
           onMentionNavigationKey?.(event.key)
         ) {
           event.preventDefault();

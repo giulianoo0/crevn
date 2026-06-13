@@ -12,6 +12,6 @@ describe('getAppDataPaths', () => {
     expect(paths.userDataDir).toBe(userDataDir);
     expect(paths.databasePath).toBe(path.join(userDataDir, 'crenv.sqlite'));
     expect(paths.generatedImagesDir).toBe(path.join(userDataDir, 'generated-images'));
-    expect(paths.codexJobsTempDir).toBe(path.join(userDataDir, 'tmp', 'codex-jobs'));
+    expect(paths.generationJobsTempDir).toBe(path.join(userDataDir, 'tmp', 'generation-jobs'));
   });
 });

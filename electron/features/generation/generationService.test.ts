@@ -62,9 +62,9 @@ describe('createGenerationService', () => {
         userDataDir: rootDir,
         databasePath: path.join(rootDir, 'crenv.sqlite'),
         generatedImagesDir: path.join(rootDir, 'generated-images'),
-        codexJobsTempDir: path.join(rootDir, 'tmp', 'codex-jobs'),
+        generationJobsTempDir: path.join(rootDir, 'tmp', 'generation-jobs'),
       },
-      runCodexJob: runner,
+      runGenerationJob: runner,
       now: () => '2026-05-26T11:00:00.000Z',
       createId: (() => {
         let value = 0;
@@ -82,7 +82,7 @@ describe('createGenerationService', () => {
     expect(result.assets).toHaveLength(1);
     expect(result.assets[0]?.fileName).toBe('id_2.png');
     expect(runner).toHaveBeenCalledTimes(1);
-    expect(runner.mock.calls[0]?.[0].workingDirectory).toContain(path.join('tmp', 'codex-jobs', 'id_1'));
+    expect(runner.mock.calls[0]?.[0].workingDirectory).toContain(path.join('tmp', 'generation-jobs', 'id_1'));
 
     const jobs = await db.listJobs();
     const assets = await db.listAssets();
@@ -117,9 +117,9 @@ describe('createGenerationService', () => {
         userDataDir: rootDir,
         databasePath: path.join(rootDir, 'crenv.sqlite'),
         generatedImagesDir: path.join(rootDir, 'generated-images'),
-        codexJobsTempDir: path.join(rootDir, 'tmp', 'codex-jobs'),
+        generationJobsTempDir: path.join(rootDir, 'tmp', 'generation-jobs'),
       },
-      runCodexJob: async () => ({ success: false, errorMessage: 'Codex exited non-zero.' }),
+      runGenerationJob: async () => ({ success: false, errorMessage: 'Generation backend exited non-zero.' }),
       now: () => '2026-05-26T11:00:00.000Z',
       createId: () => 'id_1',
     });
@@ -131,16 +131,16 @@ describe('createGenerationService', () => {
         threadId: 'thread_1',
         referenceImages: [],
       })
-    ).rejects.toThrow('Codex exited non-zero.');
+    ).rejects.toThrow('Generation backend exited non-zero.');
 
     const jobs = await db.listJobs();
     expect(jobs[0]?.status).toBe('failed');
-    expect(jobs[0]?.errorMessage).toBe('Codex exited non-zero.');
+    expect(jobs[0]?.errorMessage).toBe('Generation backend exited non-zero.');
 
     db.close();
   });
 
-  it('persists failed job state when asset ingestion fails after codex succeeds', async () => {
+  it('persists failed job state when asset ingestion fails after the runner succeeds', async () => {
     const rootDir = makeTempDir();
     const db = createGenerationDatabase(path.join(rootDir, 'crenv.sqlite'));
     await db.createProject({
@@ -163,9 +163,9 @@ describe('createGenerationService', () => {
         userDataDir: rootDir,
         databasePath: path.join(rootDir, 'crenv.sqlite'),
         generatedImagesDir: path.join(rootDir, 'generated-images'),
-        codexJobsTempDir: path.join(rootDir, 'tmp', 'codex-jobs'),
+        generationJobsTempDir: path.join(rootDir, 'tmp', 'generation-jobs'),
       },
-      runCodexJob: async (input) => {
+      runGenerationJob: async (input) => {
         fs.mkdirSync(input.outputDirectory, { recursive: true });
         fs.writeFileSync(
           input.manifestPath,
@@ -206,9 +206,9 @@ describe('createGenerationService', () => {
         userDataDir: rootDir,
         databasePath: path.join(rootDir, 'crenv.sqlite'),
         generatedImagesDir: path.join(rootDir, 'generated-images'),
-        codexJobsTempDir: path.join(rootDir, 'tmp', 'codex-jobs'),
+        generationJobsTempDir: path.join(rootDir, 'tmp', 'generation-jobs'),
       },
-      runCodexJob: async () => ({ success: false, errorMessage: 'stop after bootstrap' }),
+      runGenerationJob: async () => ({ success: false, errorMessage: 'stop after bootstrap' }),
       now: () => '2026-05-26T11:00:00.000Z',
       createId: (() => {
         let value = 0;
@@ -226,7 +226,7 @@ describe('createGenerationService', () => {
     db.close();
   });
 
-  it('stages reference images into the codex workspace and includes them in the prompt', async () => {
+  it('stages reference images into the job workspace and sends the user prompt unchanged', async () => {
     const rootDir = makeTempDir();
     const db = createGenerationDatabase(path.join(rootDir, 'crenv.sqlite'));
     await db.createProject({
@@ -250,7 +250,7 @@ describe('createGenerationService', () => {
 
       expect(fs.existsSync(stagedReferencePath)).toBe(true);
       expect(fs.readFileSync(stagedReferencePath)).toEqual(Buffer.from([1, 2, 3, 4]));
-      expect(input.prompt).toContain(stagedReferencePath);
+      expect(input.prompt).toBe('use the reference framing');
 
       fs.mkdirSync(input.outputDirectory, { recursive: true });
       writeTinyPng(imagePath);
@@ -270,9 +270,9 @@ describe('createGenerationService', () => {
         userDataDir: rootDir,
         databasePath: path.join(rootDir, 'crenv.sqlite'),
         generatedImagesDir: path.join(rootDir, 'generated-images'),
-        codexJobsTempDir: path.join(rootDir, 'tmp', 'codex-jobs'),
+        generationJobsTempDir: path.join(rootDir, 'tmp', 'generation-jobs'),
       },
-      runCodexJob: runner,
+      runGenerationJob: runner,
       now: () => '2026-05-26T11:00:00.000Z',
       createId: (() => {
         let value = 0;

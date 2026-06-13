@@ -69,7 +69,7 @@ export interface GenerationJobRecord {
   workingDirectory: string;
   manifestPath: string;
   errorMessage: string | null;
-  provider?: 'codex' | 'antigravity' | null;
+  provider?: string | null;
   modelId?: string | null;
   modelLabel?: string | null;
   referenceImagesJson?: string | null;
@@ -136,7 +136,7 @@ export interface SceneGroupRunRecord {
   sceneGroupId: string;
   threadId: string;
   status: 'pending' | 'running' | 'succeeded' | 'failed';
-  provider: 'codex';
+  provider: string;
   modelId: string;
   modelLabel: string;
   requestedFrameCount: number;

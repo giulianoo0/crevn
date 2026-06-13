@@ -47,6 +47,42 @@ describe('PromptComposer', () => {
     expect(onMentionIdsChange).toHaveBeenLastCalledWith(['reference-tito']);
   });
 
+  it('renders inserted references with inline preview metadata', async () => {
+    const composerRef = createRef<PromptComposerHandle>();
+
+    render(
+      <PromptComposer
+        ref={composerRef}
+        ariaLabel="Prompt"
+        placeholder="Write something"
+        isExpanded
+        hasReferenceImages={false}
+        mentionCandidates={[
+          {
+            id: 'reference-tito',
+            title: 'Tito',
+            previewUrl: 'data:image/png;base64,preview',
+          },
+        ]}
+        onTextChange={() => {}}
+        onMentionMatch={() => {}}
+        onMentionIdsChange={() => {}}
+      />,
+    );
+
+    await act(async () => {
+      composerRef.current?.setText('Frame with @tit');
+    });
+
+    await act(async () => {
+      composerRef.current?.insertMention('reference-tito', 'Tito', { start: 11, end: 15 }, undefined, 'data:image/png;base64,preview');
+    });
+
+    const mention = screen.getByTestId('selected-reference-mention');
+    expect(mention).toHaveAttribute('data-mention-preview-url', 'data:image/png;base64,preview');
+    expect(mention).toHaveClass('prompt-reference-mention--preview');
+  });
+
   it('preserves possessives and does not paste a duplicate plain-text copy', async () => {
     const onTextChange = vi.fn();
     const onMentionIdsChange = vi.fn();
@@ -235,5 +271,43 @@ describe('PromptComposer', () => {
     expect(input).toHaveTextContent('Use Garagem and @gar');
     expect(input).not.toHaveTextContent('Use @wrong and Garagem');
     expect(onMentionIdsChange).toHaveBeenLastCalledWith(['reference-garage']);
+  });
+
+  it('deletes a whole mention chip with a single backspace', async () => {
+    const onMentionIdsChange = vi.fn();
+    const composerRef = createRef<PromptComposerHandle>();
+
+    render(
+      <PromptComposer
+        ref={composerRef}
+        ariaLabel="Prompt"
+        placeholder="Write something"
+        isExpanded
+        hasReferenceImages={false}
+        mentionCandidates={[{ id: 'reference-garage', title: 'Mesa Principal Garagem' }]}
+        onTextChange={() => {}}
+        onMentionMatch={() => {}}
+        onMentionIdsChange={onMentionIdsChange}
+      />,
+    );
+
+    const input = screen.getByRole('textbox', { name: 'Prompt' });
+
+    await act(async () => {
+      composerRef.current?.setText('Use @gar');
+    });
+
+    await act(async () => {
+      composerRef.current?.insertMention('reference-garage', 'Mesa Principal Garagem', { start: 4, end: 8 });
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Backspace' });
+    });
+
+    expect(screen.queryByTestId('selected-reference-mention')).not.toBeInTheDocument();
+    expect(onMentionIdsChange).toHaveBeenLastCalledWith([]);
   });
 });

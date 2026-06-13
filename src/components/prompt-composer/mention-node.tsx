@@ -24,6 +24,7 @@ export type SerializedMentionNode = Spread<
   {
     mentionId: string;
     mentionTitle: string;
+    mentionPreviewUrl?: string;
   },
   SerializedTextNode
 >;
@@ -31,6 +32,7 @@ export type SerializedMentionNode = Spread<
 export class MentionNode extends TextNode {
   __mentionId: string;
   __mentionTitle: string;
+  __mentionPreviewUrl?: string;
 
   static getType(): string {
     return 'mention';
@@ -40,6 +42,7 @@ export class MentionNode extends TextNode {
     return new MentionNode(
       node.__mentionId,
       node.__mentionTitle,
+      node.__mentionPreviewUrl,
       node.__text,
       node.__key,
     );
@@ -48,12 +51,14 @@ export class MentionNode extends TextNode {
   constructor(
     mentionId: string,
     mentionTitle: string,
+    mentionPreviewUrl?: string,
     text?: string,
     key?: NodeKey,
   ) {
     super(text ?? mentionTitle, key);
     this.__mentionId = mentionId;
     this.__mentionTitle = mentionTitle;
+    this.__mentionPreviewUrl = mentionPreviewUrl;
   }
 
   createDOM(config: EditorConfig): HTMLElement {
@@ -61,6 +66,11 @@ export class MentionNode extends TextNode {
     element.setAttribute('data-testid', 'selected-reference-mention');
     element.setAttribute('data-mention-id', this.__mentionId);
     element.setAttribute('data-mention-title', this.__mentionTitle);
+    if (this.__mentionPreviewUrl) {
+      element.setAttribute('data-mention-preview-url', this.__mentionPreviewUrl);
+      element.classList.add('prompt-reference-mention--preview');
+      element.style.backgroundImage = `linear-gradient(90deg, rgba(7,7,7,0.12), rgba(7,7,7,0.12)), url("${this.__mentionPreviewUrl}")`;
+    }
     element.style.color = 'var(--accent)';
     element.style.pointerEvents = 'none';
     return element;
@@ -78,6 +88,17 @@ export class MentionNode extends TextNode {
     if (prevNode.__mentionTitle !== this.__mentionTitle) {
       element.setAttribute('data-mention-title', this.__mentionTitle);
     }
+    if (prevNode.__mentionPreviewUrl !== this.__mentionPreviewUrl) {
+      if (this.__mentionPreviewUrl) {
+        element.setAttribute('data-mention-preview-url', this.__mentionPreviewUrl);
+        element.classList.add('prompt-reference-mention--preview');
+        element.style.backgroundImage = `linear-gradient(90deg, rgba(7,7,7,0.12), rgba(7,7,7,0.12)), url("${this.__mentionPreviewUrl}")`;
+      } else {
+        element.removeAttribute('data-mention-preview-url');
+        element.classList.remove('prompt-reference-mention--preview');
+        element.style.backgroundImage = '';
+      }
+    }
     return needsUpdate;
   }
 
@@ -86,6 +107,11 @@ export class MentionNode extends TextNode {
     element.setAttribute('data-testid', 'selected-reference-mention');
     element.setAttribute('data-mention-id', this.__mentionId);
     element.setAttribute('data-mention-title', this.__mentionTitle);
+    if (this.__mentionPreviewUrl) {
+      element.setAttribute('data-mention-preview-url', this.__mentionPreviewUrl);
+      element.classList.add('prompt-reference-mention--preview');
+      element.style.backgroundImage = `linear-gradient(90deg, rgba(7,7,7,0.12), rgba(7,7,7,0.12)), url("${this.__mentionPreviewUrl}")`;
+    }
     element.style.color = 'var(--accent)';
     element.textContent = this.__text;
     return { element };
@@ -99,6 +125,7 @@ export class MentionNode extends TextNode {
     return $createMentionNode(
       serializedNode.mentionId,
       serializedNode.mentionTitle,
+      serializedNode.mentionPreviewUrl,
     );
   }
 
@@ -107,6 +134,7 @@ export class MentionNode extends TextNode {
       ...super.exportJSON(),
       mentionId: this.__mentionId,
       mentionTitle: this.__mentionTitle,
+      mentionPreviewUrl: this.__mentionPreviewUrl,
       type: 'mention',
     };
   }
@@ -117,6 +145,10 @@ export class MentionNode extends TextNode {
 
   getMentionTitle(): string {
     return this.__mentionTitle;
+  }
+
+  getMentionPreviewUrl(): string | undefined {
+    return this.__mentionPreviewUrl;
   }
 
   // Prevent partial editing inside the mention
@@ -141,8 +173,9 @@ export class MentionNode extends TextNode {
 export function $createMentionNode(
   mentionId: string,
   mentionTitle: string,
+  mentionPreviewUrl?: string,
 ): MentionNode {
-  const node = new MentionNode(mentionId, mentionTitle);
+  const node = new MentionNode(mentionId, mentionTitle, mentionPreviewUrl);
   // Mark as non-editable segment so cursor skips over it
   node.setMode('segmented');
   return $applyNodeReplacement(node);

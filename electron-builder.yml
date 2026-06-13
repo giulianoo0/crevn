@@ -17,9 +17,6 @@ files:
   - dist/**
   - electron/**/*.cjs
   - package.json
-extraResources:
-  - from: resources/codex/skills
-    to: codex-skills
 # @libsql ships native .node binaries that cannot be loaded from inside the asar.
 asarUnpack:
   - "**/*.node"

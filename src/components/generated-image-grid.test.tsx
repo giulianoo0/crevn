@@ -7,6 +7,19 @@ vi.mock('@number-flow/react', () => ({
   default: ({ value }: { value: number }) => <span>{value}</span>,
 }));
 
+vi.mock('img-fx', () => ({
+  ImageGeneration: ({
+    children,
+    ...props
+  }: {
+    children: unknown;
+  } & Record<string, unknown>) => (
+    <div data-testid="img-fx-surface" {...props}>
+      {children}
+    </div>
+  ),
+}));
+
 const images = [
   { id: '1', fileUrl: 'file:///1.png', fileName: '1.png' },
   { id: '2', fileUrl: 'file:///2.png', fileName: '2.png' },
@@ -63,7 +76,7 @@ describe('GeneratedImageGrid', () => {
             id: 'loading-1',
             fileName: 'Generating 1',
             isLoading: true,
-            provider: 'codex',
+            provider: 'api',
             modelLabel: 'GPT-5.4 Mini',
             generationStartedAt: '2026-05-26T10:30:00.000Z',
           },
@@ -79,7 +92,28 @@ describe('GeneratedImageGrid', () => {
     expect(screen.getByText('GPT-5.4 Mini')).toBeInTheDocument();
   });
 
-  it('shows provider model and time metadata on image tiles', () => {
+  it('can use img-fx placeholders for loading entries', () => {
+    render(
+      <GeneratedImageGrid
+        images={[
+          {
+            id: 'loading-1',
+            fileName: 'Generating 1',
+            isLoading: true,
+            provider: 'api',
+          },
+        ]}
+        loadingEffect="img-fx"
+        className="h-[300px]"
+      />
+    );
+
+    expect(screen.getByTestId('img-fx-surface')).toBeInTheDocument();
+    expect(screen.getByLabelText('Generating 1 loading')).toBeInTheDocument();
+    expect(screen.queryByTestId('shimmer-surface')).not.toBeInTheDocument();
+  });
+
+  it('shows model and time metadata on image tiles', () => {
     render(
       <GeneratedImageGrid
         images={[
@@ -87,7 +121,7 @@ describe('GeneratedImageGrid', () => {
             id: 'agy-1',
             fileUrl: 'file:///agy-1.png',
             fileName: 'agy-1.png',
-            provider: 'antigravity',
+            provider: 'api',
             modelLabel: 'Gemini 3.5 Flash (Low)',
             durationMs: 92_500,
           },
@@ -98,7 +132,26 @@ describe('GeneratedImageGrid', () => {
 
     expect(screen.getByText('Gemini 3.5 Flash (Low)')).toBeInTheDocument();
     expect(screen.getByText('01:32')).toBeInTheDocument();
-    expect(screen.getByAltText('Antigravity')).toBeInTheDocument();
+  });
+
+  it('does not add a hover border to non-selected image tiles', () => {
+    render(
+      <GeneratedImageGrid
+        images={[
+          {
+            id: 'hover-1',
+            fileUrl: 'file:///hover-1.png',
+            fileName: 'hover-1.png',
+            provider: 'api',
+            modelLabel: 'GPT-5.4 Mini',
+            durationMs: 12_000,
+          },
+        ]}
+        className="h-[300px]"
+      />
+    );
+
+    expect(screen.getByRole('button', { name: 'Select hover-1.png' }).className).not.toContain('hover:border');
   });
 
   it('renders nothing when there are no images', () => {

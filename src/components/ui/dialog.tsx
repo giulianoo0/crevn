@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Dialog as DialogPrimitive } from '@base-ui/react/dialog';
-import { motion } from 'framer-motion';
 import { X } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
@@ -49,12 +48,13 @@ export const DialogOverlay = React.forwardRef<
   <DialogPrimitive.Backdrop
     ref={ref}
     render={(renderProps, state) => (
-      <motion.div
+      <div
         {...renderProps}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: state.open ? 1 : 0 }}
-        transition={{ duration: state.open ? 0.18 : 0.16, ease: 'easeOut' }}
-        className={cn('fixed inset-0 z-[90] bg-black/50 backdrop-blur-sm', className)}
+        className={cn(
+          't-modal-overlay fixed inset-0 z-[90] bg-black/50 backdrop-blur-sm',
+          state.open ? 'is-open' : null,
+          className
+        )}
       />
     )}
     {...props}
@@ -71,16 +71,11 @@ export const DialogContent = React.forwardRef<
     <DialogPrimitive.Popup
       ref={ref}
     render={(renderProps, state) => (
-      <motion.div
+      <div
         {...renderProps}
-        initial={{ opacity: 0, scale: 0.985 }}
-        animate={{
-          opacity: state.open ? 1 : 0,
-          scale: state.open ? 1 : 0.985,
-        }}
-        transition={{ duration: state.open ? 0.22 : 0.18, ease: [0.22, 1, 0.36, 1] }}
         className={cn(
-            'fixed inset-0 z-[91] m-auto h-fit w-[calc(100vw-32px)] max-w-[460px] rounded-[26px] border border-[var(--border-soft)] bg-[color-mix(in_srgb,var(--surface)_96%,transparent)] p-5 shadow-[0_24px_72px_rgba(0,0,0,0.45)] backdrop-blur-xl outline-none',
+            't-modal fixed inset-0 z-[91] m-auto h-fit w-[calc(100vw-32px)] max-w-[460px] rounded-[26px] border border-[var(--border-soft)] bg-[color-mix(in_srgb,var(--surface)_96%,transparent)] p-5 shadow-[0_24px_72px_rgba(0,0,0,0.45)] backdrop-blur-xl outline-none',
+            state.open ? 'is-open' : 'is-closing',
             className
           )}
         />

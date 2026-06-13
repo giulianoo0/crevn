@@ -98,7 +98,7 @@ export function ProjectPropertiesDialog({
             <div className="border-b border-[var(--border-soft)] px-6 py-5 md:px-8">
               <h2 className="text-[28px] font-medium tracking-[0] text-[var(--foreground)]">General</h2>
               <p className="mt-2 max-w-[640px] text-[14px] leading-6 text-[var(--muted-foreground)]">
-                Define project-level defaults so Codex keeps image style choices and system guidance
+                Define project-level defaults so image style choices and system guidance stay
                 consistent for this workspace.
               </p>
             </div>
@@ -114,7 +114,7 @@ export function ProjectPropertiesDialog({
                   </label>
                   <p className="text-[13px] leading-5 text-[var(--muted-foreground)]">
                     Add stable direction about style discipline, continuity, camera behavior, or any
-                    other project-wide rules Codex should follow.
+                    other project-wide rules the generation backend should follow.
                   </p>
                 </div>
 
@@ -139,7 +139,7 @@ export function ProjectPropertiesDialog({
                     Art Style
                   </div>
                   <p className="text-[13px] leading-5 text-[var(--muted-foreground)]">
-                    Choose the default visual language Codex should prioritize for this project.
+                    Choose the default visual language for this project.
                   </p>
                 </div>
 

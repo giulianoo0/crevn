@@ -45,6 +45,15 @@
   --page-exit-enabled: 1;
   --page-slide-ease: cubic-bezier(0.22, 1, 0.36, 1);
   --page-fade-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --shimmer-dur: 2000ms;
+  --shimmer-base: rgba(150, 151, 158, 0.72);
+  --shimmer-highlight: rgba(228, 227, 233, 0.96);
+  --shimmer-band: 400%;
+  --shimmer-ease: linear;
+  --icon-swap-dur: 250ms;
+  --icon-swap-blur: 2px;
+  --icon-swap-start-scale: 0.25;
+  --icon-swap-ease: ease-in-out;
   font-family:
     Geist,
     "SF Pro Text",
@@ -132,11 +141,11 @@ textarea::-webkit-scrollbar {
 
 @keyframes skeleton-shimmer {
   0% {
-    background-position: 0 0;
+    background-position: -260% 0;
   }
 
   100% {
-    background-position: 220% 0;
+    background-position: 260% 0;
   }
 }
 
@@ -145,11 +154,152 @@ textarea::-webkit-scrollbar {
   will-change: background-position;
 }
 
+.t-shimmer {
+  position: relative;
+  display: inline-block;
+  color: var(--shimmer-base);
+}
+
+.t-shimmer::before {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    transparent 40%,
+    var(--shimmer-highlight) 50%,
+    transparent 60%,
+    transparent 100%
+  );
+  background-size: var(--shimmer-band) 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: t-shimmer var(--shimmer-dur) var(--shimmer-ease) infinite;
+}
+
+.cot-title-shimmer {
+  --shimmer-base: rgba(65, 130, 230, 0.82);
+  --shimmer-highlight: rgb(96, 226, 255);
+  --shimmer-band: 320%;
+  color: var(--shimmer-base);
+}
+
+.t-icon-swap {
+  position: relative;
+  display: inline-grid;
+}
+
+.t-icon-swap .t-icon {
+  grid-area: 1 / 1;
+  transition:
+    opacity var(--icon-swap-dur) var(--icon-swap-ease),
+    filter var(--icon-swap-dur) var(--icon-swap-ease),
+    transform var(--icon-swap-dur) var(--icon-swap-ease);
+  will-change: opacity, filter, transform;
+}
+
+.t-icon-swap[data-state="copy"] .t-icon[data-icon="copy"],
+.t-icon-swap[data-state="copied"] .t-icon[data-icon="copied"],
+.t-icon-swap[data-state="send"] .t-icon[data-icon="send"],
+.t-icon-swap[data-state="stop"] .t-icon[data-icon="stop"] {
+  opacity: 1;
+  filter: blur(0);
+  transform: scale(1);
+}
+
+.t-icon-swap[data-state="copy"] .t-icon[data-icon="copied"],
+.t-icon-swap[data-state="copied"] .t-icon[data-icon="copy"],
+.t-icon-swap[data-state="send"] .t-icon[data-icon="stop"],
+.t-icon-swap[data-state="stop"] .t-icon[data-icon="send"] {
+  opacity: 0;
+  filter: blur(var(--icon-swap-blur));
+  transform: scale(var(--icon-swap-start-scale));
+}
+
+@keyframes t-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+
+  100% {
+    background-position: 0% 0;
+  }
+}
+
+@keyframes sd-blurIn {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+  }
+
+  to {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+[data-sd-animate] {
+  animation: var(--sd-animation, sd-blurIn) var(--sd-duration, 280ms)
+    var(--sd-easing, cubic-bezier(0.22, 1, 0.36, 1)) var(--sd-delay, 0ms) both;
+  will-change: opacity, filter;
+}
+
 .t-resize {
   transition:
     width var(--resize-dur) var(--resize-ease),
     height var(--resize-dur) var(--resize-ease);
   will-change: width, height;
+}
+
+:root {
+  --modal-open-dur: 250ms;
+  --modal-close-dur: 150ms;
+  --modal-scale: 0.96;
+  --modal-scale-close: 0.96;
+  --modal-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.t-modal {
+  transform-origin: center;
+  transform: scale(var(--modal-scale));
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform var(--modal-open-dur) var(--modal-ease),
+    opacity   var(--modal-open-dur) var(--modal-ease),
+    height    var(--resize-dur)     var(--resize-ease);
+  will-change: transform, opacity, height;
+}
+.t-modal.is-open {
+  transform: scale(1);
+  opacity: 1;
+  pointer-events: auto;
+}
+.t-modal.is-closing {
+  transform: scale(var(--modal-scale-close));
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform var(--modal-close-dur) var(--modal-ease),
+    opacity   var(--modal-close-dur) var(--modal-ease),
+    height    var(--resize-dur)      var(--resize-ease);
+}
+
+.t-modal-overlay {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--modal-close-dur) var(--modal-ease);
+  will-change: opacity;
+}
+.t-modal-overlay.is-open {
+  opacity: 1;
+  pointer-events: auto;
+  transition: opacity var(--modal-open-dur) var(--modal-ease);
 }
 
 .t-text-swap {
@@ -231,10 +381,15 @@ textarea::-webkit-scrollbar {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .t-shimmer::before { animation: none !important; }
+  [data-sd-animate] { animation: none !important; }
   .t-resize { transition: none !important; }
   .t-text-swap { transition: none !important; }
+  .t-icon-swap .t-icon { transition: none !important; }
   .t-panel-slide { transition: none !important; }
   .t-page-slide .t-page { transition: none !important; }
+  .t-modal { transition: none !important; }
+  .t-modal-overlay { transition: none !important; }
 }
 
 .prompt-composer-card [contenteditable]::selection {
@@ -266,6 +421,49 @@ textarea::-webkit-scrollbar {
 
 .director-markdown strong {
   font-weight: 600;
+}
+
+.director-markdown h1,
+.director-markdown h2,
+.director-markdown h3,
+.director-markdown h4 {
+  margin: 1.1rem 0 0.45rem;
+  color: var(--foreground);
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.director-markdown h1 {
+  font-size: 1.18rem;
+}
+
+.director-markdown h2 {
+  font-size: 1.05rem;
+}
+
+.director-markdown h3,
+.director-markdown h4 {
+  font-size: 0.95rem;
+}
+
+.director-markdown h1:first-child,
+.director-markdown h2:first-child,
+.director-markdown h3:first-child,
+.director-markdown h4:first-child {
+  margin-top: 0;
+}
+
+.director-markdown blockquote {
+  margin: 0.9rem 0;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 58%, transparent);
+  padding: 0.15rem 0 0.15rem 0.85rem;
+  color: var(--muted-foreground);
+}
+
+.director-markdown hr {
+  margin: 1rem 0;
+  border: 0;
+  border-top: 1px solid var(--border-soft);
 }
 
 .director-markdown ul,
@@ -567,4 +765,18 @@ textarea::-webkit-scrollbar {
   border: 1px solid var(--border-soft);
   border-radius: 18px;
   background: rgba(15, 16, 16, 0.78);
+}
+
+.prompt-reference-mention--preview {
+  display: inline-flex;
+  min-height: 1.55em;
+  align-items: center;
+  border: 1px solid rgba(65, 130, 230, 0.38);
+  border-radius: 999px;
+  background-color: rgba(65, 130, 230, 0.12);
+  background-position: 0.18em center;
+  background-repeat: no-repeat;
+  background-size: 1.18em 1.18em;
+  padding-left: 1.58em;
+  padding-right: 0.42em;
 }

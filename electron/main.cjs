@@ -6,11 +6,21 @@ const { pathToFileURL } = require('node:url');
 const { createAutoUpdateManager } = require('./autoUpdate.cjs');
 const { createAppLogger, installConsoleFileLogger } = require('./appLogger.cjs');
 const { createGenerationStore, getAppDataPaths } = require('./generation.cjs');
+const { applyProviderSettingsToEnv, createProviderSettingsStore } = require('./providerSettings.cjs');
 const packageManifest = require('../package.json');
 
 let mainWindow = null;
 let generationStore = null;
 let autoUpdateManager = null;
+let providerSettingsStore = null;
+
+// Resolves once the generation store finishes initializing. IPC handlers await
+// this so the window can be created (and the renderer can start loading) in
+// parallel with the database init instead of after it.
+let resolveStoreReady;
+const storeReady = new Promise((resolve) => {
+  resolveStoreReady = resolve;
+});
 const ASSET_PROTOCOL = 'crenv-asset';
 const appLogger = createAppLogger();
 
@@ -124,7 +134,7 @@ const createWindow = () => {
   mainWindow.removeMenu();
 
   if (process.env.NODE_ENV === 'development') {
-    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.loadURL('http://127.0.0.1:5173');
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
@@ -153,7 +163,14 @@ function registerAssetProtocol() {
 app.whenReady().then(async () => {
   console.info(`[crenv:app] ready userDataDir=${app.getPath('userData')}`);
   registerAssetProtocol();
-  generationStore = await createGenerationStore(app.getPath('userData'), {
+  providerSettingsStore = createProviderSettingsStore(app.getPath('userData'));
+
+  // Initialize the generation store in the background so the window can be
+  // created (and the renderer can begin loading) in parallel with the database
+  // init. Every IPC handler awaits `storeReady` before touching the store.
+  const initStore = async () => {
+    applyProviderSettingsToEnv(await providerSettingsStore.read());
+    const store = await createGenerationStore(app.getPath('userData'), {
     onScenePlan: (payload) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('generation:scenePlan', payload);
@@ -197,110 +214,129 @@ app.whenReady().then(async () => {
         mainWindow.webContents.send('generation:directorSceneReady', payload);
       }
     },
+    });
+    generationStore = store;
+    resolveStoreReady(store);
+    console.info('[crenv:app] generation store ready');
+  };
+  initStore().catch((error) => {
+    console.error('[crenv:app] failed to initialize generation store', error);
   });
 
   ipcMain.handle('generation:listGeneratedImages', async (_event, threadId) => {
-    return generationStore.listGeneratedImages(threadId);
+    return (await storeReady).listGeneratedImages(threadId);
   });
 
   ipcMain.handle('generation:listProjectsWithThreads', async () => {
-    return generationStore.listProjectsWithThreads();
+    return (await storeReady).listProjectsWithThreads();
   });
 
   ipcMain.handle('generation:listReferences', async () => {
-    return generationStore.listReferences();
+    return (await storeReady).listReferences();
+  });
+
+  ipcMain.handle('generation:listReferenceFolders', async () => {
+    return (await storeReady).listReferenceFolders();
   });
 
   ipcMain.handle('generation:listDirectorChats', async (_event, threadId) => {
-    return generationStore.listDirectorChats(threadId);
+    return (await storeReady).listDirectorChats(threadId);
   });
 
   ipcMain.handle('generation:createDirectorChat', async (_event, threadId) => {
-    return generationStore.createDirectorChat(threadId);
+    return (await storeReady).createDirectorChat(threadId);
   });
 
   ipcMain.handle('generation:renameDirectorChat', async (_event, chatId, title) => {
-    return generationStore.renameDirectorChat(chatId, title);
+    return (await storeReady).renameDirectorChat(chatId, title);
   });
 
   ipcMain.handle('generation:deleteDirectorChat', async (_event, chatId) => {
-    return generationStore.deleteDirectorChat(chatId);
+    return (await storeReady).deleteDirectorChat(chatId);
   });
 
   ipcMain.handle('generation:listDirectorMessages', async (_event, chatId) => {
-    return generationStore.listDirectorMessages(chatId);
+    return (await storeReady).listDirectorMessages(chatId);
   });
 
   ipcMain.handle('generation:sendDirectorMessage', async (_event, payload) => {
-    return generationStore.sendDirectorMessage(payload);
+    return (await storeReady).sendDirectorMessage(payload);
+  });
+
+  ipcMain.handle('generation:regenerateDirectorMessage', async (_event, payload) => {
+    return (await storeReady).regenerateDirectorMessage(payload);
   });
 
   ipcMain.handle('generation:approveDirectorAction', async (_event, payload) => {
-    return generationStore.approveDirectorAction(payload);
+    return (await storeReady).approveDirectorAction(payload);
   });
 
   ipcMain.handle('generation:declineDirectorAction', async (_event, payload) => {
-    return generationStore.declineDirectorAction(payload);
+    return (await storeReady).declineDirectorAction(payload);
   });
 
   ipcMain.handle('generation:cancelDirectorChat', async (_event, chatId) => {
-    return generationStore.cancelDirectorChat(chatId);
+    return (await storeReady).cancelDirectorChat(chatId);
   });
 
   ipcMain.handle('generation:createReference', async (_event, payload) => {
-    return generationStore.createReference(payload);
+    return (await storeReady).createReference(payload);
   });
 
   ipcMain.handle('generation:createEnvironmentReference', async (_event, payload) => {
-    return generationStore.createEnvironmentReference(payload);
+    return (await storeReady).createEnvironmentReference(payload);
+  });
+
+  ipcMain.handle('generation:createReferenceFolder', async (_event, payload) => {
+    return (await storeReady).createReferenceFolder(payload);
   });
 
   ipcMain.handle('generation:createReferenceCollection', async (_event, payload) => {
-    return generationStore.createReferenceCollection(payload);
+    return (await storeReady).createReferenceCollection(payload);
   });
 
   ipcMain.handle('generation:updateReference', async (_event, payload) => {
-    return generationStore.updateReference(payload);
+    return (await storeReady).updateReference(payload);
   });
 
   ipcMain.handle('generation:updateEnvironmentReference', async (_event, payload) => {
-    return generationStore.updateEnvironmentReference(payload);
+    return (await storeReady).updateEnvironmentReference(payload);
   });
 
   ipcMain.handle('generation:updateReferenceCollection', async (_event, payload) => {
-    return generationStore.updateReferenceCollection(payload);
+    return (await storeReady).updateReferenceCollection(payload);
   });
 
   ipcMain.handle('generation:deleteReference', async (_event, payload) => {
-    return generationStore.deleteReference(payload);
+    return (await storeReady).deleteReference(payload);
   });
 
   ipcMain.handle('generation:describeReferenceCollection', async (_event, payload) => {
-    return generationStore.describeReferenceCollection(payload);
+    return (await storeReady).describeReferenceCollection(payload);
   });
 
   ipcMain.handle('generation:ensureProjectThreadWorkspace', async () => {
-    return generationStore.ensureProjectThreadWorkspace();
+    return (await storeReady).ensureProjectThreadWorkspace();
   });
 
   ipcMain.handle('generation:createProject', async (_event, projectName) => {
-    return generationStore.createProject(projectName);
+    return (await storeReady).createProject(projectName);
   });
 
   ipcMain.handle('generation:createThread', async (_event, projectId) => {
-    return generationStore.createThread(projectId);
+    return (await storeReady).createThread(projectId);
   });
 
   ipcMain.handle('generation:renameProject', async (_event, projectId, name) => {
-    return generationStore.renameProject(projectId, name);
+    return (await storeReady).renameProject(projectId, name);
   });
 
   ipcMain.handle('generation:updateProjectSettings', async (_event, projectId, payload) => {
-    return generationStore.updateProjectSettings(projectId, payload);
+    return (await storeReady).updateProjectSettings(projectId, payload);
   });
 
   ipcMain.handle('generation:exportProject', async (_event, projectId) => {
-    const projects = await generationStore.listProjectsWithThreads();
+    const projects = await (await storeReady).listProjectsWithThreads();
     const project = projects.find((candidate) => candidate.id === projectId);
     const filePath = await showExportSaveDialog({
       defaultName: sanitizeExportFileName(project?.name, 'project'),
@@ -310,14 +346,14 @@ app.whenReady().then(async () => {
     if (!filePath) {
       return { status: 'canceled' };
     }
-    await generationStore.exportProject(projectId, filePath, {
+    await (await storeReady).exportProject(projectId, filePath, {
       sourceApp: getSourceAppInfo(),
     });
     return { status: 'exported', filePath };
   });
 
   ipcMain.handle('generation:exportThread', async (_event, threadId) => {
-    const projects = await generationStore.listProjectsWithThreads();
+    const projects = await (await storeReady).listProjectsWithThreads();
     const thread = projects.flatMap((project) => project.threads).find((candidate) => candidate.id === threadId);
     const filePath = await showExportSaveDialog({
       defaultName: sanitizeExportFileName(thread?.name, 'thread'),
@@ -327,7 +363,7 @@ app.whenReady().then(async () => {
     if (!filePath) {
       return { status: 'canceled' };
     }
-    await generationStore.exportThread(threadId, filePath, {
+    await (await storeReady).exportThread(threadId, filePath, {
       sourceApp: getSourceAppInfo(),
     });
     return { status: 'exported', filePath };
@@ -342,7 +378,7 @@ app.whenReady().then(async () => {
     if (!filePath) {
       return { status: 'canceled' };
     }
-    await generationStore.exportReference(payload, filePath, {
+    await (await storeReady).exportReference(payload, filePath, {
       sourceApp: getSourceAppInfo(),
     });
     return { status: 'exported', filePath };
@@ -356,7 +392,7 @@ app.whenReady().then(async () => {
     if (!filePath) {
       return { status: 'canceled' };
     }
-    return generationStore.importCrenvArchive(filePath, { targetProjectId });
+    return (await storeReady).importCrenvArchive(filePath, { targetProjectId });
   });
 
   ipcMain.handle('generation:importReference', async () => {
@@ -367,55 +403,55 @@ app.whenReady().then(async () => {
     if (!filePath) {
       return { status: 'canceled' };
     }
-    return generationStore.importReferenceArchive(filePath);
+    return (await storeReady).importReferenceArchive(filePath);
   });
 
   ipcMain.handle('generation:renameThread', async (_event, threadId, name) => {
-    return generationStore.renameThread(threadId, name);
+    return (await storeReady).renameThread(threadId, name);
   });
 
   ipcMain.handle('generation:deleteProject', async (_event, projectId) => {
-    return generationStore.deleteProject(projectId);
+    return (await storeReady).deleteProject(projectId);
   });
 
   ipcMain.handle('generation:deleteThread', async (_event, threadId) => {
-    return generationStore.deleteThread(threadId);
+    return (await storeReady).deleteThread(threadId);
   });
 
   ipcMain.handle('generation:generateImages', async (_event, payload) => {
-    return generationStore.generateImages(payload);
+    return (await storeReady).generateImages(payload);
   });
 
   ipcMain.handle('generation:listSceneGroups', async (_event, threadId) => {
-    return generationStore.listSceneGroups(threadId);
+    return (await storeReady).listSceneGroups(threadId);
   });
 
   ipcMain.handle('generation:createSceneGroup', async (_event, threadId, input) => {
-    return generationStore.createSceneGroup(threadId, input);
+    return (await storeReady).createSceneGroup(threadId, input);
   });
 
   ipcMain.handle('generation:updateSceneGroup', async (_event, sceneGroupId, input) => {
-    return generationStore.updateSceneGroup(sceneGroupId, input);
+    return (await storeReady).updateSceneGroup(sceneGroupId, input);
   });
 
   ipcMain.handle('generation:deleteSceneGroup', async (_event, sceneGroupId) => {
-    return generationStore.deleteSceneGroup(sceneGroupId);
+    return (await storeReady).deleteSceneGroup(sceneGroupId);
   });
 
   ipcMain.handle('generation:createSceneFrame', async (_event, sceneGroupId, input) => {
-    return generationStore.createSceneFrame(sceneGroupId, input);
+    return (await storeReady).createSceneFrame(sceneGroupId, input);
   });
 
   ipcMain.handle('generation:updateSceneFrame', async (_event, sceneFrameId, input) => {
-    return generationStore.updateSceneFrame(sceneFrameId, input);
+    return (await storeReady).updateSceneFrame(sceneFrameId, input);
   });
 
   ipcMain.handle('generation:deleteSceneFrame', async (_event, sceneFrameId) => {
-    return generationStore.deleteSceneFrame(sceneFrameId);
+    return (await storeReady).deleteSceneFrame(sceneFrameId);
   });
 
   ipcMain.handle('generation:saveSceneFrameReferences', async (_event, sceneFrameId, references) => {
-    return generationStore.saveSceneFrameReferences(sceneFrameId, references);
+    return (await storeReady).saveSceneFrameReferences(sceneFrameId, references);
   });
 
   ipcMain.handle('generation:pasteClipboardImageToSceneFrame', async (_event, sceneFrameId) => {
@@ -429,26 +465,26 @@ app.whenReady().then(async () => {
       return null;
     }
 
-    return generationStore.pasteClipboardImageToSceneFrame(sceneFrameId, {
+    return (await storeReady).pasteClipboardImageToSceneFrame(sceneFrameId, {
       mimeType: 'image/png',
       bytesBase64: bytes.toString('base64'),
     });
   });
 
   ipcMain.handle('generation:generateSceneGroup', async (_event, input) => {
-    return generationStore.generateSceneGroup(input);
+    return (await storeReady).generateSceneGroup(input);
   });
 
   ipcMain.handle('generation:structureScenePrompt', async (_event, input) => {
-    return generationStore.structureScenePrompt(input);
+    return (await storeReady).structureScenePrompt(input);
   });
 
   ipcMain.handle('generation:cancelSceneGroupGeneration', async (_event, sceneGroupId) => {
-    return generationStore.cancelSceneGroupGeneration(sceneGroupId);
+    return (await storeReady).cancelSceneGroupGeneration(sceneGroupId);
   });
 
   ipcMain.handle('generation:copyGeneratedImage', async (_event, imageId) => {
-    const asset = await generationStore.getGeneratedImage(imageId);
+    const asset = await (await storeReady).getGeneratedImage(imageId);
     if (!asset) {
       throw new Error('Generated image not found.');
     }
@@ -462,7 +498,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('generation:downloadGeneratedImage', async (_event, imageId) => {
-    const asset = await generationStore.getGeneratedImage(imageId);
+    const asset = await (await storeReady).getGeneratedImage(imageId);
     if (!asset) {
       throw new Error('Generated image not found.');
     }
@@ -480,7 +516,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('generation:deleteGeneratedImage', async (_event, imageId) => {
-    await generationStore.deleteGeneratedImage(imageId);
+    await (await storeReady).deleteGeneratedImage(imageId);
   });
 
   autoUpdateManager = createAutoUpdateManager({
@@ -495,6 +531,14 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('app:getInfo', async () => {
     return getSourceAppInfo();
+  });
+
+  ipcMain.handle('app:getProviderSettings', async () => {
+    return providerSettingsStore.read();
+  });
+
+  ipcMain.handle('app:updateProviderSettings', async (_event, payload) => {
+    return providerSettingsStore.update(payload);
   });
 
   ipcMain.handle('app:checkForUpdates', async () => {

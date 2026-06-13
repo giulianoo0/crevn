@@ -4,7 +4,7 @@ interface ElectronGeneratedImageRecord {
   fileUrl: string;
   createdAt: string;
   outputIndex?: number | null;
-  provider?: 'codex' | 'antigravity' | null;
+  provider?: string | null;
   modelId?: string | null;
   modelLabel?: string | null;
   prompt?: string | null;
@@ -13,6 +13,7 @@ interface ElectronGeneratedImageRecord {
     title?: string | null;
     description?: string | null;
     mimeType: string;
+    previewUrl?: string | null;
   }>;
   durationMs?: number | null;
 }
@@ -65,6 +66,14 @@ interface ElectronUpdateProjectSettingsPayload {
   artStyle: string;
 }
 
+interface ElectronProviderSettings {
+  text: {
+    gemini: {
+      apiKey: string;
+    };
+  };
+}
+
 type ElectronExportResult =
   | {
       status: 'exported';
@@ -102,6 +111,16 @@ interface ElectronReferenceImageRecord {
   category: 'characters' | 'environment' | 'objects';
   collectionId?: string | null;
   environmentId?: string | null;
+  parentFolderId?: string | null;
+}
+
+interface ElectronReferenceFolderRecord {
+  id: string;
+  category: 'characters' | 'environment' | 'objects';
+  title: string;
+  description?: string | null;
+  parentFolderId?: string | null;
+  createdAt: string;
 }
 
 interface ElectronCreateReferencePayload {
@@ -111,6 +130,12 @@ interface ElectronCreateReferencePayload {
   mimeType: string;
   bytesBase64: string;
   category: 'characters' | 'objects';
+}
+
+interface ElectronCreateReferenceFolderPayload {
+  category: 'characters' | 'environment' | 'objects';
+  title: string;
+  parentFolderId?: string | null;
 }
 
 interface ElectronCreateEnvironmentReferencePayload {
@@ -213,7 +238,7 @@ interface ElectronExportReferencePayload {
 interface ElectronGenerateImagesPayload {
   clientRunId?: string;
   fastMode?: boolean;
-  provider?: 'codex' | 'antigravity';
+  provider?: string;
   modelId?: string;
   mode?: 'manual' | 'scene' | 'pinpoint' | 'camera';
   prompt: string;
@@ -282,11 +307,35 @@ interface ElectronDirectorChatRecord {
   updatedAt: string;
 }
 
+type ElectronDirectorMessagePart =
+  | {
+      type: 'text' | 'reasoning';
+      text: string;
+      providerMetadata?: Record<string, unknown>;
+    }
+  | {
+      type: 'tool-generateImages';
+      toolCallId: string;
+      input: {
+        prompt?: string;
+        count?: number;
+        aspectRatio?: string;
+        references?: string[];
+      };
+      state: 'approval-requested' | 'running' | 'output-available' | 'output-error' | 'declined';
+      approvalId?: string;
+      output?: {
+        assets?: ElectronGeneratedImageRecord[];
+        [key: string]: unknown;
+      };
+      errorText?: string;
+    };
+
 interface ElectronDirectorMessageRecord {
   id: string;
   chatId: string;
   role: 'user' | 'assistant' | 'system';
-  contentMarkdown: string;
+  parts: ElectronDirectorMessagePart[];
   status: 'streaming' | 'completed' | 'failed';
   modelId?: string | null;
   modelLabel?: string | null;
@@ -319,9 +368,16 @@ interface ElectronSendDirectorMessagePayload {
   }>;
 }
 
+interface ElectronRegenerateDirectorMessagePayload {
+  chatId: string;
+  threadId: string;
+  assistantMessageId: string;
+}
+
 interface ElectronDirectorActionDecisionPayload {
   messageId: string;
   actionIndex: number;
+  clientRunId?: string;
 }
 
 interface ElectronDirectorMessageStartEvent {
@@ -335,15 +391,14 @@ interface ElectronDirectorMessageDeltaEvent {
   threadId: string;
   chatId: string;
   messageId: string;
-  delta: string;
-  content: string;
+  parts: ElectronDirectorMessagePart[];
 }
 
 interface ElectronDirectorMessageCompleteEvent {
   threadId: string;
   chatId: string;
   messageId: string;
-  content: string;
+  parts: ElectronDirectorMessagePart[];
 }
 
 interface ElectronDirectorMessageErrorEvent {
@@ -351,7 +406,7 @@ interface ElectronDirectorMessageErrorEvent {
   chatId: string;
   messageId: string;
   errorMessage: string;
-  content: string;
+  parts: ElectronDirectorMessagePart[];
   canceled?: boolean;
 }
 
@@ -404,7 +459,7 @@ interface ElectronSceneGroupRunRecord {
   sceneGroupId: string;
   threadId: string;
   status: 'pending' | 'running' | 'succeeded' | 'failed';
-  provider: 'codex';
+  provider: string;
   modelId: string;
   modelLabel: string;
   requestedFrameCount: number;
@@ -431,17 +486,25 @@ interface Window {
     platform: string;
     getAppInfo: () => Promise<ElectronAppInfo>;
     getUpdateStatus: () => Promise<ElectronUpdateStatus>;
+    getProviderSettings: () => Promise<ElectronProviderSettings>;
+    updateProviderSettings: (payload: ElectronProviderSettings) => Promise<ElectronProviderSettings>;
     checkForUpdates: () => Promise<ElectronUpdateStatus>;
     installUpdate: () => Promise<ElectronUpdateStatus>;
     listGeneratedImages: (threadId: string) => Promise<ElectronGeneratedImageRecord[]>;
     listProjectsWithThreads: () => Promise<ElectronProjectRecord[]>;
     listReferences: () => Promise<ElectronReferenceImageRecord[]>;
+    listReferenceFolders: () => Promise<ElectronReferenceFolderRecord[]>;
     listDirectorChats: (threadId: string) => Promise<ElectronDirectorChatRecord[]>;
     createDirectorChat: (threadId: string) => Promise<ElectronDirectorChatRecord>;
     renameDirectorChat: (chatId: string, title: string) => Promise<ElectronDirectorChatRecord | null>;
     deleteDirectorChat: (chatId: string) => Promise<void>;
     listDirectorMessages: (chatId: string) => Promise<ElectronDirectorMessageRecord[]>;
     sendDirectorMessage: (payload: ElectronSendDirectorMessagePayload) => Promise<{
+      chat: ElectronDirectorChatRecord | null;
+      userMessage: ElectronDirectorMessageRecord;
+      assistantMessage: ElectronDirectorMessageRecord;
+    }>;
+    regenerateDirectorMessage: (payload: ElectronRegenerateDirectorMessagePayload) => Promise<{
       chat: ElectronDirectorChatRecord | null;
       userMessage: ElectronDirectorMessageRecord;
       assistantMessage: ElectronDirectorMessageRecord;
@@ -454,6 +517,9 @@ interface Window {
     ) => Promise<ElectronDirectorMessageRecord | null>;
     cancelDirectorChat: (chatId: string) => Promise<boolean>;
     createReference: (payload: ElectronCreateReferencePayload) => Promise<ElectronReferenceImageRecord>;
+    createReferenceFolder: (
+      payload: ElectronCreateReferenceFolderPayload
+    ) => Promise<ElectronReferenceFolderRecord>;
     createEnvironmentReference: (
       payload: ElectronCreateEnvironmentReferencePayload
     ) => Promise<ElectronReferenceImageRecord[]>;

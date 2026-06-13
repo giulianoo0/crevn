@@ -9,19 +9,18 @@ import type {
   ProjectRecord,
   ThreadRecord,
 } from '../../db/client';
-import { buildCodexImageGenerationPrompt } from './codexPrompt';
 import type { GenerateImagesInput, ImportedGeneratedImage, ReferenceImageInput } from './generationTypes';
 import { importGeneratedImage } from './imageImport';
 import { parseGenerationManifest } from './manifest';
 
-interface CodexJobRunInput {
+interface GenerationJobRunInput {
   workingDirectory: string;
   outputDirectory: string;
   manifestPath: string;
   prompt: string;
 }
 
-type CodexJobRunResult =
+type GenerationJobRunResult =
   | { success: true }
   | {
       success: false;
@@ -31,7 +30,7 @@ type CodexJobRunResult =
 interface CreateGenerationServiceInput {
   database: GenerationDatabase;
   paths: AppDataPaths;
-  runCodexJob: (input: CodexJobRunInput) => Promise<CodexJobRunResult>;
+  runGenerationJob: (input: GenerationJobRunInput) => Promise<GenerationJobRunResult>;
   now?: () => string;
   createId?: () => string;
 }
@@ -93,10 +92,10 @@ export function createGenerationService(input: CreateGenerationServiceInput) {
   async function generateImages(request: GenerateImagesInput) {
     const jobId = createId();
     const createdAt = now();
-    const workingDirectory = path.join(input.paths.codexJobsTempDir, jobId);
+    const workingDirectory = path.join(input.paths.generationJobsTempDir, jobId);
     const outputDirectory = path.join(workingDirectory, 'output');
     const manifestPath = path.join(workingDirectory, 'manifest.json');
-    const stagedReferenceImages = await stageReferenceImages({
+    await stageReferenceImages({
       workingDirectory,
       referenceImages: request.referenceImages,
     });
@@ -119,22 +118,11 @@ export function createGenerationService(input: CreateGenerationServiceInput) {
     await input.database.upsertJob(pendingJob);
 
     try {
-      const codexPrompt = buildCodexImageGenerationPrompt({
-        mode: request.mode ?? 'manual',
-        userPrompt: request.prompt,
-        outputDirectory,
-        manifestPath,
-        imageCount: request.count,
-        referenceImages: stagedReferenceImages,
-        pinPoint: request.pinPoint,
-        camera: request.camera,
-      });
-
-      const runResult = await input.runCodexJob({
+      const runResult = await input.runGenerationJob({
         workingDirectory,
         outputDirectory,
         manifestPath,
-        prompt: codexPrompt,
+        prompt: request.prompt,
       });
 
       if (!runResult.success) {

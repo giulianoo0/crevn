@@ -3,6 +3,7 @@ import { useMemo, useRef, useEffect, useCallback, useState } from 'react';
 import { List, type RowComponentProps } from 'react-window';
 import { Copy, Download, Trash2 } from 'lucide-react';
 import NumberFlow from '@number-flow/react';
+import { ImageGeneration } from 'img-fx';
 
 import {
   ContextMenu,
@@ -10,8 +11,9 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
-import antigravityLogo from '@/assets/antigravity.webp';
-import codexLogo from '@/assets/codex.webp';
+import { ShimmerSurface } from '@/components/ai-elements/shimmer';
+
+type GeneratedImageGridLoadingEffect = 'shimmer' | 'img-fx';
 
 export interface GeneratedImageGridImage {
   id: string;
@@ -19,7 +21,7 @@ export interface GeneratedImageGridImage {
   fileName: string;
   createdAt?: string;
   isLoading?: boolean;
-  provider?: 'codex' | 'antigravity' | null;
+  provider?: string | null;
   modelId?: string | null;
   modelLabel?: string | null;
   prompt?: string | null;
@@ -38,16 +40,6 @@ const ROW_HEIGHT = 220;
 const ROW_GAP = 12;
 const OVERSCAN_ROWS = 2;
 const DOUBLE_CLICK_DELAY_MS = 200;
-
-const providerIcons = {
-  codex: codexLogo,
-  antigravity: antigravityLogo,
-} satisfies Record<'codex' | 'antigravity', string>;
-
-const providerLabels = {
-  codex: 'Codex',
-  antigravity: 'Antigravity',
-} satisfies Record<'codex' | 'antigravity', string>;
 
 function formatElapsed(totalSeconds: number) {
   const safeSeconds = Math.max(0, Math.floor(totalSeconds));
@@ -104,24 +96,17 @@ function RunningDuration({ startedAt }: { startedAt?: string }) {
 }
 
 function GenerationMetadataBadge({ image }: { image: GeneratedImageGridImage }) {
-  const provider = image.provider === 'antigravity' ? 'antigravity' : image.provider === 'codex' ? 'codex' : null;
   const modelLabel = image.modelLabel ?? image.modelId ?? null;
   const completedDuration = formatDurationMs(image.durationMs);
 
-  if (!provider && !modelLabel && !completedDuration && !image.isLoading) {
+  if (!modelLabel && !completedDuration && !image.isLoading) {
     return null;
   }
 
   return (
     <div
-      className={[
-        'pointer-events-none absolute bottom-3 left-3 z-10 inline-flex max-w-[calc(100%-24px)] items-center gap-2 rounded-full border border-white/10 bg-[rgba(15,16,16,0.74)] px-2.5 py-1.5 text-[11px] font-medium text-white/88 shadow-[0_12px_32px_rgba(0,0,0,0.34)] backdrop-blur-xl transition-[opacity,transform] duration-200',
-        image.isLoading ? 'opacity-100' : 'opacity-0 translate-y-1 group-hover:opacity-100 group-hover:translate-y-0',
-      ].join(' ')}
+      className="pointer-events-none absolute bottom-3 left-3 z-10 inline-flex max-w-[calc(100%-24px)] items-center gap-2 rounded-full border border-white/10 bg-[rgba(15,16,16,0.74)] px-2.5 py-1.5 text-[11px] font-medium text-white/88 shadow-[0_12px_32px_rgba(0,0,0,0.34)] opacity-100 backdrop-blur-xl transition-[opacity,transform] duration-200"
     >
-      {provider ? (
-        <img src={providerIcons[provider]} alt={providerLabels[provider]} className="size-4 shrink-0 rounded-[5px] object-cover" />
-      ) : null}
       {modelLabel ? <span className="min-w-0 truncate">{modelLabel}</span> : null}
       {image.isLoading ? (
         <span className="shrink-0 text-white/60">
@@ -138,6 +123,7 @@ interface GeneratedImageGridRowProps {
   rows: GeneratedImageGridImage[][];
   columnCount: number;
   cardHeight: number;
+  loadingEffect: GeneratedImageGridLoadingEffect;
   selectedImageIds: string[];
   onImageSelect?: (image: GeneratedImageGridImage) => void;
   onImageOpen?: (image: GeneratedImageGridImage) => void;
@@ -155,6 +141,7 @@ function GeneratedImageGridRow({
   rows,
   columnCount,
   cardHeight,
+  loadingEffect,
   selectedImageIds,
   onImageClick,
   onImageDoubleClick,
@@ -164,6 +151,31 @@ function GeneratedImageGridRow({
   onImageDelete,
 }: RowComponentProps<GeneratedImageGridRowProps>) {
   const row = rows[index] ?? [];
+
+  const renderLoadingSurface = (image: GeneratedImageGridImage) => {
+    if (loadingEffect === 'img-fx') {
+      return (
+        <ImageGeneration
+          aria-label={`${image.fileName} loading`}
+          className="h-full w-full"
+          preset="pixels-organic"
+          theme="dark"
+          strength={1}
+          cardBg="rgb(32, 32, 33)"
+          borderRadius={28}
+        >
+          <div className="h-full w-full bg-[rgb(32,32,33)]" />
+        </ImageGeneration>
+      );
+    }
+
+    return (
+      <ShimmerSurface
+        aria-label={`${image.fileName} loading`}
+        className="h-full w-full"
+      />
+    );
+  };
 
   return (
     <div
@@ -192,25 +204,22 @@ function GeneratedImageGridRow({
                 }
               }}
               className={[
-                'group pointer-events-auto relative overflow-hidden rounded-[20px] bg-[var(--surface)]/50 text-left transition-[border-color,box-shadow,transform,opacity] duration-200',
+                'group pointer-events-auto relative overflow-hidden rounded-[28px] bg-[var(--surface2)]/80 text-left transition-[border-color,box-shadow,transform,opacity] duration-200',
                 'border',
                 selectedImageIds.includes(image.id)
                   ? 'border-[var(--accent)] shadow-[0_0_0_1px_rgba(65,130,230,0.5)]'
-                  : 'border-transparent hover:border-white/10',
+                  : 'border-[var(--border-soft)]',
                 image.isLoading ? 'cursor-default' : 'cursor-pointer',
               ].join(' ')}
               style={{ height: cardHeight }}
             >
               {image.isLoading ? (
-                <div
-                  aria-label={`${image.fileName} loading`}
-                  className="animate-skeleton-shimmer h-full w-full bg-[linear-gradient(110deg,rgba(32,32,33,0.45)_20%,rgba(66,66,70,0.92)_50%,rgba(32,32,33,0.45)_80%)] bg-[length:220%_100%]"
-                />
+                renderLoadingSurface(image)
               ) : (
                 <img
                   src={image.fileUrl}
                   alt={image.fileName}
-                  className="h-full w-full object-cover opacity-90"
+                  className="h-full w-full object-cover opacity-90 saturate-[0.94]"
                 />
               )}
               <GenerationMetadataBadge image={image} />
@@ -258,6 +267,7 @@ export function GeneratedImageGrid({
   columnCount = COLUMN_COUNT,
   cardHeight = ROW_HEIGHT,
   rowGap = ROW_GAP,
+  loadingEffect = 'shimmer',
   fitHeight = false,
   maxFitHeight,
   selectedImageIds = [],
@@ -273,6 +283,7 @@ export function GeneratedImageGrid({
   columnCount?: number;
   cardHeight?: number;
   rowGap?: number;
+  loadingEffect?: GeneratedImageGridLoadingEffect;
   fitHeight?: boolean;
   maxFitHeight?: number;
   selectedImageIds?: string[];
@@ -345,6 +356,7 @@ export function GeneratedImageGrid({
         rows,
         columnCount,
         cardHeight,
+        loadingEffect,
         selectedImageIds,
         onImageClick: handleImageClick,
         onImageDoubleClick: handleImageDoubleClick,

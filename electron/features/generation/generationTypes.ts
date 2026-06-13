@@ -9,7 +9,7 @@ export interface ReferenceImageInput {
 export interface GenerateImagesInput {
   clientRunId?: string;
   fastMode?: boolean;
-  provider?: 'codex' | 'antigravity';
+  provider?: string;
   modelId?: string;
   mode?: 'manual' | 'scene' | 'pinpoint' | 'camera';
   prompt: string;

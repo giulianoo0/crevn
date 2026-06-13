@@ -24,6 +24,16 @@ export interface UpdateProjectSettingsPayload {
   artStyle: string;
 }
 
+export interface ProviderSettings {
+  text: {
+    gemini: {
+      apiKey: string;
+    };
+  };
+}
+
+export type UpdateProviderSettingsPayload = ProviderSettings;
+
 export type ExportResult =
   | {
       status: 'exported';
@@ -58,13 +68,31 @@ export interface ReferenceImageRecord {
   name: string;
   title: string;
   description: string | null;
+  groupTitle?: string | null;
+  groupDescription?: string | null;
   mimeType: string;
   bytesBase64: string;
   createdAt: string;
   category: 'characters' | 'environment' | 'objects';
   collectionId?: string | null;
   environmentId?: string | null;
+  parentFolderId?: string | null;
   section?: 'primary' | 'angles' | null;
+}
+
+export interface CreateReferenceFolderPayload {
+  category: 'characters' | 'environment' | 'objects';
+  title: string;
+  parentFolderId?: string | null;
+}
+
+export interface ReferenceFolderRecord {
+  id: string;
+  category: 'characters' | 'environment' | 'objects';
+  title: string;
+  description?: string | null;
+  parentFolderId?: string | null;
+  createdAt: string;
 }
 
 export interface CreateReferencePayload {
@@ -180,7 +208,7 @@ export interface ExportReferencePayload {
 export interface GenerateImagesPayload {
   clientRunId?: string;
   fastMode?: boolean;
-  provider?: 'codex' | 'antigravity';
+  provider?: string;
   modelId?: string;
   mode?: 'manual' | 'scene' | 'pinpoint' | 'camera';
   prompt: string;
@@ -212,7 +240,7 @@ export interface GenerateImagesPayload {
 export interface GeneratedImageRecord extends GeneratedImageGridImage {
   createdAt: string;
   outputIndex?: number | null;
-  provider?: 'codex' | 'antigravity' | null;
+  provider?: string | null;
   modelId?: string | null;
   modelLabel?: string | null;
   prompt?: string | null;
@@ -221,6 +249,7 @@ export interface GeneratedImageRecord extends GeneratedImageGridImage {
     title?: string | null;
     description?: string | null;
     mimeType: string;
+    previewUrl?: string | null;
   }>;
   durationMs?: number | null;
   generationStartedAt?: string;
@@ -266,12 +295,37 @@ export interface DirectorChatRecord {
   updatedAt: string;
 }
 
+export type DirectorMessagePart =
+  | {
+      type: 'text' | 'reasoning';
+      text: string;
+      providerMetadata?: Record<string, unknown>;
+    }
+  | {
+      type: 'tool-generateImages';
+      toolCallId: string;
+      input: {
+        prompt?: string;
+        count?: number;
+        aspectRatio?: string;
+        references?: string[];
+      };
+      state: 'approval-requested' | 'running' | 'output-available' | 'output-error' | 'declined';
+      approvalId?: string;
+      output?: {
+        assets?: GeneratedImageRecord[];
+        [key: string]: unknown;
+      };
+      errorText?: string;
+    };
+
 export interface DirectorMessageRecord {
   id: string;
   chatId: string;
   role: 'user' | 'assistant' | 'system';
-  contentMarkdown: string;
+  parts: DirectorMessagePart[];
   status: 'streaming' | 'completed' | 'failed';
+  errorMessage?: string | null;
   modelId?: string | null;
   modelLabel?: string | null;
   fastMode: boolean;
@@ -303,9 +357,16 @@ export interface SendDirectorMessagePayload {
   }>;
 }
 
+export interface RegenerateDirectorMessagePayload {
+  chatId: string;
+  threadId: string;
+  assistantMessageId: string;
+}
+
 export interface DirectorActionDecisionPayload {
   messageId: string;
   actionIndex: number;
+  clientRunId?: string;
 }
 
 export interface DirectorMessageStartEvent {
@@ -319,15 +380,14 @@ export interface DirectorMessageDeltaEvent {
   threadId: string;
   chatId: string;
   messageId: string;
-  delta: string;
-  content: string;
+  parts: DirectorMessagePart[];
 }
 
 export interface DirectorMessageCompleteEvent {
   threadId: string;
   chatId: string;
   messageId: string;
-  content: string;
+  parts: DirectorMessagePart[];
 }
 
 export interface DirectorMessageErrorEvent {
@@ -335,7 +395,7 @@ export interface DirectorMessageErrorEvent {
   chatId: string;
   messageId: string;
   errorMessage: string;
-  content: string;
+  parts: DirectorMessagePart[];
   canceled?: boolean;
 }
 
@@ -388,7 +448,7 @@ export interface SceneGroupRunRecord {
   sceneGroupId: string;
   threadId: string;
   status: 'pending' | 'running' | 'succeeded' | 'failed';
-  provider: 'codex';
+  provider: string;
   modelId: string;
   modelLabel: string;
   requestedFrameCount: number;
@@ -447,11 +507,20 @@ function getElectronApi() {
     return {
       getAppInfo: async () => ({ name: 'crevn', version: '0.0.0' }),
       getUpdateStatus: async () => fallbackUpdateStatus,
+      getProviderSettings: async () => ({
+        text: {
+          gemini: {
+            apiKey: '',
+          },
+        },
+      }),
+      updateProviderSettings: async (payload: ProviderSettings) => payload,
       checkForUpdates: async () => fallbackUpdateStatus,
       installUpdate: async () => fallbackUpdateStatus,
       listGeneratedImages: async () => [],
       listProjectsWithThreads: async () => [],
       listReferences: async () => [],
+      listReferenceFolders: async () => [],
       listDirectorChats: async () => [],
       createDirectorChat: async () => {
         throw new Error('Electron API bridge is unavailable.');
@@ -466,6 +535,9 @@ function getElectronApi() {
       sendDirectorMessage: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
+      regenerateDirectorMessage: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
       approveDirectorAction: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
@@ -476,6 +548,9 @@ function getElectronApi() {
         throw new Error('Electron API bridge is unavailable.');
       },
       createReference: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      createReferenceFolder: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
       createEnvironmentReference: async () => [],
@@ -603,6 +678,14 @@ export function getUpdateStatus() {
   return getElectronApi().getUpdateStatus() as Promise<UpdateStatus>;
 }
 
+export function getProviderSettings() {
+  return getElectronApi().getProviderSettings() as Promise<ProviderSettings>;
+}
+
+export function updateProviderSettings(payload: UpdateProviderSettingsPayload) {
+  return getElectronApi().updateProviderSettings(payload) as Promise<ProviderSettings>;
+}
+
 export function checkForUpdates() {
   return getElectronApi().checkForUpdates() as Promise<UpdateStatus>;
 }
@@ -651,6 +734,14 @@ export function sendDirectorMessage(payload: SendDirectorMessagePayload) {
   }>;
 }
 
+export function regenerateDirectorMessage(payload: RegenerateDirectorMessagePayload) {
+  return getElectronApi().regenerateDirectorMessage(payload) as Promise<{
+    chat: DirectorChatRecord | null;
+    userMessage: DirectorMessageRecord;
+    assistantMessage: DirectorMessageRecord;
+  }>;
+}
+
 export function approveDirectorAction(payload: DirectorActionDecisionPayload) {
   return getElectronApi().approveDirectorAction(payload) as Promise<DirectorMessageRecord | null>;
 }
@@ -665,6 +756,14 @@ export function cancelDirectorChat(chatId: string) {
 
 export function createReference(payload: CreateReferencePayload) {
   return getElectronApi().createReference(payload) as Promise<ReferenceImageRecord>;
+}
+
+export function listReferenceFolders() {
+  return getElectronApi().listReferenceFolders() as Promise<ReferenceFolderRecord[]>;
+}
+
+export function createReferenceFolder(payload: CreateReferenceFolderPayload) {
+  return getElectronApi().createReferenceFolder(payload) as Promise<ReferenceFolderRecord>;
 }
 
 export function createEnvironmentReference(payload: CreateEnvironmentReferencePayload) {

@@ -21,6 +21,7 @@ import {
   TextNode,
   COMMAND_PRIORITY_LOW,
   KEY_ENTER_COMMAND,
+  KEY_BACKSPACE_COMMAND,
   type NodeKey,
 } from 'lexical';
 import { $createMentionNode, $isMentionNode } from './mention-node';
@@ -36,7 +37,14 @@ type MentionPluginProps = {
   onTextChange: (text: string) => void;
   onEnterWithMention?: () => void;
   insertMentionRef: React.MutableRefObject<
-    ((id: string, title: string, range?: { start: number; end: number }, suffixOverride?: string) => void) | null
+    ((
+      id: string,
+      title: string,
+      range?: { start: number; end: number },
+      suffixOverride?: string,
+      previewUrl?: string,
+      keepSelectorOpen?: boolean
+    ) => void) | null
   >;
 };
 
@@ -57,7 +65,7 @@ export function MentionPlugin({
   onEnterWithMentionRef.current = onEnterWithMention;
 
   const splitSelectorSuffix = (text: string) => {
-    const separatorIndex = text.search(/[#/:]/);
+    const separatorIndex = text.search(/[#/:.]/);
     if (separatorIndex === -1) {
       return { selectorSuffix: '' };
     }
@@ -66,7 +74,14 @@ export function MentionPlugin({
 
   // --- Insert mention: replace @query with a MentionNode ---
   const insertMention = useCallback(
-    (id: string, title: string, range?: { start: number; end: number }, suffixOverride?: string) => {
+    (
+      id: string,
+      title: string,
+      range?: { start: number; end: number },
+      suffixOverride?: string,
+      previewUrl?: string,
+      keepSelectorOpen?: boolean
+    ) => {
       editor.update(() => {
         const root = $getRoot();
         const selection = $getSelection();
@@ -135,18 +150,31 @@ export function MentionPlugin({
         const beforeAt = text.slice(0, matchStart);
         const afterMatch = text.slice(matchEnd);
         const previousSibling = targetNode.getPreviousSibling();
+        // The selector (`.`) sits right after a chip, possibly with stray
+        // whitespace between them (the trailing space we insert after a chip).
+        // Treat that case as "attached to the chip" so we reuse/replace it
+        // instead of leaving a duplicate, and drop the blank gap.
+        const beforeIsBlank = beforeAt.trim().length === 0;
+        const previousIsMention = Boolean(
+          beforeIsBlank && previousSibling && $isMentionNode(previousSibling),
+        );
+        const effectiveBeforeAt = previousIsMention ? '' : beforeAt;
         const shouldReusePreviousMention =
-          matchStart === 0 &&
-          previousSibling &&
-          $isMentionNode(previousSibling) &&
-          previousSibling.getMentionId() === id;
+          previousIsMention && previousSibling!.getMentionId() === id;
+        // When the selector follows an existing chip and we are inserting a
+        // *different* mention (folding a folder chip into the chosen image),
+        // the old chip must be replaced — otherwise it lingers as a duplicate.
+        const shouldReplacePreviousMention = previousIsMention && !shouldReusePreviousMention;
 
-        const mentionNode = shouldReusePreviousMention ? null : $createMentionNode(id, title);
+        const mentionNode = shouldReusePreviousMention ? null : $createMentionNode(id, title, previewUrl);
+        const suffixNode =
+          resolvedSelectorSuffix.length > 0 ? $createTextNode(resolvedSelectorSuffix) : null;
+        const spaceNode = $createTextNode(' ');
         const replacementNodes = [
-          ...(beforeAt.length > 0 ? [$createTextNode(beforeAt)] : []),
+          ...(effectiveBeforeAt.length > 0 ? [$createTextNode(effectiveBeforeAt)] : []),
           ...(mentionNode ? [mentionNode] : []),
-          ...(resolvedSelectorSuffix.length > 0 ? [$createTextNode(resolvedSelectorSuffix)] : []),
-          $createTextNode(' '),
+          ...(suffixNode ? [suffixNode] : []),
+          spaceNode,
           ...(afterMatch.length > 0 ? [$createTextNode(afterMatch)] : []),
         ];
 
@@ -157,10 +185,22 @@ export function MentionPlugin({
           previousNode = nextNode;
         }
 
-        const spaceNode =
-          replacementNodes.find((node) => node instanceof TextNode && node.getTextContent() === ' ') ??
-          replacementNodes[replacementNodes.length - 1];
-        spaceNode.select();
+        if (shouldReplacePreviousMention && previousSibling) {
+          previousSibling.remove();
+        }
+
+        if (keepSelectorOpen) {
+          // Keep the caret glued to the chip (or to the end of the inserted
+          // path suffix) so the next `.` keeps drilling instead of landing
+          // after the trailing space.
+          if (suffixNode) {
+            suffixNode.select(resolvedSelectorSuffix.length, resolvedSelectorSuffix.length);
+          } else {
+            spaceNode.select(0, 0);
+          }
+        } else {
+          spaceNode.select();
+        }
         latestMentionMatchRef.current = null;
       });
     },
@@ -223,7 +263,7 @@ export function MentionPlugin({
           .getTextContent()
           .slice(0, anchor.offset);
         const matchResult = textUpToCursor.match(/@([^\s@]*)$/);
-        const selectorMatchResult = textUpToCursor.match(/[#/:]([^\s@]*)$/);
+        const selectorMatchResult = textUpToCursor.match(/[#/:.]([^\s@]*)$/);
 
         if (matchResult && matchResult.index !== undefined) {
           latestMentionMatchRef.current = {
@@ -270,6 +310,64 @@ export function MentionPlugin({
           return true;
         }
         return false;
+      },
+      COMMAND_PRIORITY_LOW,
+    );
+  }, [editor]);
+
+  // --- Backspace deletes a whole mention chip in a single press ---
+  useEffect(() => {
+    return editor.registerCommand(
+      KEY_BACKSPACE_COMMAND,
+      (event) => {
+        const selection = $getSelection();
+        if (!$isRangeSelection(selection) || !selection.isCollapsed()) {
+          return false;
+        }
+
+        const anchorNode = selection.anchor.getNode();
+        const anchorOffset = selection.anchor.offset;
+        let mentionNode: ReturnType<typeof $getNodeByKey> | null = null;
+        let blankGap: TextNode | null = null;
+
+        if ($isMentionNode(anchorNode)) {
+          mentionNode = anchorNode;
+        } else if (anchorNode instanceof TextNode) {
+          const before = anchorNode.getTextContent().slice(0, anchorOffset);
+          // Caret sits at the chip, or only whitespace (the trailing space we
+          // insert) separates it from the chip.
+          if (before.trim().length === 0) {
+            const previous = anchorNode.getPreviousSibling();
+            if ($isMentionNode(previous)) {
+              mentionNode = previous;
+              if (before.length > 0) {
+                blankGap = anchorNode;
+              }
+            }
+          }
+        } else if ('getChildAtIndex' in anchorNode && anchorOffset > 0) {
+          const previousChild = (anchorNode as { getChildAtIndex: (index: number) => unknown })
+            .getChildAtIndex(anchorOffset - 1);
+          if ($isMentionNode(previousChild)) {
+            mentionNode = previousChild;
+          }
+        }
+
+        if (!mentionNode || !$isMentionNode(mentionNode)) {
+          return false;
+        }
+
+        event?.preventDefault();
+        const caretTarget = mentionNode.getPreviousSibling();
+        mentionNode.remove();
+        if (blankGap) {
+          blankGap.remove();
+        }
+        if (caretTarget instanceof TextNode) {
+          const end = caretTarget.getTextContentSize();
+          caretTarget.select(end, end);
+        }
+        return true;
       },
       COMMAND_PRIORITY_LOW,
     );
