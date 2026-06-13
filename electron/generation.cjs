@@ -17,6 +17,7 @@ const {
   getTextFromParts,
   toDirectorModelMessages,
 } = require('./features/generation/directorAiSdk.cjs');
+const { buildSkillCatalogPrompt } = require('./features/generation/skills.cjs');
 
 const DEFAULT_PROJECT_NAME = 'Documents';
 const DEFAULT_THREAD_NAME = 'New Thread';
@@ -76,7 +77,10 @@ const DIRECTOR_SYSTEM_PROMPT = [
   'When the user explicitly wants one or more still images, call the generateImages tool.',
   'Do not claim that generation already happened before approval.',
   'Use @Reference names only when they are actually relevant.',
-].join('\n');
+  buildSkillCatalogPrompt(),
+]
+  .filter(Boolean)
+  .join('\n\n');
 
 function parseDirectorParts(partsJson) {
   try {

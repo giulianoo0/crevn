@@ -1,3 +1,5 @@
+const { loadBundledSkill } = require('./skills.cjs');
+
 function cloneParts(parts) {
   return parts.map((part) => ({
     ...part,
@@ -20,6 +22,7 @@ function createDirectorPartAccumulator(initialParts = []) {
   const parts = cloneParts(initialParts);
   const blockIndexById = new Map();
   const toolIndexByCallId = new Map();
+  const skillIndexByCallId = new Map();
 
   for (const [index, part] of parts.entries()) {
     if (part.streamId) {
@@ -27,6 +30,9 @@ function createDirectorPartAccumulator(initialParts = []) {
     }
     if (part.type === 'tool-generateImages') {
       toolIndexByCallId.set(part.toolCallId, index);
+    }
+    if (part.type === 'tool-loadSkill') {
+      skillIndexByCallId.set(part.toolCallId, index);
     }
   }
 
@@ -74,6 +80,44 @@ function createDirectorPartAccumulator(initialParts = []) {
       if (chunk.providerMetadata) {
         parts[index].providerMetadata = chunk.providerMetadata;
       }
+      return true;
+    }
+    if (chunk.type === 'tool-call' && chunk.toolName === 'loadSkill') {
+      const existingIndex = skillIndexByCallId.get(chunk.toolCallId);
+      if (existingIndex !== undefined) {
+        return false;
+      }
+      const input = chunk.input ?? {};
+      const index = parts.length;
+      parts.push({
+        type: 'tool-loadSkill',
+        toolCallId: chunk.toolCallId,
+        skillName: typeof input.name === 'string' ? input.name : '',
+        reference: typeof input.reference === 'string' ? input.reference : undefined,
+        state: 'running',
+      });
+      skillIndexByCallId.set(chunk.toolCallId, index);
+      return true;
+    }
+    if (
+      (chunk.type === 'tool-result' || chunk.type === 'tool-error') &&
+      skillIndexByCallId.has(chunk.toolCallId)
+    ) {
+      const index = skillIndexByCallId.get(chunk.toolCallId);
+      const output = chunk.output ?? chunk.result;
+      parts[index] = {
+        ...parts[index],
+        state: chunk.type === 'tool-error' ? 'output-error' : 'output-available',
+        skillName:
+          output && typeof output === 'object' && typeof output.name === 'string'
+            ? output.name
+            : parts[index].skillName,
+        title:
+          output && typeof output === 'object' && typeof output.title === 'string'
+            ? output.title
+            : parts[index].title,
+        found: output && typeof output === 'object' ? Boolean(output.found) : undefined,
+      };
       return true;
     }
     if (chunk.type === 'tool-call' && chunk.toolName === 'generateImages') {
@@ -209,6 +253,7 @@ function buildDirectorStreamOptions({
   smoothStream,
   tool,
   jsonSchema,
+  stepCountIs,
 }) {
   const system = (Array.isArray(messages) ? messages : [])
     .filter((message) => message?.role === 'system')
@@ -223,6 +268,9 @@ function buildDirectorStreamOptions({
     messages: modelMessages,
     abortSignal,
     experimental_transform: smoothStream(),
+    // Allow the model to call loadSkill, read the result, and keep reasoning in
+    // the same turn. generateImages still halts the stream via needsApproval.
+    ...(typeof stepCountIs === 'function' ? { stopWhen: stepCountIs(8) } : null),
     providerOptions: {
       google: {
         thinkingConfig: {
@@ -231,6 +279,20 @@ function buildDirectorStreamOptions({
       },
     },
     tools: {
+      loadSkill: tool({
+        description:
+          'Load the full instructions for a bundled skill before acting on a request it covers. Optionally pass a reference filename to read a specific reference document.',
+        inputSchema: jsonSchema({
+          type: 'object',
+          additionalProperties: false,
+          required: ['name'],
+          properties: {
+            name: { type: 'string' },
+            reference: { type: 'string' },
+          },
+        }),
+        execute: async ({ name, reference }) => loadBundledSkill(name, reference),
+      }),
       generateImages: tool({
         description: 'Request one or more still images for the current Director thread.',
         inputSchema: jsonSchema({
@@ -262,7 +324,7 @@ async function* createAiSdkDirectorPartStream({
     throw new Error('Set GEMINI_API_KEY or GOOGLE_API_KEY to use Google Gemini Director.');
   }
 
-  const [{ streamText, smoothStream, tool, jsonSchema }, { createGoogleGenerativeAI }] = await Promise.all([
+  const [{ streamText, smoothStream, tool, jsonSchema, stepCountIs }, { createGoogleGenerativeAI }] = await Promise.all([
     import('ai'),
     import('@ai-sdk/google'),
   ]);
@@ -282,6 +344,7 @@ async function* createAiSdkDirectorPartStream({
     smoothStream,
     tool,
     jsonSchema,
+    stepCountIs,
   }));
 
   const accumulator = createDirectorPartAccumulator();

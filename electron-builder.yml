@@ -16,6 +16,9 @@ directories:
 files:
   - dist/**
   - electron/**/*.cjs
+  # Bundled agent skills (SKILL.md + references) ship inside the asar so the
+  # skill catalog stays available and persistent across installs and updates.
+  - electron/skills/**/*.md
   - package.json
 # @libsql ships native .node binaries that cannot be loaded from inside the asar.
 asarUnpack:

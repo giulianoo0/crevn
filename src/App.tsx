@@ -74,6 +74,7 @@ import {
   X,
   Zap,
   AlertTriangle,
+  BookOpen,
 } from 'lucide-react';
 import NumberFlow from '@number-flow/react';
 import { toast } from 'sonner';
@@ -138,6 +139,7 @@ import {
   ChainOfThought,
   ChainOfThoughtContent,
   ChainOfThoughtHeader,
+  ChainOfThoughtStep,
 } from './components/ai-elements/chain-of-thought';
 import { ToolCall, type ToolStatus } from './components/ai-elements/tool';
 import {
@@ -8467,12 +8469,25 @@ function DirectorMessageErrorAlert({ reason }: { reason: string }) {
 }
 
 type DirectorReasoningPart = Extract<DirectorMessagePart, { type: 'reasoning' }>;
+type DirectorSkillPart = Extract<DirectorMessagePart, { type: 'tool-loadSkill' }>;
+
+function formatSkillLabel(part: DirectorSkillPart) {
+  const name = part.title || part.skillName || 'skill';
+  if (part.state === 'running') {
+    return `Consulting skill: ${name}`;
+  }
+  if (part.state === 'output-error' || part.found === false) {
+    return `Skill unavailable: ${name}`;
+  }
+  return `Consulted skill: ${name}`;
+}
 
 function DirectorReasoningBlock({
   hasReasoning,
   isThinking,
   messageId,
   reasoningParts,
+  skillParts,
   storageKey,
   title,
 }: {
@@ -8480,18 +8495,29 @@ function DirectorReasoningBlock({
   isThinking: boolean;
   messageId: string;
   reasoningParts: DirectorReasoningPart[];
+  skillParts: DirectorSkillPart[];
   storageKey: string;
   title: string;
 }) {
+  const hasSteps = hasReasoning || skillParts.length > 0;
   return (
     <ChainOfThought
       defaultOpen
-      isExpandable={hasReasoning}
+      isExpandable={hasSteps}
       storageKey={storageKey}
     >
       <ChainOfThoughtHeader isShimmering={isThinking}>{title}</ChainOfThoughtHeader>
-      {hasReasoning ? (
+      {hasSteps ? (
         <ChainOfThoughtContent className="space-y-3">
+          {skillParts.map((skill) => (
+            <ChainOfThoughtStep
+              key={`${messageId}-skill-${skill.toolCallId}`}
+              icon={BookOpen}
+              status={skill.state === 'running' ? 'active' : 'complete'}
+              label={formatSkillLabel(skill)}
+              description={skill.reference ? `reference: ${skill.reference}` : undefined}
+            />
+          ))}
           {reasoningParts.map((reasoning, index) => (
             <MessageResponse
               key={`${messageId}-reasoning-${index}`}
@@ -8529,6 +8555,10 @@ function DirectorMessageRow({
     (part): part is Extract<DirectorMessagePart, { type: 'tool-generateImages' }> =>
       part.type === 'tool-generateImages'
   );
+  const skillParts = message.parts.filter(
+    (part): part is Extract<DirectorMessagePart, { type: 'tool-loadSkill' }> =>
+      part.type === 'tool-loadSkill'
+  );
   const isCompleteAssistant = isAssistant && message.status === 'completed' && message.parts.length > 0;
   const isSettledAssistant = isAssistant && message.status !== 'streaming';
   const durationLabel = isSettledAssistant ? formatDurationBetween(message.createdAt, message.updatedAt) : null;
@@ -8543,7 +8573,8 @@ function DirectorMessageRow({
       : null;
   const showAssistantMarkdown =
     hasVisibleAssistantContent && (!failureReason || textContent.trim() !== failureReason);
-  const showReasoningBlock = isAssistant && (isStreamingAssistant || hasReasoning || Boolean(durationLabel));
+  const showReasoningBlock =
+    isAssistant && (isStreamingAssistant || hasReasoning || skillParts.length > 0 || Boolean(durationLabel));
   const chainOfThoughtStorageKey = `director-message-cot:${message.id}`;
   const reasoningDurationLabel =
     message.status !== 'streaming' && durationLabel
@@ -8604,6 +8635,7 @@ function DirectorMessageRow({
                   isThinking={isReasoningTitleShimmering}
                   messageId={message.id}
                   reasoningParts={visibleReasoningParts}
+                  skillParts={skillParts}
                   storageKey={chainOfThoughtStorageKey}
                   title={reasoningDurationLabel}
                 />

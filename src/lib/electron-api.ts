@@ -317,6 +317,15 @@ export type DirectorMessagePart =
         [key: string]: unknown;
       };
       errorText?: string;
+    }
+  | {
+      type: 'tool-loadSkill';
+      toolCallId: string;
+      skillName: string;
+      reference?: string;
+      state: 'running' | 'output-available' | 'output-error';
+      title?: string;
+      found?: boolean;
     };
 
 export interface DirectorMessageRecord {

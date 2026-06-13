@@ -98,6 +98,48 @@ describe('Director AI SDK stream accumulator', () => {
   });
 });
 
+describe('Director AI SDK loadSkill tool stream', () => {
+  it('tracks a skill load from call through result inside the chain of thought', () => {
+    const accumulator = createDirectorPartAccumulator();
+
+    accumulator.apply({
+      type: 'tool-call',
+      toolCallId: 'skill-1',
+      toolName: 'loadSkill',
+      input: { name: 'direcao-de-cena' },
+    });
+
+    expect(accumulator.snapshot()).toEqual([
+      {
+        type: 'tool-loadSkill',
+        toolCallId: 'skill-1',
+        skillName: 'direcao-de-cena',
+        reference: undefined,
+        state: 'running',
+      },
+    ]);
+
+    accumulator.apply({
+      type: 'tool-result',
+      toolCallId: 'skill-1',
+      toolName: 'loadSkill',
+      output: { found: true, name: 'direcao-de-cena', title: 'Direção de Cena', content: '...' },
+    });
+
+    expect(accumulator.snapshot()).toEqual([
+      {
+        type: 'tool-loadSkill',
+        toolCallId: 'skill-1',
+        skillName: 'direcao-de-cena',
+        reference: undefined,
+        state: 'output-available',
+        title: 'Direção de Cena',
+        found: true,
+      },
+    ]);
+  });
+});
+
 describe('Director AI SDK model messages', () => {
   it('converts stored structured parts without leaking reasoning summaries back into history', () => {
     expect(
