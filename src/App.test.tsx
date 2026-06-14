@@ -4304,6 +4304,41 @@ describe('App header thread title', () => {
     expect(screen.getByText('Pasta vazia')).toBeInTheDocument();
   });
 
+  it('keeps the add-image tile visible when a reference folder only has subfolders', async () => {
+    vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
+      {
+        id: 'character-folder-parent',
+        category: 'characters',
+        title: 'Characters',
+        parentFolderId: null,
+        createdAt: '2026-05-26T13:00:00.000Z',
+      },
+      {
+        id: 'character-folder-child',
+        category: 'characters',
+        title: 'Lumo',
+        parentFolderId: 'character-folder-parent',
+        createdAt: '2026-05-26T12:00:00.000Z',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByTestId('reference-subfolder-grid')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add images to folder' })).toBeInTheDocument();
+    expect(screen.queryByText('Pasta vazia')).not.toBeInTheDocument();
+  });
+
   it('resizes the references sidebar when dragging the resize handle', async () => {
     window.innerWidth = 1400;
     vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([

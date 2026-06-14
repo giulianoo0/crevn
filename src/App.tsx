@@ -19,20 +19,26 @@ import {
   type CSSProperties,
 } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
+import useEmblaCarousel from 'embla-carousel-react';
 import { BorderBeam } from 'border-beam';
 import {
   closestCenter,
   DndContext,
   KeyboardSensor,
+  MeasuringStrategy,
   MouseSensor,
   TouchSensor,
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragMoveEvent,
   type DragStartEvent,
 } from '@dnd-kit/core';
 import {
   SortableContext,
+  arrayMove,
+  horizontalListSortingStrategy,
+  rectSortingStrategy,
   sortableKeyboardCoordinates,
   useSortable,
   verticalListSortingStrategy,
@@ -57,6 +63,7 @@ import {
   Folder,
   GripVertical,
   ImagePlus,
+  MoreHorizontal,
   KeyRound,
   LoaderCircle,
   Pencil,
@@ -157,6 +164,14 @@ import {
 } from './components/reference-metadata-dialog';
 import { ModelPicker } from './components/model-picker';
 import { getErrorMessage } from './lib/errors';
+import { sounds } from './lib/sounds';
+import {
+  applyOrder,
+  getFolderOrder,
+  setFolderOrder,
+  getImageOrder,
+  setImageOrder,
+} from './lib/reference-order';
 import {
   approveDirectorAction,
   cancelSceneGroupGeneration,
@@ -1647,8 +1662,8 @@ export function getReferenceMentionReplacementRange(
 }
 
 const INITIAL_SCENE_FRAMES: SceneFrame[] = [];
-const DEFAULT_SCENES_SIDEBAR_WIDTH = 500;
-const MIN_SCENES_SIDEBAR_WIDTH = 250;
+const DEFAULT_SCENES_SIDEBAR_WIDTH = 180;
+const MIN_SCENES_SIDEBAR_WIDTH = 160;
 const SCENE_OUTPUT_EAGER_FRAME_COUNT = 3;
 const SCENE_OUTPUT_LAZY_ROOT_MARGIN = '900px 0px';
 const SCENE_OUTPUT_MAX_GRID_HEIGHT = 640;
@@ -1847,6 +1862,8 @@ export function App() {
   const [localRunningCountsByThreadId, setLocalRunningCountsByThreadId] = useState<Record<string, number>>({});
   const [activeRunsById, setActiveRunsById] = useState<Record<string, ActiveGenerationRun>>({});
   const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
+  const [isClassicGridDragActive, setIsClassicGridDragActive] = useState(false);
+  const classicGridDragDepthRef = useRef(0);
   const [cursorIndex, setCursorIndex] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   const [activeReferenceMentionIndex, setActiveReferenceMentionIndex] = useState(0);
@@ -2774,6 +2791,7 @@ export function App() {
 
   const handleCopyGeneratedImage = useCallback(async (image: GeneratedImageRecord) => {
     await copyGeneratedImage(image.id);
+    sounds.select();
     toast.success('Image copied');
   }, []);
 
@@ -2791,12 +2809,15 @@ export function App() {
   const handleDownloadGeneratedImage = useCallback(async (image: GeneratedImageRecord) => {
     const didDownload = await downloadGeneratedImage(image.id);
     if (didDownload) {
+      sounds.select();
       toast.success('Image downloaded');
     }
   }, []);
 
   const handleDeleteGeneratedImage = useCallback(async (image: GeneratedImageRecord) => {
-    await deleteGeneratedImage(image.id);
+    if (!image.fileUrl?.startsWith('blob:')) {
+      await deleteGeneratedImage(image.id);
+    }
     setGeneratedImages((current) => current.filter((entry) => entry.id !== image.id));
     setReferenceImages((current) => current.filter((reference) => reference.sourceImageId !== image.id));
     setPlayerSession((current) => {
@@ -2806,6 +2827,7 @@ export function App() {
       }
       return current;
     });
+    sounds.select();
     toast.success('Image deleted');
   }, []);
 
@@ -3103,6 +3125,73 @@ export function App() {
       ),
     ]);
     setReferenceFolders((current) => upsertReferenceFolderRecord(current, folder));
+  }, []);
+
+  const handleMoveReferenceImages = useCallback(async ({
+    imageIds,
+    category,
+    sourceFolderId,
+    targetFolderId,
+    targetFolderTitle,
+  }: {
+    imageIds: string[];
+    category: ReferenceLibraryRoute;
+    sourceFolderId: string;
+    targetFolderId: string;
+    targetFolderTitle: string;
+  }) => {
+    const sourceImages = savedReferencesRef.current.filter(
+      (ref) => (ref.collectionId ?? ref.environmentId ?? ref.id) === sourceFolderId
+    );
+    const targetImages = savedReferencesRef.current.filter(
+      (ref) => (ref.collectionId ?? ref.environmentId ?? ref.id) === targetFolderId
+    );
+    const selected = sourceImages.filter((img) => imageIds.includes(img.id));
+    if (selected.length === 0) return;
+
+    // Optimistic update: immediately remove from source so UI is snappy
+    setSavedReferences((current) =>
+      current.filter((ref) => !imageIds.includes(ref.id))
+    );
+    sounds.move();
+    toast.success(`Moved ${selected.length === 1 ? '1 image' : `${selected.length} images`} to ${targetFolderTitle}`);
+
+    const movedRefs = await updateReferenceCollection({
+      category,
+      collectionId: targetFolderId,
+      title: targetFolderTitle,
+      attachments: [
+        ...targetImages.map(toReferenceCollectionAttachment),
+        ...selected.map((img) => ({
+          name: img.name,
+          title: img.title,
+          mimeType: img.mimeType,
+          bytesBase64: img.bytesBase64,
+          description: img.description,
+          section: img.section,
+        })),
+      ],
+    });
+
+    const remaining = sourceImages.filter((img) => !imageIds.includes(img.id));
+    const sourceTitle = sourceImages[0]?.groupTitle?.trim() || sourceImages[0]?.title || '';
+    const remainingRefs = await updateReferenceCollection({
+      category,
+      collectionId: sourceFolderId,
+      title: sourceTitle,
+      description: sourceImages[0]?.groupDescription,
+      attachments: remaining.map(toReferenceCollectionAttachment),
+    });
+
+    setSavedReferences((current) => [
+      ...movedRefs.map(toSavedReferenceImage),
+      ...remainingRefs.map(toSavedReferenceImage),
+      ...current.filter(
+        (ref) =>
+          (ref.collectionId ?? ref.environmentId) !== sourceFolderId &&
+          (ref.collectionId ?? ref.environmentId) !== targetFolderId
+      ),
+    ]);
   }, []);
 
   const handleUpdateReferenceMetadata = useCallback(async ({
@@ -3458,8 +3547,11 @@ export function App() {
           ),
         }, chatId)
       );
+      sounds.error();
       throw error;
     }
+
+    sounds.notification();
 
     if (result.chat) {
       setDirectorChatsByThreadId((current) => ({
@@ -4899,8 +4991,10 @@ export function App() {
           ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId) && !resultAssetIds.has(image.id)),
         ]);
       }
+      sounds.success();
       toast.success(result.assets.length > 0 ? `Generated ${result.assets.length} images` : 'Generation complete');
     } catch (error) {
+      sounds.error();
       console.error('Failed to generate images', error);
       setActiveRunsById((current) => {
         const nextState = { ...current };
@@ -5134,8 +5228,10 @@ export function App() {
           ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId) && !resultAssetIds.has(image.id)),
         ]);
       }
+      sounds.success();
       toast.success(result.assets.length > 0 ? 'Generated 1 image' : 'Generation complete');
     } catch (error) {
+      sounds.error();
       console.error('Failed to generate pinpoint image', error);
       setActiveRunsById((current) => {
         const nextState = { ...current };
@@ -5289,6 +5385,7 @@ export function App() {
           ...current.filter((image) => !isLoadingEntryForRun(image, clientRunId) && !resultAssetIds.has(image.id)),
         ]);
       }
+      sounds.success();
       toast.success(
         result.assets.length === 1
           ? 'Generated 1 image'
@@ -5297,6 +5394,7 @@ export function App() {
             : 'Generation complete'
       );
     } catch (error) {
+      sounds.error();
       console.error('Failed to generate camera image', error);
       setActiveRunsById((current) => {
         const nextState = { ...current };
@@ -6019,6 +6117,7 @@ export function App() {
               onRenameFolder={handleRenameFolder}
               onRenameImage={handleRenameReferenceImage}
               onGroupImages={handleGroupReferenceImages}
+              onMoveImages={handleMoveReferenceImages}
               onUpdateReferenceMetadata={handleUpdateReferenceMetadata}
               onDeleteImageFromFolder={handleDeleteImageFromFolder}
               onDeleteReference={(reference) =>
@@ -6047,18 +6146,63 @@ export function App() {
           ) : (
             <div
               key="generation-workspace"
-              className={isDirectorWorkspace ? 'h-full w-full' : 'min-h-full w-full'}
+              className={isDirectorWorkspace ? 'relative h-full w-full' : 'relative min-h-full w-full'}
             >
               <AnimatePresence mode="wait" initial={false}>
                 {isClassicWorkspace ? (
                   <motion.section
                     key="classic-workspace"
-                    initial={{ opacity: 0, x: -10, filter: 'blur(6px)' }}
-                    animate={{ opacity: 1, x: 0, filter: 'blur(0px)' }}
-                    exit={{ opacity: 0, x: 10, filter: 'blur(6px)' }}
+                    initial={{ opacity: 0, filter: 'blur(6px)' }}
+                    animate={{ opacity: 1, filter: 'blur(0px)' }}
+                    exit={{ opacity: 0, filter: 'blur(6px)', position: 'absolute', inset: 0 }}
                     transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                    className="min-h-full w-full"
+                    className="relative min-h-full w-full"
+                    onDragEnter={(event) => {
+                      if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
+                      event.preventDefault();
+                      classicGridDragDepthRef.current += 1;
+                      setIsClassicGridDragActive(true);
+                    }}
+                    onDragOver={(event) => {
+                      if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = 'copy';
+                    }}
+                    onDragLeave={(event) => {
+                      if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
+                      event.preventDefault();
+                      classicGridDragDepthRef.current = Math.max(0, classicGridDragDepthRef.current - 1);
+                      if (classicGridDragDepthRef.current === 0) {
+                        setIsClassicGridDragActive(false);
+                      }
+                    }}
+                    onDrop={(event) => {
+                      if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
+                      event.preventDefault();
+                      classicGridDragDepthRef.current = 0;
+                      setIsClassicGridDragActive(false);
+                      const files = Array.from(event.dataTransfer.files).filter((f) => f.type.startsWith('image/'));
+                      if (files.length === 0) return;
+                      const newImages = files.map((file) => ({
+                        id: crypto.randomUUID(),
+                        fileUrl: URL.createObjectURL(file),
+                        fileName: file.name,
+                        createdAt: new Date().toISOString(),
+                        provider: null as string | null,
+                        modelId: null as string | null,
+                        modelLabel: 'Imported',
+                      }));
+                      setGeneratedImages((current) => [...newImages, ...current]);
+                    }}
                   >
+                    {isClassicGridDragActive ? (
+                      <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-[var(--accent)]/10 backdrop-blur-[2px]">
+                        <div className="flex flex-col items-center gap-3 rounded-[28px] border-2 border-dashed border-[var(--accent)] bg-[var(--surface)]/90 px-10 py-8 shadow-xl">
+                          <ImagePlus className="size-8 text-[var(--accent)]" />
+                          <span className="text-[16px] font-medium text-[var(--foreground)]">Solte para adicionar ao painel</span>
+                        </div>
+                      </div>
+                    ) : null}
                     <GeneratedImageGrid
                       images={generatedImages}
                       className="min-h-full w-full"
@@ -6104,9 +6248,9 @@ export function App() {
                 {isScenesWorkspace ? (
                   <motion.section
                     key="scenes-workspace-panel"
-                    initial={{ opacity: 0, x: 10, filter: 'blur(6px)' }}
-                    animate={{ opacity: 1, x: 0, filter: 'blur(0px)' }}
-                    exit={{ opacity: 0, x: -10, filter: 'blur(6px)' }}
+                    initial={{ opacity: 0, filter: 'blur(6px)' }}
+                    animate={{ opacity: 1, filter: 'blur(0px)' }}
+                    exit={{ opacity: 0, filter: 'blur(6px)', position: 'absolute', inset: 0 }}
                     transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
                     className="min-h-full w-full"
                   >
@@ -6133,9 +6277,9 @@ export function App() {
                 {isDirectorWorkspace ? (
                   <motion.section
                     key="director-workspace-panel"
-                    initial={{ opacity: 0, x: 10, filter: 'blur(6px)' }}
-                    animate={{ opacity: 1, x: 0, filter: 'blur(0px)' }}
-                    exit={{ opacity: 0, x: -10, filter: 'blur(6px)' }}
+                    initial={{ opacity: 0, filter: 'blur(6px)' }}
+                    animate={{ opacity: 1, filter: 'blur(0px)' }}
+                    exit={{ opacity: 0, filter: 'blur(6px)', position: 'absolute', inset: 0 }}
                     transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
                     className="h-full w-full"
                   >
@@ -6481,12 +6625,17 @@ export function App() {
         </div>
 
         <div className="relative min-h-0 flex-1 overflow-hidden">
-          <motion.div
-            className="flex h-full w-[520px]"
-            animate={{ x: sidebarView === 'projects' ? 0 : -260 }}
-            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-          >
-            <div className="min-h-0 w-[260px] overflow-y-auto px-2 pb-3 pt-3">
+          <AnimatePresence mode="wait" initial={false}>
+            {sidebarView === 'projects' ? (
+            <motion.div
+              key="sidebar-projects"
+              initial={{ opacity: 0, filter: 'blur(6px)' }}
+              animate={{ opacity: 1, filter: 'blur(0px)' }}
+              exit={{ opacity: 0, filter: 'blur(6px)' }}
+              transition={{ duration: 0.18, ease: 'easeInOut' }}
+              className="h-full w-full"
+            >
+            <div className="min-h-0 w-full overflow-y-auto px-2 pb-3 pt-3">
               <div className="flex items-center justify-between px-2">
                 <div className="text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
                   Projects
@@ -6598,8 +6747,17 @@ export function App() {
                 })}
               </div>
             </div>
-
-            <div className="min-h-0 w-[260px] overflow-y-auto px-2 pb-3 pt-3">
+            </motion.div>
+            ) : (
+            <motion.div
+              key="sidebar-settings"
+              initial={{ opacity: 0, filter: 'blur(6px)' }}
+              animate={{ opacity: 1, filter: 'blur(0px)' }}
+              exit={{ opacity: 0, filter: 'blur(6px)' }}
+              transition={{ duration: 0.18, ease: 'easeInOut' }}
+              className="h-full w-full"
+            >
+            <div className="min-h-0 w-full overflow-y-auto px-2 pb-3 pt-3">
               <div className="space-y-2 px-2">
                 <div className="px-3 text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
                   References
@@ -6703,7 +6861,9 @@ export function App() {
                 </div>
               </div>
             </div>
-          </motion.div>
+            </motion.div>
+            )}
+          </AnimatePresence>
         </div>
         <div className="p-3">
           <button
@@ -11196,6 +11356,610 @@ function ProvidersWorkspace({
   );
 }
 
+function SortableRefFolderGridCard({
+  folder,
+  onDoubleClick,
+  contextMenu,
+}: {
+  folder: { id: string; title: string; images: SavedReferenceImage[] };
+  onDoubleClick: () => void;
+  contextMenu: React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id });
+  const cover = folder.images[0];
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition: transition || 'transform 200ms cubic-bezier(0.22,1,0.36,1)',
+        zIndex: isDragging ? 30 : undefined,
+        position: 'relative',
+      }}
+      className={`group/sortable ${isDragging ? 'opacity-95 shadow-2xl scale-[1.02]' : ''}`}
+    >
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <button
+            type="button"
+            onDoubleClick={onDoubleClick}
+            className="group relative w-full overflow-hidden rounded-[22px] border border-[var(--border-soft)] bg-[var(--surface)] text-left transition-[border-color,box-shadow] duration-200 hover:border-[var(--border-strong)] hover:shadow-md"
+          >
+            <div className="relative aspect-[4/3] overflow-hidden bg-[var(--surface2)]">
+              {cover ? (
+                <img src={cover.previewUrl} alt={folder.title} className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:scale-[1.03]" draggable={false} />
+              ) : (
+                <div className="flex h-full items-center justify-center">
+                  <Folder className="size-10 text-[var(--muted-foreground)]/30" />
+                </div>
+              )}
+              {/* Drag handle — top-left, opposite the ellipsis */}
+              <div
+                {...attributes}
+                {...listeners}
+                className="absolute left-2 top-2 z-20 inline-flex h-7 w-7 cursor-grab items-center justify-center rounded-xl bg-black/50 text-white/80 opacity-0 backdrop-blur-sm transition-opacity duration-150 group-hover/sortable:opacity-100 active:cursor-grabbing"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <GripVertical className="size-3.5" />
+              </div>
+              <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-3 pb-3 pt-10">
+                <div className="flex items-end justify-between gap-2">
+                  <h2 className="line-clamp-1 text-[14px] font-semibold text-white">{folder.title}</h2>
+                  <span className="shrink-0 text-[12px] text-white/60">{folder.images.length} {folder.images.length === 1 ? 'imagem' : 'imagens'}</span>
+                </div>
+              </div>
+            </div>
+          </button>
+        </ContextMenuTrigger>
+        {contextMenu}
+      </ContextMenu>
+    </div>
+  );
+}
+
+function SortableRefFolderListRow({
+  folder,
+  onEdit,
+  onDeleteImage,
+  onReorderImages,
+  contextMenu,
+}: {
+  folder: { id: string; title: string; images: SavedReferenceImage[] };
+  onEdit: (imageId: string) => void;
+  onDeleteImage: (imageId: string) => void;
+  onReorderImages: (newIds: string[]) => void;
+  contextMenu: React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id });
+  const cover = folder.images[0];
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition: transition || 'transform 200ms cubic-bezier(0.22,1,0.36,1)',
+        zIndex: isDragging ? 30 : undefined,
+        position: 'relative',
+      }}
+      className={`group/sortable ${isDragging ? 'opacity-95 shadow-2xl scale-[1.01]' : ''}`}
+    >
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div className="group/card relative grid" style={{ gridTemplateColumns: '1fr 2.25fr', gap: '16px' }}>
+            <div className="relative overflow-hidden rounded-2xl bg-[var(--surface2)] border border-[var(--border-soft)]">
+              {cover ? (
+                <img src={cover.previewUrl} alt={folder.title} className="block w-full transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover/card:scale-[1.03]" draggable={false} />
+              ) : (
+                <div className="flex aspect-[4/3] items-center justify-center">
+                  <Folder className="size-8 text-[var(--muted-foreground)]/30" />
+                </div>
+              )}
+              {/* Drag handle — top-left */}
+              <div
+                {...attributes}
+                {...listeners}
+                className="absolute left-2 top-2 z-20 inline-flex h-7 w-7 cursor-grab items-center justify-center rounded-xl bg-black/50 text-white/80 opacity-0 backdrop-blur-sm transition-opacity duration-150 group-hover/sortable:opacity-100 active:cursor-grabbing"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <GripVertical className="size-3.5" />
+              </div>
+              <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-3 pb-3 pt-10">
+                <div className="flex items-end justify-between gap-2">
+                  <h2 className="line-clamp-1 text-[14px] font-semibold text-white">{folder.title}</h2>
+                  <span className="shrink-0 text-[12px] text-white/60">{folder.images.length} {folder.images.length === 1 ? 'imagem' : 'imagens'}</span>
+                </div>
+              </div>
+            </div>
+            <div className="overflow-hidden rounded-2xl bg-[rgba(7,7,7,0.72)] border border-[var(--border-soft)]">
+              <FolderImageCarousel
+                images={folder.images}
+                onEdit={onEdit}
+                onDelete={onDeleteImage}
+                onReorder={onReorderImages}
+              />
+            </div>
+          </div>
+        </ContextMenuTrigger>
+        {contextMenu}
+      </ContextMenu>
+    </div>
+  );
+}
+
+function SortableRefImageGridCard({
+  image,
+  isSelected,
+  isSoloFolder,
+  onClick,
+  onDoubleClick,
+  onDelete,
+  contextMenu,
+}: {
+  image: SavedReferenceImage;
+  isSelected: boolean;
+  isSoloFolder: boolean;
+  onClick: () => void;
+  onDoubleClick: () => void;
+  onDelete: () => void;
+  contextMenu: React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: image.id });
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition: transition || 'transform 200ms cubic-bezier(0.22,1,0.36,1)',
+        zIndex: isDragging ? 30 : undefined,
+        position: 'relative',
+      }}
+      className={`group/sortable ${isDragging ? 'opacity-95 shadow-2xl scale-[1.02]' : ''}`}
+    >
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label={image.title || deriveReferenceAttachmentTitle(image.name)}
+            data-selected={isSelected ? 'true' : 'false'}
+            onClick={onClick}
+            onDoubleClick={onDoubleClick}
+            style={{ aspectRatio: '1 / 1' }}
+            className={[
+              'group relative w-full overflow-hidden rounded-[20px] border bg-[var(--surface2)] text-left outline-none',
+              'transition-[border-color,box-shadow,transform,opacity] duration-150',
+              isSelected
+                ? 'border-[var(--accent)] ring-1 ring-[var(--accent)] opacity-90'
+                : 'border-[var(--border-soft)] hover:border-[var(--border-strong)]',
+            ].join(' ')}
+          >
+            <img
+              src={image.previewUrl}
+              alt={image.title}
+              className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:scale-[1.03]"
+              draggable={false}
+            />
+            {/* Drag handle — top-left */}
+            <div
+              {...attributes}
+              {...listeners}
+              className="absolute left-2 top-2 z-20 inline-flex h-7 w-7 cursor-grab items-center justify-center rounded-xl bg-black/50 text-white/80 opacity-0 backdrop-blur-sm transition-opacity duration-150 group-hover/sortable:opacity-100 active:cursor-grabbing"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <GripVertical className="size-3.5" />
+            </div>
+            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2.5 pb-2.5 pt-8 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+              <span className="block truncate text-[11px] font-medium text-white/90">
+                {image.title || deriveReferenceAttachmentTitle(image.name)}
+              </span>
+            </div>
+            {isSelected ? (
+              <span className="absolute inset-0 rounded-[19px] ring-2 ring-[var(--accent)] ring-inset pointer-events-none" />
+            ) : null}
+            {!isSoloFolder ? (
+              <div className="absolute right-2 top-2 z-20 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+                <button
+                  type="button"
+                  aria-label={`Remover ${image.title}`}
+                  onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/60 text-white backdrop-blur-sm transition-colors hover:bg-[rgba(190,58,58,0.7)]"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            ) : null}
+          </button>
+        </ContextMenuTrigger>
+        {contextMenu}
+      </ContextMenu>
+    </div>
+  );
+}
+
+function SortableRefImageListRow({
+  image,
+  isSelected,
+  isSoloFolder,
+  onClick,
+  onDoubleClick,
+  onDownload,
+  onDelete,
+  contextMenu,
+}: {
+  image: SavedReferenceImage;
+  isSelected: boolean;
+  isSoloFolder: boolean;
+  onClick: () => void;
+  onDoubleClick: () => void;
+  onDownload: () => void;
+  onDelete: () => void;
+  contextMenu: React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: image.id });
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition: transition || 'transform 200ms cubic-bezier(0.22,1,0.36,1)',
+        zIndex: isDragging ? 30 : undefined,
+        position: 'relative',
+      }}
+      className={`group/sortable ${isDragging ? 'opacity-95 shadow-2xl scale-[1.01]' : ''}`}
+    >
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div
+            className="group/card relative grid cursor-pointer"
+            style={{ gridTemplateColumns: '1fr 2.25fr', gap: '16px' }}
+            onClick={onClick}
+            onDoubleClick={onDoubleClick}
+          >
+            <div className={[
+              'relative overflow-hidden rounded-2xl bg-[var(--surface2)] border transition-colors',
+              isSelected ? 'border-[var(--accent)]' : 'border-[var(--border-soft)]',
+            ].join(' ')}>
+              <img
+                src={image.previewUrl}
+                alt={image.title}
+                className="block w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover/card:scale-[1.02]"
+                draggable={false}
+              />
+              {/* Drag handle — top-left, opposite the action buttons (bottom-right) */}
+              <div
+                {...attributes}
+                {...listeners}
+                className="absolute left-2 top-2 z-20 inline-flex h-7 w-7 cursor-grab items-center justify-center rounded-xl bg-black/50 text-white/80 opacity-0 backdrop-blur-sm transition-opacity duration-150 group-hover/sortable:opacity-100 active:cursor-grabbing"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <GripVertical className="size-3.5" />
+              </div>
+              {isSelected ? (
+                <span className="absolute inset-0 rounded-2xl ring-2 ring-[var(--accent)] ring-inset pointer-events-none" />
+              ) : null}
+            </div>
+            <div className="relative flex flex-col gap-2 bg-[rgba(7,7,7,0.72)] rounded-2xl p-4 pb-12 border border-[var(--border-soft)]">
+              <p className="text-[13px] font-semibold text-[var(--foreground)] leading-snug">
+                {image.title || deriveReferenceAttachmentTitle(image.name)}
+              </p>
+              {image.description ? (
+                <p className="text-[12px] text-[var(--muted-foreground)] leading-[1.5] line-clamp-6">{image.description}</p>
+              ) : (
+                <p className="text-[12px] text-[var(--muted-foreground)] italic opacity-40">Sem descrição</p>
+              )}
+              <div className="absolute bottom-3 right-3 flex items-center gap-1.5 opacity-0 group-hover/card:opacity-100 transition-opacity duration-200">
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onDownload(); }}
+                  className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-soft)] bg-[rgba(15,16,16,0.88)] px-2 py-1 text-[11px] text-[var(--muted-foreground)] backdrop-blur-sm transition-colors hover:border-[var(--border-strong)] hover:text-[var(--foreground)]"
+                >
+                  Download
+                </button>
+                {!isSoloFolder ? (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                    className="inline-flex items-center gap-1 rounded-lg border border-[rgba(229,112,112,0.3)] bg-[rgba(15,16,16,0.88)] px-2 py-1 text-[11px] text-[rgb(229,112,112)] backdrop-blur-sm transition-colors hover:border-[rgba(229,112,112,0.6)] hover:text-[rgb(245,178,178)]"
+                  >
+                    Delete
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </ContextMenuTrigger>
+        {contextMenu}
+      </ContextMenu>
+    </div>
+  );
+}
+
+function SimpleImageEditDialog({
+  open,
+  title: initialTitle,
+  description: initialDescription,
+  onOpenChange,
+  onSave,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  onOpenChange: (open: boolean) => void;
+  onSave: (data: { title: string; description: string }) => Promise<void>;
+}) {
+  const [title, setTitle] = useState(initialTitle);
+  const [description, setDescription] = useState(initialDescription);
+  const [saving, setSaving] = useState(false);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-sm border-white/8 bg-[rgba(15,16,16,0.96)] p-6 shadow-[0_28px_80px_rgba(0,0,0,0.48)]">
+        <DialogHeader>
+          <DialogTitle className="text-[15px] font-semibold text-[var(--foreground)]">Edit image</DialogTitle>
+          <DialogDescription className="sr-only">Edit image name and description.</DialogDescription>
+        </DialogHeader>
+        <div className="mt-4 flex flex-col gap-4">
+          <label className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">Name</span>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className="h-10 rounded-[14px] border border-[var(--border-soft)] bg-[rgba(7,7,7,0.72)] px-3 text-[13px] text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[color-mix(in_srgb,var(--accent)_45%,white_6%)]"
+              placeholder="Image name…"
+            />
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">When to use</span>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={4}
+              placeholder="Angle, detail, pose, or situation…"
+              className="resize-none rounded-[14px] border border-[var(--border-soft)] bg-[rgba(7,7,7,0.72)] px-3 py-3 text-[13px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[color-mix(in_srgb,var(--accent)_45%,white_6%)]"
+            />
+          </label>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => onOpenChange(false)}
+              className="h-9 rounded-full border border-[var(--border-soft)] px-4 text-[13px] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={saving}
+              onClick={async () => {
+                setSaving(true);
+                try { await onSave({ title, description }); } finally { setSaving(false); }
+              }}
+              className="h-9 rounded-full bg-[var(--accent)] px-4 text-[13px] font-medium text-black transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+async function copyImageFromUrl(url: string) {
+  const response = await fetch(url);
+  const blob = await response.blob();
+  await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+}
+
+async function downloadImageFromUrl(url: string, filename: string) {
+  const response = await fetch(url);
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+function SortableCarouselImage({
+  image,
+  onEdit,
+  onDelete,
+}: {
+  image: { id: string; previewUrl: string; title: string };
+  onEdit?: (id: string) => void;
+  onDelete?: (id: string) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: image.id });
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition: transition || 'transform 200ms cubic-bezier(0.22,1,0.36,1)',
+        flex: '0 0 calc(28% - 4px)',
+        aspectRatio: '1 / 1',
+        padding: '8px',
+        zIndex: isDragging ? 30 : undefined,
+      }}
+      className="group/img relative shrink-0"
+    >
+      <div className={`relative h-full w-full overflow-hidden rounded-xl bg-[var(--surface2)] transition-shadow duration-150 ${isDragging ? 'shadow-2xl ring-2 ring-[var(--accent)]' : ''}`}>
+        <img
+          src={image.previewUrl}
+          alt={image.title}
+          className="h-full w-full object-cover"
+          draggable={false}
+        />
+        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-2 pt-6">
+          <span className="block truncate text-[10px] font-medium text-white/90">
+            {image.title || image.previewUrl.split('/').pop()}
+          </span>
+        </div>
+        {/* Drag handle — top-left, opposite ellipsis column (top-right) */}
+        <div
+          {...attributes}
+          {...listeners}
+          data-drag-handle
+          className="absolute left-1.5 top-1.5 z-20 inline-flex h-6 w-6 cursor-grab items-center justify-center rounded-lg bg-black/50 text-white/80 opacity-0 backdrop-blur-sm transition-opacity duration-150 group-hover/img:opacity-100 active:cursor-grabbing"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <GripVertical className="size-3" />
+        </div>
+        <div className="absolute top-1.5 right-1.5 z-10 flex flex-col items-center gap-1 opacity-0 group-hover/img:opacity-100 transition-opacity duration-150">
+          <Popover>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                onClick={(e) => e.stopPropagation()}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/15 bg-black/50 text-white/70 backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white"
+              >
+                <MoreHorizontal className="size-3.5" />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-32 p-1" onClick={(e) => e.stopPropagation()}>
+              {onEdit ? (
+                <button type="button" onClick={() => onEdit(image.id)} className="flex w-full items-center rounded-md px-2 py-1.5 text-[13px] text-[var(--foreground)] transition-colors hover:bg-white/6">Edit</button>
+              ) : null}
+              {onDelete ? (
+                <button type="button" onClick={() => { sounds.select(); onDelete(image.id); }} className="flex w-full items-center rounded-md px-2 py-1.5 text-[13px] text-[rgb(229,112,112)] transition-colors hover:bg-[rgba(190,58,58,0.18)]">Delete</button>
+              ) : null}
+            </PopoverContent>
+          </Popover>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); sounds.select(); void copyImageFromUrl(image.previewUrl); }}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/15 bg-black/50 text-white/70 backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white"
+          >
+            <Copy className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); sounds.select(); void downloadImageFromUrl(image.previewUrl, image.title || 'image'); }}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/15 bg-black/50 text-white/70 backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white"
+          >
+            <Download className="size-3.5" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FolderImageCarousel({
+  images,
+  onEdit,
+  onDelete,
+  onReorder,
+}: {
+  images: { id: string; previewUrl: string; title: string }[];
+  onEdit?: (imageId: string) => void;
+  onDelete?: (imageId: string) => void;
+  onReorder?: (newIds: string[]) => void;
+}) {
+  const orderedIds = images.map((img) => img.id);
+  // Embla powers free-scroll browsing; watchDrag bails out when the pointer
+  // starts on a drag handle so dnd-kit owns reordering and Embla owns scrolling.
+  const [emblaRef, emblaApi] = useEmblaCarousel({
+    dragFree: true,
+    align: 'start',
+    containScroll: 'trimSnaps',
+    watchDrag: (_, event) => {
+      const target = event.target as HTMLElement | null;
+      return !(target && target.closest('[data-drag-handle]'));
+    },
+  });
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 6 } }),
+  );
+
+  // Merge Embla's ref with our own so we can read the viewport rect for edge
+  // auto-scroll during a drag.
+  const setViewport = useCallback((node: HTMLDivElement | null) => {
+    viewportRef.current = node;
+    emblaRef(node);
+  }, [emblaRef]);
+
+  const stopAutoScroll = useCallback(() => {
+    if (autoScrollRef.current != null) {
+      clearInterval(autoScrollRef.current);
+      autoScrollRef.current = null;
+    }
+  }, []);
+
+  const startAutoScroll = useCallback((direction: 'prev' | 'next') => {
+    if (autoScrollRef.current != null) return;
+    autoScrollRef.current = setInterval(() => {
+      if (!emblaApi) return;
+      if (direction === 'next') emblaApi.scrollNext();
+      else emblaApi.scrollPrev();
+    }, 180);
+  }, [emblaApi]);
+
+  useEffect(() => () => stopAutoScroll(), [stopAutoScroll]);
+
+  const handleDragMove = useCallback((event: DragMoveEvent) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const rect = viewport.getBoundingClientRect();
+    const activator = event.activatorEvent as MouseEvent | TouchEvent;
+    const startX = 'clientX' in activator
+      ? activator.clientX
+      : activator.touches?.[0]?.clientX ?? 0;
+    const pointerX = startX + event.delta.x;
+    const edge = 56;
+    if (pointerX < rect.left + edge) startAutoScroll('prev');
+    else if (pointerX > rect.right - edge) startAutoScroll('next');
+    else stopAutoScroll();
+  }, [startAutoScroll, stopAutoScroll]);
+
+  if (images.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Folder className="size-8 text-[var(--muted-foreground)]/20" />
+      </div>
+    );
+  }
+
+  return (
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
+      onDragMove={handleDragMove}
+      onDragEnd={(e) => {
+        stopAutoScroll();
+        const { active, over } = e;
+        if (!over || active.id === over.id) return;
+        const from = orderedIds.indexOf(String(active.id));
+        const to = orderedIds.indexOf(String(over.id));
+        if (from === -1 || to === -1) return;
+        onReorder?.(arrayMove(orderedIds, from, to));
+      }}
+      onDragCancel={stopAutoScroll}
+    >
+      <SortableContext items={orderedIds} strategy={horizontalListSortingStrategy}>
+        <div className="overflow-hidden h-full" ref={setViewport}>
+          <div className="flex h-full gap-1.5 p-1.5">
+            {images.map((image) => (
+              <SortableCarouselImage
+                key={image.id}
+                image={image}
+                onEdit={onEdit}
+                onDelete={onDelete}
+              />
+            ))}
+          </div>
+        </div>
+      </SortableContext>
+    </DndContext>
+  );
+}
+
 function ReferencesWorkspace({
   folders: referenceFolders,
   references,
@@ -11211,6 +11975,7 @@ function ReferencesWorkspace({
   onRenameFolder,
   onRenameImage,
   onGroupImages,
+  onMoveImages,
   onUpdateReferenceMetadata,
   onDeleteImageFromFolder,
   onDeleteReference,
@@ -11235,6 +12000,7 @@ function ReferencesWorkspace({
   onRenameFolder: (args: { folderId: string; category: ReferenceLibraryRoute; newTitle: string }) => Promise<void>;
   onRenameImage: (args: { imageId: string; folderId: string; category: ReferenceLibraryRoute; newTitle: string }) => Promise<void>;
   onGroupImages: (args: { imageIds: string[]; category: ReferenceLibraryRoute; newFolderTitle: string; sourceFolderId: string }) => Promise<void>;
+  onMoveImages: (args: { imageIds: string[]; category: ReferenceLibraryRoute; sourceFolderId: string; targetFolderId: string; targetFolderTitle: string }) => Promise<void>;
   onUpdateReferenceMetadata: (args: { folderId: string; category: ReferenceLibraryRoute; draft: ReferenceMetadataDraft }) => Promise<void>;
   onDeleteImageFromFolder: (args: { imageId: string; folderId: string; category: ReferenceLibraryRoute; folderTitle: string }) => Promise<void>;
   onDeleteReference: (reference: SavedReferenceImage) => void;
@@ -11252,7 +12018,16 @@ function ReferencesWorkspace({
   const [renameFolderTarget, setRenameFolderTarget] = useState<{ id: string; title: string } | null>(null);
   const [metadataTarget, setMetadataTarget] = useState<{ folderId: string; imageId: string | null } | null>(null);
   const [isGroupDialogOpen, setIsGroupDialogOpen] = useState(false);
+  const [isMovePopoverOpen, setIsMovePopoverOpen] = useState(false);
+  const [imageEditTarget, setImageEditTarget] = useState<{ imageId: string; folderId: string; title: string; description: string } | null>(null);
   const [animatedTitleText, setAnimatedTitleText] = useState(referenceRouteHeaderLabels[route]);
+  const [refViewMode, setRefViewMode] = useState<'grid' | 'list'>('grid');
+  const [refGridZoom, setRefGridZoom] = useState(50);
+  const [orderVersion, setOrderVersion] = useState(0);
+  const refDndSensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 6 } }),
+  );
   const hasInitializedRouteRef = useRef(false);
   const dragDepthRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -11402,7 +12177,9 @@ function ReferencesWorkspace({
     setRenameImageTarget(null);
     setRenameFolderTarget(null);
     setIsGroupDialogOpen(false);
+    setIsMovePopoverOpen(false);
     setAnimatedTitleText(referenceRouteHeaderLabels[route]);
+    setRefViewMode('grid');
   }, [route]);
 
   useEffect(() => {
@@ -11495,6 +12272,20 @@ function ReferencesWorkspace({
 
   const folderImages = displayFolder?.images ?? [];
   const childFolders = displayFolder ? folders.filter((entry) => entry.parentFolderId === displayFolder.id) : [];
+
+  // Saved order (localStorage) wins, alphabetical is the default. orderVersion
+  // forces a recompute after a drag persists a new order.
+  const sortedChildFolders = useMemo(() => {
+    void orderVersion;
+    if (!displayFolder) return childFolders;
+    return applyOrder(childFolders, getFolderOrder(displayFolder.id), (f) => f.id, (f) => f.title);
+  }, [childFolders, displayFolder, orderVersion]);
+
+  const sortedFolderImages = useMemo(() => {
+    void orderVersion;
+    if (!displayFolder) return folderImages;
+    return applyOrder(folderImages, getImageOrder(displayFolder.id), (img) => img.id, (img) => img.title || img.name);
+  }, [folderImages, displayFolder, orderVersion]);
   const isSoloFolder = displayFolder?.isSolo ?? false;
   const representativeRef = folderImages[0];
   const selectedImages = folderImages.filter((img) => selectedImageIds.includes(img.id));
@@ -11517,6 +12308,28 @@ function ReferencesWorkspace({
 
   function openMetadataDialog(folderId: string, imageId: string | null = null) {
     setMetadataTarget({ folderId, imageId });
+  }
+
+  function handleRefFolderDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id || !displayFolder) return;
+    const ids = sortedChildFolders.map((f) => f.id);
+    const from = ids.indexOf(String(active.id));
+    const to = ids.indexOf(String(over.id));
+    if (from === -1 || to === -1) return;
+    setFolderOrder(displayFolder.id, arrayMove(ids, from, to));
+    setOrderVersion((v) => v + 1);
+  }
+
+  function handleRefImageDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id || !displayFolder) return;
+    const ids = sortedFolderImages.map((img) => img.id);
+    const from = ids.indexOf(String(active.id));
+    const to = ids.indexOf(String(over.id));
+    if (from === -1 || to === -1) return;
+    setImageOrder(displayFolder.id, arrayMove(ids, from, to));
+    setOrderVersion((v) => v + 1);
   }
 
   function renderFolderCard(folder: {
@@ -11642,9 +12455,36 @@ function ReferencesWorkspace({
           await onGroupImages({ imageIds: ids, category: route, newFolderTitle: name, sourceFolderId: activeFolderId });
         }}
       />
+      {imageEditTarget ? (
+        <SimpleImageEditDialog
+          open
+          title={imageEditTarget.title}
+          description={imageEditTarget.description}
+          onOpenChange={(open) => { if (!open) setImageEditTarget(null); }}
+          onSave={async ({ title, description }) => {
+            const folder = folders.find((f) => f.id === imageEditTarget.folderId);
+            if (!folder) return;
+            await onUpdateReferenceMetadata({
+              folderId: imageEditTarget.folderId,
+              category: route,
+              draft: {
+                title: folder.title,
+                description: folder.description,
+                images: folder.images.map((img) =>
+                  img.id === imageEditTarget.imageId
+                    ? { id: img.id, name: img.name, title, description, previewUrl: img.previewUrl }
+                    : { id: img.id, name: img.name, title: img.title, description: img.description ?? '', previewUrl: img.previewUrl }
+                ),
+              },
+            });
+            setImageEditTarget(null);
+          }}
+        />
+      ) : null}
       {metadataFolder && metadataDraft ? (
         <ReferenceMetadataDialog
           open
+          folderId={metadataFolder.id}
           initialDraft={metadataDraft}
           initialImageId={metadataTarget?.imageId ?? null}
           onOpenChange={(open) => {
@@ -11657,12 +12497,21 @@ function ReferencesWorkspace({
               draft,
             })
           }
+          onDeleteImage={(imageId) => {
+            if (!metadataFolder) return;
+            void onDeleteImageFromFolder({
+              imageId,
+              folderId: metadataFolder.id,
+              category: route,
+              folderTitle: metadataFolder.title,
+            });
+          }}
         />
       ) : null}
 
       <header
         className={[
-          'fixed top-[8px] z-40',
+          'fixed top-[8px] z-40 flex items-center gap-2',
           'transition-[left] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
           isSidebarCollapsed ? 'left-3' : 'left-[272px]',
         ].join(' ')}
@@ -11750,6 +12599,45 @@ function ReferencesWorkspace({
             </h1>
           </motion.div>
         </AnimatePresence>
+        <div className="flex items-center gap-2">
+          <div className="relative inline-grid h-8 grid-cols-2 items-center rounded-full bg-[rgba(15,16,16,0.88)] p-1 shadow-[0_4px_16px_rgba(0,0,0,0.3)] backdrop-blur-2xl">
+            <motion.span
+              aria-hidden="true"
+              initial={false}
+              animate={{ x: refViewMode === 'grid' ? '0%' : '100%' }}
+              transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+              className="absolute bottom-1 left-1 top-1 w-[calc((100%_-_8px)/2)] rounded-full bg-[var(--border-soft)]"
+            />
+            {(['grid', 'list'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={refViewMode === mode}
+                onClick={() => setRefViewMode(mode)}
+                className={[
+                  'relative z-10 inline-flex h-6 min-w-[48px] items-center justify-center rounded-full px-3 text-[12px] font-medium transition-colors duration-200 capitalize',
+                  refViewMode === mode ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
+                ].join(' ')}
+              >
+                {mode === 'grid' ? 'Grid' : 'List'}
+              </button>
+            ))}
+          </div>
+          {refViewMode === 'grid' ? (
+            <div className="flex items-center gap-2 rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.88)] px-3 h-8 shadow-[0_4px_16px_rgba(0,0,0,0.3)] backdrop-blur-2xl">
+              <span className="text-[10px] text-[var(--muted-foreground)]">{refGridZoom}%</span>
+              <input
+                type="range"
+                min={20}
+                max={100}
+                value={refGridZoom}
+                onChange={(e) => setRefGridZoom(Number(e.target.value))}
+                className="w-20 h-1 cursor-pointer accent-[var(--accent)]"
+                aria-label="Image size"
+              />
+            </div>
+          ) : null}
+        </div>
       </header>
 
       <AnimatePresence initial={false}>
@@ -11810,23 +12698,40 @@ function ReferencesWorkspace({
               <div className="mt-2 space-y-1">
                 {topLevelFolders.map((topLevelFolder) => {
                   const isActive = topLevelFolder.id === activeSidebarFolderId;
+                  const cover = topLevelFolder.images[0];
                   return (
-                    <button
-                      key={topLevelFolder.id}
-                      type="button"
-                      onClick={() => {
-                        setOpenFolderId(topLevelFolder.id);
-                        setIsRenamingTitle(false);
-                      }}
-                      className={[
-                        'flex min-h-10 w-full items-center rounded-[12px] px-3 text-left text-[13px] transition-colors',
-                        isActive
-                          ? 'bg-[var(--surface2)] text-[var(--foreground)]'
-                          : 'text-[var(--muted-foreground)] hover:bg-white/6 hover:text-[var(--foreground)]',
-                      ].join(' ')}
-                    >
-                      <span className="truncate">{topLevelFolder.title}</span>
-                    </button>
+                    <ContextMenu key={topLevelFolder.id}>
+                      <ContextMenuTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOpenFolderId(topLevelFolder.id);
+                            setIsRenamingTitle(false);
+                          }}
+                          className={[
+                            'flex min-h-10 w-full items-center rounded-[12px] px-3 text-left text-[13px] transition-colors',
+                            isActive
+                              ? 'bg-[var(--surface2)] text-[var(--foreground)]'
+                              : 'text-[var(--muted-foreground)] hover:bg-white/6 hover:text-[var(--foreground)]',
+                          ].join(' ')}
+                        >
+                          <span className="truncate">{topLevelFolder.title}</span>
+                        </button>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent>
+                        <ContextMenuItem onClick={() => setRenameFolderTarget({ id: topLevelFolder.id, title: topLevelFolder.title })}>Renomear...</ContextMenuItem>
+                        {cover ? <ContextMenuItem onClick={() => onExportReference(cover)}>Duplicar...</ContextMenuItem> : null}
+                        {cover ? <ContextMenuSeparator /> : null}
+                        {cover ? (
+                          <ContextMenuItem
+                            className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
+                            onClick={() => onDeleteReference(cover)}
+                          >
+                            Excluir pasta
+                          </ContextMenuItem>
+                        ) : null}
+                      </ContextMenuContent>
+                    </ContextMenu>
                   );
                 })}
                 {topLevelFolders.length === 0 ? (
@@ -11898,130 +12803,224 @@ function ReferencesWorkspace({
         <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-8 pt-6">
           {displayFolder ? (
             <>
-              {childFolders.length > 0 ? (
-                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 xl:grid-cols-3" data-testid="reference-subfolder-grid">
-                  {childFolders.map((childFolder) => renderFolderCard(childFolder))}
-                </div>
-              ) : null}
-
-              {folderImages.length === 0 && childFolders.length === 0 ? (
-                <div
-                  onClick={() => !isSoloFolder && fileInputRef.current?.click()}
-                  className={[
-                    'flex min-h-[420px] cursor-pointer flex-col items-center justify-center rounded-[28px] border-2 border-dashed',
-                    'transition-[border-color,background-color] duration-200',
-                    isDragActive
-                      ? 'border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_8%,var(--surface))]'
-                      : 'border-[var(--border-soft)] bg-[var(--surface)] hover:border-[var(--border-strong)]',
-                  ].join(' ')}
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.div
+                  key={`ref-view-${refViewMode}`}
+                  initial={{ opacity: 0, filter: 'blur(6px)' }}
+                  animate={{ opacity: 1, filter: 'blur(0px)' }}
+                  exit={{ opacity: 0, filter: 'blur(6px)', position: 'absolute', inset: 0 }}
+                  transition={{ duration: 0.18, ease: 'easeInOut' }}
+                  className="flex flex-col gap-8"
                 >
-                  <FolderPlus className="mb-3 size-10 text-[var(--muted-foreground)]/50" />
-                  <p className="text-[15px] font-medium text-[var(--foreground)]">Pasta vazia</p>
-                  <p className="mt-1 text-[13px] text-[var(--muted-foreground)]">
-                    {isSoloFolder ? 'Esta referência não suporta imagens adicionais.' : 'Arraste imagens ou clique para adicionar.'}
-                  </p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-2 gap-5 md:grid-cols-3 xl:grid-cols-4">
-                  {folderImages.map((image) => {
-                    const isSelected = selectedImageIds.includes(image.id);
-                    return (
-                      <ContextMenu key={image.id}>
-                        <ContextMenuTrigger asChild>
-                          <div
-                            role="button"
-                            aria-label={image.title || deriveReferenceAttachmentTitle(image.name)}
-                            tabIndex={0}
-                            data-selected={isSelected ? 'true' : 'false'}
-                            onClick={() => toggleImageSelection(image.id)}
-                            onDoubleClick={() => openMetadataDialog(displayFolder.id, image.id)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault();
-                                toggleImageSelection(image.id);
-                              }
-                            }}
-                            className={[
-                              'group relative cursor-pointer overflow-hidden rounded-[20px] border bg-[var(--surface2)] outline-none',
-                              'transition-[border-color,box-shadow,transform] duration-200',
-                              isSelected
-                                ? 'border-[var(--accent)] shadow-[0_0_0_1px_rgba(65,130,230,0.5)] scale-[0.98]'
-                                : 'border-[var(--border-soft)] hover:border-[var(--border-strong)]',
-                            ].join(' ')}
-                            style={{ aspectRatio: '1 / 1' }}
-                          >
-                            <img
-                              src={image.previewUrl}
-                              alt={image.title}
-                              className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:scale-[1.04]"
-                              draggable={false}
-                            />
-                            <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-3 pb-3 pt-10 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-                              <div className="line-clamp-1 text-[12px] font-medium text-white/90">
-                                {image.title || deriveReferenceAttachmentTitle(image.name)}
-                              </div>
-                            </div>
-                            {!isSoloFolder ? (
-                              <div className="absolute right-2 top-2 z-20 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-                                <button
-                                  type="button"
-                                  aria-label={`Remover ${image.title}`}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setSelectedImageIds((current) => current.filter((id) => id !== image.id));
-                                    void onDeleteImageFromFolder({
-                                      imageId: image.id,
-                                      folderId: displayFolder.id,
-                                      category: route,
-                                      folderTitle: displayFolder.title,
-                                    });
+                  {/* Subfolders */}
+                  {childFolders.length > 0 ? (
+                    refViewMode === 'grid' ? (
+                      <DndContext
+                        sensors={refDndSensors}
+                        collisionDetection={closestCenter}
+                        onDragEnd={handleRefFolderDragEnd}
+                      >
+                        <SortableContext items={sortedChildFolders.map((f) => f.id)} strategy={rectSortingStrategy}>
+                          <div className="grid gap-6" data-testid="reference-subfolder-grid" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${Math.round(200 + refGridZoom * 3)}px, 1fr))` }}>
+                            {sortedChildFolders.map((childFolder) => {
+                              const cover = childFolder.images[0];
+                              return (
+                                <SortableRefFolderGridCard
+                                  key={childFolder.id}
+                                  folder={childFolder}
+                                  onDoubleClick={() => openMetadataDialog(childFolder.id)}
+                                  contextMenu={
+                                    <ContextMenuContent>
+                                      <ContextMenuItem onClick={() => openMetadataDialog(childFolder.id)}>Editar metadata...</ContextMenuItem>
+                                      <ContextMenuItem onClick={() => setRenameFolderTarget({ id: childFolder.id, title: childFolder.title })}>Renomear...</ContextMenuItem>
+                                      {cover ? <ContextMenuItem onClick={() => onExportReference(cover)}>Exportar pasta...</ContextMenuItem> : null}
+                                      {cover ? <ContextMenuSeparator /> : null}
+                                      {cover ? <ContextMenuItem className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]" onClick={() => onDeleteReference(cover)}>Excluir pasta</ContextMenuItem> : null}
+                                    </ContextMenuContent>
+                                  }
+                                />
+                              );
+                            })}
+                          </div>
+                        </SortableContext>
+                      </DndContext>
+                    ) : (
+                      <DndContext
+                        sensors={refDndSensors}
+                        collisionDetection={closestCenter}
+                        onDragEnd={handleRefFolderDragEnd}
+                      >
+                        <SortableContext items={sortedChildFolders.map((f) => f.id)} strategy={verticalListSortingStrategy}>
+                          <div className="flex flex-col gap-3" style={{ alignItems: 'stretch' }}>
+                            {sortedChildFolders.map((childFolder) => {
+                              const orderedImages = applyOrder(childFolder.images, getImageOrder(childFolder.id), (img) => img.id, (img) => img.title || img.name);
+                              const cover = orderedImages[0];
+                              return (
+                                <SortableRefFolderListRow
+                                  key={childFolder.id}
+                                  folder={{ ...childFolder, images: orderedImages }}
+                                  onEdit={(imageId) => {
+                                    const img = childFolder.images.find((i) => i.id === imageId);
+                                    if (img) setImageEditTarget({ imageId, folderId: childFolder.id, title: img.title, description: img.description ?? '' });
                                   }}
-                                  className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-black/60 text-white backdrop-blur-sm transition-colors hover:bg-[rgba(190,58,58,0.7)]"
-                                >
-                                  <X className="size-3.5" />
-                                </button>
-                              </div>
+                                  onDeleteImage={(imageId) => {
+                                    void onDeleteImageFromFolder({ imageId, folderId: childFolder.id, category: route, folderTitle: childFolder.title });
+                                  }}
+                                  onReorderImages={(newIds) => {
+                                    setImageOrder(childFolder.id, newIds);
+                                    setOrderVersion((v) => v + 1);
+                                  }}
+                                  contextMenu={
+                                    <ContextMenuContent>
+                                      <ContextMenuItem onClick={() => openMetadataDialog(childFolder.id)}>Editar metadata...</ContextMenuItem>
+                                      <ContextMenuItem onClick={() => setRenameFolderTarget({ id: childFolder.id, title: childFolder.title })}>Renomear...</ContextMenuItem>
+                                      {cover ? <ContextMenuItem onClick={() => onExportReference(cover)}>Exportar pasta...</ContextMenuItem> : null}
+                                      {cover ? <ContextMenuSeparator /> : null}
+                                      {cover ? <ContextMenuItem className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]" onClick={() => onDeleteReference(cover)}>Excluir pasta</ContextMenuItem> : null}
+                                    </ContextMenuContent>
+                                  }
+                                />
+                              );
+                            })}
+                          </div>
+                        </SortableContext>
+                      </DndContext>
+                    )
+                  ) : null}
+
+                  {/* Images */}
+                  {folderImages.length === 0 && childFolders.length === 0 ? (
+                    <div
+                      onClick={() => !isSoloFolder && fileInputRef.current?.click()}
+                      className={[
+                        'flex min-h-[420px] cursor-pointer flex-col items-center justify-center rounded-[28px] border-2 border-dashed',
+                        'transition-[border-color,background-color] duration-200',
+                        isDragActive
+                          ? 'border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_8%,var(--surface))]'
+                          : 'border-[var(--border-soft)] bg-[var(--surface)] hover:border-[var(--border-strong)]',
+                      ].join(' ')}
+                    >
+                      <FolderPlus className="mb-3 size-10 text-[var(--muted-foreground)]/50" />
+                      <p className="text-[15px] font-medium text-[var(--foreground)]">Pasta vazia</p>
+                      <p className="mt-1 text-[13px] text-[var(--muted-foreground)]">
+                        {isSoloFolder ? 'Esta referência não suporta imagens adicionais.' : 'Arraste imagens ou clique para adicionar.'}
+                      </p>
+                    </div>
+                  ) : folderImages.length > 0 || (refViewMode === 'grid' && childFolders.length > 0 && !isSoloFolder) ? (
+                    refViewMode === 'grid' ? (
+                      <DndContext
+                        sensors={refDndSensors}
+                        collisionDetection={closestCenter}
+                        onDragEnd={handleRefImageDragEnd}
+                      >
+                        <SortableContext items={sortedFolderImages.map((img) => img.id)} strategy={rectSortingStrategy}>
+                          <div className="grid gap-5" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${Math.round(150 + refGridZoom * 3)}px, 1fr))` }}>
+                            {sortedFolderImages.map((image) => {
+                              const isSelected = selectedImageIds.includes(image.id);
+                              return (
+                                <SortableRefImageGridCard
+                                  key={image.id}
+                                  image={image}
+                                  isSelected={isSelected}
+                                  isSoloFolder={isSoloFolder}
+                                  onClick={() => toggleImageSelection(image.id)}
+                                  onDoubleClick={() => openMetadataDialog(displayFolder.id, image.id)}
+                                  onDelete={() => {
+                                    setSelectedImageIds((current) => current.filter((id) => id !== image.id));
+                                    void onDeleteImageFromFolder({ imageId: image.id, folderId: displayFolder.id, category: route, folderTitle: displayFolder.title });
+                                  }}
+                                  contextMenu={
+                                    <ContextMenuContent>
+                                      <ContextMenuItem onClick={() => setRenameImageTarget(image)}>Renomear...</ContextMenuItem>
+                                      <ContextMenuItem onClick={() => downloadReferenceImage(image)}>Baixar</ContextMenuItem>
+                                      {!isSoloFolder ? (
+                                        <>
+                                          <ContextMenuSeparator />
+                                          <ContextMenuItem
+                                            className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
+                                            onClick={() => {
+                                              setSelectedImageIds((current) => current.filter((id) => id !== image.id));
+                                              void onDeleteImageFromFolder({ imageId: image.id, folderId: displayFolder.id, category: route, folderTitle: displayFolder.title });
+                                            }}
+                                          >
+                                            Excluir imagem
+                                          </ContextMenuItem>
+                                        </>
+                                      ) : null}
+                                    </ContextMenuContent>
+                                  }
+                                />
+                              );
+                            })}
+                            {!isSoloFolder ? (
+                              <button
+                                type="button"
+                                aria-label="Add images to folder"
+                                onClick={() => fileInputRef.current?.click()}
+                                style={{ aspectRatio: '1 / 1' }}
+                                className="flex w-full flex-col items-center justify-center rounded-[20px] border-2 border-dashed border-[var(--border-soft)] bg-[var(--surface)] text-[var(--muted-foreground)] transition-[border-color,background-color] duration-200 hover:border-[var(--border-strong)] hover:bg-[var(--surface2)] hover:text-[var(--foreground)]"
+                              >
+                                <Plus className="size-7" />
+                              </button>
                             ) : null}
                           </div>
-                        </ContextMenuTrigger>
-                        <ContextMenuContent>
-                          <ContextMenuItem onClick={() => setRenameImageTarget(image)}>Renomear...</ContextMenuItem>
-                          <ContextMenuItem onClick={() => downloadReferenceImage(image)}>Baixar</ContextMenuItem>
-                          {!isSoloFolder ? (
-                            <>
-                              <ContextMenuSeparator />
-                              <ContextMenuItem
-                                className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
-                                onClick={() => {
-                                  setSelectedImageIds((current) => current.filter((id) => id !== image.id));
-                                  void onDeleteImageFromFolder({
-                                    imageId: image.id,
-                                    folderId: displayFolder.id,
-                                    category: route,
-                                    folderTitle: displayFolder.title,
-                                  });
-                                }}
-                              >
-                                Excluir imagem
-                              </ContextMenuItem>
-                            </>
-                          ) : null}
-                        </ContextMenuContent>
-                      </ContextMenu>
-                    );
-                  })}
-                  {!isSoloFolder ? (
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      style={{ aspectRatio: '1 / 1' }}
-                      className="flex flex-col items-center justify-center rounded-[20px] border-2 border-dashed border-[var(--border-soft)] bg-[var(--surface)] text-[var(--muted-foreground)] transition-[border-color,background-color] duration-200 hover:border-[var(--border-strong)] hover:bg-[var(--surface2)] hover:text-[var(--foreground)]"
-                    >
-                      <Plus className="size-7" />
-                    </button>
+                        </SortableContext>
+                      </DndContext>
+                    ) : (
+                      <DndContext
+                        sensors={refDndSensors}
+                        collisionDetection={closestCenter}
+                        onDragEnd={handleRefImageDragEnd}
+                      >
+                        <SortableContext items={sortedFolderImages.map((img) => img.id)} strategy={verticalListSortingStrategy}>
+                          <div className="flex flex-col gap-3">
+                            {sortedFolderImages.map((image) => {
+                              const isSelected = selectedImageIds.includes(image.id);
+                              return (
+                                <SortableRefImageListRow
+                                  key={image.id}
+                                  image={image}
+                                  isSelected={isSelected}
+                                  isSoloFolder={isSoloFolder}
+                                  onClick={() => toggleImageSelection(image.id)}
+                                  onDoubleClick={() => openMetadataDialog(displayFolder.id, image.id)}
+                                  onDownload={() => { sounds.select(); downloadReferenceImage(image); }}
+                                  onDelete={() => {
+                                    sounds.select();
+                                    setSelectedImageIds((current) => current.filter((id) => id !== image.id));
+                                    void onDeleteImageFromFolder({ imageId: image.id, folderId: displayFolder.id, category: route, folderTitle: displayFolder.title });
+                                  }}
+                                  contextMenu={
+                                    <ContextMenuContent>
+                                      <ContextMenuItem onClick={() => setRenameImageTarget(image)}>Renomear...</ContextMenuItem>
+                                      <ContextMenuItem onClick={() => { sounds.select(); downloadReferenceImage(image); }}>Baixar</ContextMenuItem>
+                                      {!isSoloFolder ? (
+                                        <>
+                                          <ContextMenuSeparator />
+                                          <ContextMenuItem
+                                            className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
+                                            onClick={() => {
+                                              sounds.select();
+                                              setSelectedImageIds((current) => current.filter((id) => id !== image.id));
+                                              void onDeleteImageFromFolder({ imageId: image.id, folderId: displayFolder.id, category: route, folderTitle: displayFolder.title });
+                                            }}
+                                          >
+                                            Excluir imagem
+                                          </ContextMenuItem>
+                                        </>
+                                      ) : null}
+                                    </ContextMenuContent>
+                                  }
+                                />
+                              );
+                            })}
+                          </div>
+                        </SortableContext>
+                      </DndContext>
+                    )
                   ) : null}
-                </div>
-              )}
+                </motion.div>
+              </AnimatePresence>
             </>
           ) : (
             <div className="flex min-h-[360px] items-center justify-center rounded-[28px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)]">
@@ -12075,6 +13074,58 @@ function ReferencesWorkspace({
                       Group
                     </Button>
                   ) : null}
+                  {!isSoloFolder && activeFolderId ? (() => {
+                    const moveTargets = folders.filter((f) => f.parentFolderId === activeFolderId && !f.isSolo);
+                    if (moveTargets.length === 0) return null;
+                    return (
+                      <Popover open={isMovePopoverOpen} onOpenChange={setIsMovePopoverOpen}>
+                        <PopoverTrigger asChild>
+                          <Button
+                            variant="surface"
+                            size="sm"
+                            aria-label="Mover imagens selecionadas para outra pasta"
+                            className="h-8 rounded-full border-white/8 bg-transparent px-3 text-[13px] hover:bg-white/6"
+                          >
+                            <Folder className="size-3.5" />
+                            Move
+                            <ChevronDown className="size-3" />
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent
+                          side="bottom"
+                          align="start"
+                          className="w-[220px] border border-white/8 bg-[rgba(15,16,16,0.96)] p-1.5 shadow-[0_16px_48px_rgba(0,0,0,0.4)] backdrop-blur-2xl"
+                        >
+                          <p className="px-2 pb-1 pt-0.5 text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                            Mover para
+                          </p>
+                          {moveTargets.map((target) => (
+                            <button
+                              key={target.id}
+                              type="button"
+                              className="flex w-full items-center gap-2 rounded-[10px] px-2 py-2 text-left text-[13px] text-[var(--foreground)] transition-colors hover:bg-white/6"
+                              onClick={async () => {
+                                setIsMovePopoverOpen(false);
+                                const ids = selectedImageIds;
+                                setSelectedImageIds([]);
+                                if (!activeFolderId) return;
+                                await onMoveImages({
+                                  imageIds: ids,
+                                  category: route,
+                                  sourceFolderId: activeFolderId,
+                                  targetFolderId: target.id,
+                                  targetFolderTitle: target.title,
+                                });
+                              }}
+                            >
+                              <Folder className="size-3.5 shrink-0 text-[var(--muted-foreground)]" />
+                              <span className="truncate">{target.title}</span>
+                            </button>
+                          ))}
+                        </PopoverContent>
+                      </Popover>
+                    );
+                  })() : null}
                   {representativeRef ? (
                     <ContextMenu>
                       <ContextMenuTrigger asChild>
