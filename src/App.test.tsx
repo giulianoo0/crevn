@@ -1156,6 +1156,28 @@ describe('App header thread title', () => {
     expect(screen.getByRole('heading', { name: 'Thread Two' })).toBeInTheDocument();
   });
 
+  it('opens the app shell when startup workspace loading stalls', async () => {
+    vi.mocked(electronApi.ensureProjectThreadWorkspace).mockImplementationOnce(
+      () => new Promise<never>(() => undefined)
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(document.querySelector('.app-splash-logo')).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(12_500);
+    });
+
+    expect(document.querySelector('.app-splash-logo')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
+    expect(toast.error).toHaveBeenCalledWith('Startup workspace load timed out after 12000ms.');
+  });
+
   it('uses the compact 36px thread header and centered tab selection chrome', async () => {
     render(<App />);
 

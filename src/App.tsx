@@ -1662,6 +1662,7 @@ export function getReferenceMentionReplacementRange(
 }
 
 const INITIAL_SCENE_FRAMES: SceneFrame[] = [];
+const STARTUP_WORKSPACE_TIMEOUT_MS = 12_000;
 const DEFAULT_SCENES_SIDEBAR_WIDTH = 180;
 const MIN_SCENES_SIDEBAR_WIDTH = 160;
 const SCENE_OUTPUT_EAGER_FRAME_COUNT = 3;
@@ -1671,6 +1672,25 @@ const SCENE_OUTPUT_FRAME_ROW_GAP = 16;
 const SCENE_FRAME_ACCORDION_EXPANDED_HEIGHT = 318;
 const SCENE_FRAME_ACCORDION_COLLAPSED_HEIGHT = 58;
 const SCENE_SIDEBAR_FRAME_LIST_MAX_HEIGHT = 720;
+
+function withStartupTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(`${label} timed out after ${STARTUP_WORKSPACE_TIMEOUT_MS}ms.`));
+    }, STARTUP_WORKSPACE_TIMEOUT_MS);
+
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
 
 function toSceneReferenceAttachment(reference: SceneGroupRecord['frames'][number]['references'][number]): SceneReferenceAttachment {
   return {
@@ -5445,13 +5465,16 @@ export function App() {
 
     async function loadWorkspace() {
       try {
-        const workspace = await ensureProjectThreadWorkspace();
-        const nextProjects = await listProjectsWithThreads();
-        const images = await listGeneratedImages(workspace.thread.id);
-        const [references, folders] = await Promise.all([
-          listReferences(),
-          listReferenceFolders(),
-        ]);
+        const workspace = await withStartupTimeout(ensureProjectThreadWorkspace(), 'Startup workspace load');
+        const [nextProjects, images, references, folders] = await withStartupTimeout(
+          Promise.all([
+            listProjectsWithThreads(),
+            listGeneratedImages(workspace.thread.id),
+            listReferences(),
+            listReferenceFolders(),
+          ]),
+          'Startup project data load'
+        );
         if (!cancelled) {
           setProjects(nextProjects);
           setOpenProjects((current) => {
@@ -5476,6 +5499,9 @@ export function App() {
         }
       } catch (error) {
         console.error('Failed to load workspace', error);
+        if (!cancelled) {
+          toast.error(getErrorMessage(error, 'Startup took too long. Opening the app shell.'));
+        }
       } finally {
         if (!cancelled) {
           setIsAppReady(true);
@@ -5493,14 +5519,18 @@ export function App() {
   // Warm up the img-fx shared renderer once the app has settled, while the
   // browser is idle, so the GPU/shader init happens off the critical path.
   useEffect(() => {
+    if (!isAppReady) {
+      return undefined;
+    }
+
     const idle = window.requestIdleCallback?.bind(window);
     if (idle) {
-      const handle = idle(() => setShouldWarmImageFx(true), { timeout: 2000 });
+      const handle = idle(() => setShouldWarmImageFx(true), { timeout: 3000 });
       return () => window.cancelIdleCallback?.(handle);
     }
-    const timer = window.setTimeout(() => setShouldWarmImageFx(true), 600);
+    const timer = window.setTimeout(() => setShouldWarmImageFx(true), 1200);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [isAppReady]);
 
   useEffect(() => {
     if (!selectedThreadId) {
@@ -5928,7 +5958,7 @@ export function App() {
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.5, ease: 'easeOut' }}
             >
-              <img src={logo} alt="crevn logo" className="block h-10 w-auto" />
+              <img src={logo} alt="crevn logo" className="app-splash-logo block h-10 w-auto" />
               <span
                 aria-hidden
                 className="logo-shimmer"

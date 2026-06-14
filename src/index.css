@@ -154,6 +154,25 @@ textarea::-webkit-scrollbar {
   will-change: background-position;
 }
 
+.app-splash-logo {
+  animation: app-splash-logo-breathe 2.4s ease-in-out infinite;
+  transform-origin: center;
+  will-change: opacity, transform;
+}
+
+@keyframes app-splash-logo-breathe {
+  0%,
+  100% {
+    opacity: 0.82;
+    transform: translateY(0) scale(0.985);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translateY(-1px) scale(1.015);
+  }
+}
+
 .logo-shimmer {
   position: absolute;
   inset: 0;

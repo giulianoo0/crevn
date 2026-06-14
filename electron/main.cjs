@@ -18,9 +18,12 @@ let providerSettingsStore = null;
 // this so the window can be created (and the renderer can start loading) in
 // parallel with the database init instead of after it.
 let resolveStoreReady;
-const storeReady = new Promise((resolve) => {
+let rejectStoreReady;
+const storeReady = new Promise((resolve, reject) => {
   resolveStoreReady = resolve;
+  rejectStoreReady = reject;
 });
+storeReady.catch(() => undefined);
 const ASSET_PROTOCOL = 'crenv-asset';
 const appLogger = createAppLogger();
 
@@ -236,6 +239,7 @@ app.whenReady().then(async () => {
   };
   initStore().catch((error) => {
     console.error('[crenv:app] failed to initialize generation store', error);
+    rejectStoreReady(error);
   });
 
   ipcMain.handle('generation:listGeneratedImages', async (_event, threadId) => {
