@@ -3,6 +3,7 @@ import { Check, ChevronDown } from 'lucide-react';
 
 import codexIcon from '@/assets/codex.svg';
 import geminiIcon from '@/assets/gemini.svg';
+import claudeIcon from '@/assets/claude.svg';
 import {
   getModelsForProvider,
   getProviderOptions,
@@ -16,6 +17,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 const providerIcons: Record<GenerationProviderId, string> = {
   codex: codexIcon,
   google: geminiIcon,
+  anthropic: claudeIcon,
 };
 
 type ModelPickerProps = {

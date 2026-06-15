@@ -1,4 +1,4 @@
-const { loadBundledSkill } = require('./skills.cjs');
+const { loadBundledSkill, findSkills } = require('./skills.cjs');
 
 function cloneParts(parts) {
   return parts.map((part) => ({
@@ -246,7 +246,35 @@ function summarizeDirectorChunkForLog(chunk) {
   return summary;
 }
 
+// Reasoning levels exposed in the UI. Mapped per provider in
+// buildReasoningProviderOptions below.
+const REASONING_EFFORTS = ['low', 'medium', 'high'];
+const DEFAULT_REASONING_EFFORT = 'medium';
+
+function normalizeReasoningEffort(effort) {
+  return REASONING_EFFORTS.includes(effort) ? effort : DEFAULT_REASONING_EFFORT;
+}
+
+// Translate a provider-agnostic reasoning effort into the per-provider knob.
+// Anthropic exposes a first-class `effort`; Gemini uses thinkingConfig (we keep
+// thoughts visible and reserve a future budget mapping).
+function buildReasoningProviderOptions(providerId, effort) {
+  const reasoningEffort = normalizeReasoningEffort(effort);
+  if (providerId === 'anthropic') {
+    return { anthropic: { effort: reasoningEffort } };
+  }
+  return {
+    google: {
+      thinkingConfig: {
+        includeThoughts: true,
+      },
+    },
+  };
+}
+
 function buildDirectorStreamOptions({
+  providerId = 'google',
+  reasoningEffort,
   model,
   messages,
   abortSignal,
@@ -271,27 +299,32 @@ function buildDirectorStreamOptions({
     // Allow the model to call loadSkill, read the result, and keep reasoning in
     // the same turn. generateImages still halts the stream via needsApproval.
     ...(typeof stepCountIs === 'function' ? { stopWhen: stepCountIs(8) } : null),
-    providerOptions: {
-      google: {
-        thinkingConfig: {
-          includeThoughts: true,
-        },
-      },
-    },
+    providerOptions: buildReasoningProviderOptions(providerId, reasoningEffort),
     tools: {
+      findSkills: tool({
+        description:
+          'List every bundled skill available to you, each with guidance on when to use it. Call this to discover which skills exist before loading one with loadSkill.',
+        inputSchema: jsonSchema({
+          type: 'object',
+          additionalProperties: false,
+          properties: {},
+        }),
+        execute: async () => findSkills(),
+      }),
       loadSkill: tool({
         description:
-          'Load the full instructions for a bundled skill before acting on a request it covers. Optionally pass a reference filename to read a specific reference document.',
+          'Load a bundled skill before acting on a request it covers. Call with just { name } first to get the skill overview, section index, and reference list. Then request a single section with { name, section } or a reference document with { name, reference } as needed — do not try to load everything at once.',
         inputSchema: jsonSchema({
           type: 'object',
           additionalProperties: false,
           required: ['name'],
           properties: {
             name: { type: 'string' },
+            section: { type: 'string' },
             reference: { type: 'string' },
           },
         }),
-        execute: async ({ name, reference }) => loadBundledSkill(name, reference),
+        execute: async ({ name, section, reference }) => loadBundledSkill(name, { section, reference }),
       }),
       generateImages: tool({
         description: 'Request one or more still images for the current Director thread.',
@@ -315,30 +348,59 @@ function buildDirectorStreamOptions({
   };
 }
 
+async function resolveDirectorLanguageModel(providerId, modelId) {
+  if (providerId === 'anthropic') {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      throw new Error('Set ANTHROPIC_API_KEY to use the Claude Director.');
+    }
+    const { createAnthropic } = await import('@ai-sdk/anthropic');
+    const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    return {
+      model: anthropic(modelId),
+      label: 'Claude',
+      keyState: { hasAnthropicApiKey: true },
+    };
+  }
+
+  if (!process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY) {
+    throw new Error('Set GEMINI_API_KEY or GOOGLE_API_KEY to use Google Gemini Director.');
+  }
+  const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
+  const google = createGoogleGenerativeAI({
+    apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
+  });
+  return {
+    model: google(modelId),
+    label: 'Gemini',
+    keyState: {
+      hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
+      hasGoogleApiKey: Boolean(process.env.GOOGLE_API_KEY),
+    },
+  };
+}
+
 async function* createAiSdkDirectorPartStream({
+  providerId = 'google',
+  reasoningEffort,
   modelId,
   messages,
   abortController,
 }) {
-  if (!process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY) {
-    throw new Error('Set GEMINI_API_KEY or GOOGLE_API_KEY to use Google Gemini Director.');
-  }
+  const { streamText, smoothStream, tool, jsonSchema, stepCountIs } = await import('ai');
+  const { model, label, keyState } = await resolveDirectorLanguageModel(providerId, modelId);
 
-  const [{ streamText, smoothStream, tool, jsonSchema, stepCountIs }, { createGoogleGenerativeAI }] = await Promise.all([
-    import('ai'),
-    import('@ai-sdk/google'),
-  ]);
-  const google = createGoogleGenerativeAI({
-    apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
-  });
-  console.info('[crenv:director-ai] Gemini stream starting', {
+  console.info('[crenv:director-ai] Director stream starting', {
+    providerId,
     modelId,
-    hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
-    hasGoogleApiKey: Boolean(process.env.GOOGLE_API_KEY),
+    reasoningEffort: normalizeReasoningEffort(reasoningEffort),
+    label,
+    ...keyState,
     messages: summarizeDirectorMessagesForLog(messages),
   });
   const result = streamText(buildDirectorStreamOptions({
-    model: google(modelId),
+    providerId,
+    reasoningEffort,
+    model,
     messages,
     abortSignal: abortController.signal,
     smoothStream,
@@ -386,7 +448,7 @@ async function* createAiSdkDirectorPartStream({
         streamSummary.usage = chunk.usage;
       }
 
-      console.info('[crenv:director-ai] Gemini stream chunk', summarizeDirectorChunkForLog(chunk));
+      console.info('[crenv:director-ai] Director stream chunk', summarizeDirectorChunkForLog(chunk));
 
       if (accumulator.apply(chunk)) {
         streamSummary.appliedChunkCount += 1;
@@ -396,7 +458,7 @@ async function* createAiSdkDirectorPartStream({
     }
   } catch (error) {
     streamFailed = true;
-    console.error('[crenv:director-ai] Gemini stream failed', {
+    console.error('[crenv:director-ai] Director stream failed', {
       ...streamSummary,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -419,14 +481,18 @@ async function* createAiSdkDirectorPartStream({
     if (streamFailed) {
       // The catch block already logged the failure; do not also report it as an empty answer.
     } else if (finalParts.length === 0 || (finalTextChars === 0 && finalReasoningChars === 0 && finalToolParts === 0)) {
-      console.warn('[crenv:director-ai] Gemini answered nothing', finalSummary);
+      console.warn('[crenv:director-ai] Director answered nothing', finalSummary);
     } else {
-      console.info('[crenv:director-ai] Gemini stream completed', finalSummary);
+      console.info('[crenv:director-ai] Director stream completed', finalSummary);
     }
   }
 }
 
 module.exports = {
+  REASONING_EFFORTS,
+  DEFAULT_REASONING_EFFORT,
+  normalizeReasoningEffort,
+  buildReasoningProviderOptions,
   buildDirectorStreamOptions,
   createAiSdkDirectorPartStream,
   createDirectorPartAccumulator,

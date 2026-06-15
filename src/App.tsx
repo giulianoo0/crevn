@@ -18,7 +18,7 @@ import {
   type RefObject,
   type CSSProperties,
 } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import useEmblaCarousel from 'embla-carousel-react';
 import { BorderBeam } from 'border-beam';
 import {
@@ -75,6 +75,7 @@ import {
   Search,
   Settings,
   Square,
+  Star,
   Trash2,
   Upload,
   WandSparkles,
@@ -82,6 +83,7 @@ import {
   Zap,
   AlertTriangle,
   BookOpen,
+  Gauge,
 } from 'lucide-react';
 import NumberFlow from '@number-flow/react';
 import { toast } from 'sonner';
@@ -124,8 +126,8 @@ import twoShotPreview from './assets/angle-previews/two-shot.png';
 import wideEstablishingPreview from './assets/angle-previews/wide-establishing.png';
 import wormsEyePreview from './assets/angle-previews/worms-eye.png';
 import geminiIcon from './assets/gemini.svg';
+import claudeIcon from './assets/claude.svg';
 import logo from './assets/logo.svg';
-import { ImageGeneration } from 'img-fx';
 import { ConfirmDeleteDialog } from './components/confirm-delete-dialog';
 import { CreateProjectDialog } from './components/create-project-dialog';
 import { EntityNameDialog } from './components/entity-name-dialog';
@@ -207,6 +209,7 @@ import {
   deleteProject,
   deleteThread,
   downloadGeneratedImage,
+  setGeneratedImageFavorite,
   ensureProjectThreadWorkspace,
   exportProject,
   exportReference,
@@ -226,26 +229,34 @@ import {
   renameProject,
   renameThread,
   pasteClipboardImageToSceneFrame,
+  refreshCodexImageAccountLimits,
+  removeCodexImageAccount,
   checkForUpdates,
+  selectCodexImageAccount,
+  startCodexImageOAuth,
   subscribeToImageReady,
   subscribeToSceneFrameReady,
   structureScenePrompt,
   subscribeToScenePlan,
   subscribeToUpdateStatus,
+  writeStartupLog,
   type SceneGroupRecord,
   updateProjectSettings,
   updateProviderSettings,
   updateSceneFrame,
   updateSceneGroup,
   type GeneratedImageRecord,
+  type CodexImageAccount,
   type DirectorChatRecord,
   type DirectorMessageRecord,
   type DirectorMessagePart,
   type ProjectRecord,
+  type ProviderSettings,
   type ReferenceFolderRecord,
   type ReferenceImageRecord,
   type AppInfo,
   type UpdateStatus,
+  type ReasoningEffort,
   cancelDirectorChat,
 } from './lib/electron-api';
 import {
@@ -824,6 +835,25 @@ function base64ToObjectUrl(bytesBase64: string, mimeType: string) {
   return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
 }
 
+function base64ToDataUrl(bytesBase64: string, mimeType: string) {
+  return `data:${mimeType};base64,${bytesBase64}`;
+}
+
+function getStartupNowMs() {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function logStartupTiming(label: string, startedAt: number, fields: Record<string, string | number | boolean | null> = {}) {
+  const durationMs = Math.round(Math.max(0, getStartupNowMs() - startedAt));
+  if (typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('jsdom')) {
+    return;
+  }
+  writeStartupLog(label, { durationMs, ...fields });
+}
+
 function deriveReferenceAttachmentTitle(name: string) {
   return name.replace(/\.[^/.]+$/, '').trim() || name.trim() || 'Untitled image';
 }
@@ -934,7 +964,7 @@ function toSavedReferenceImage(reference: ReferenceImageRecord): SavedReferenceI
     groupDescription: reference.groupDescription ?? undefined,
     mimeType: reference.mimeType,
     bytesBase64: reference.bytesBase64,
-    previewUrl: base64ToObjectUrl(reference.bytesBase64, reference.mimeType),
+    previewUrl: base64ToDataUrl(reference.bytesBase64, reference.mimeType),
     size: 0,
     createdAt: reference.createdAt,
     category: reference.category,
@@ -942,7 +972,7 @@ function toSavedReferenceImage(reference: ReferenceImageRecord): SavedReferenceI
     environmentId: reference.environmentId ?? undefined,
     parentFolderId: reference.parentFolderId ?? undefined,
     section: reference.section ?? undefined,
-    shouldRevokePreviewUrl: true,
+    shouldRevokePreviewUrl: false,
   };
 }
 
@@ -1166,6 +1196,9 @@ type ReferenceSelectorOption = {
   folderTitle?: string;
   selectorSlug?: string;
   section?: 'primary' | 'angles';
+  // Top-level grouping so attached inline images surface above the saved
+  // library, with a divider between the two groups.
+  group?: 'attached' | 'saved';
   // Navigable folders/collections keep the caret on the chip after insertion so
   // typing the next `.` keeps drilling instead of landing after a space.
   keepSelectorOpen?: boolean;
@@ -1832,11 +1865,6 @@ export function App() {
   const [selectedModelId, setSelectedModelId] = useState(getDefaultModelOption('image').id);
   const [generatedImages, setGeneratedImages] = useState<GeneratedImageRecord[]>([]);
   const [isAppReady, setIsAppReady] = useState(false);
-  // Pre-warm the img-fx WebGL renderer + shader once at startup (during idle,
-  // behind the splash) so the first image generation doesn't pay the
-  // synchronous Three.js renderer creation + shader compile cost — which was
-  // freezing the main thread when the first loading tile mounted.
-  const [shouldWarmImageFx, setShouldWarmImageFx] = useState(false);
   const [isCreateProjectDialogOpen, setIsCreateProjectDialogOpen] = useState(false);
   const [sidebarEntityAction, setSidebarEntityAction] = useState<SidebarEntityAction>(null);
   const [isSidebarEntityDialogOpen, setIsSidebarEntityDialogOpen] = useState(false);
@@ -1858,11 +1886,20 @@ export function App() {
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
   const [activeStudioView, setActiveStudioView] = useState<'generation' | 'references' | 'providers'>('generation');
+  const [activeProviderSettingsTab, setActiveProviderSettingsTab] = useState<ProvidersSettingsTab>('text');
   const [activeReferenceLibraryRoute, setActiveReferenceLibraryRoute] = useState<ReferenceLibraryRoute>('characters');
   const [providerGeminiApiKey, setProviderGeminiApiKey] = useState('');
   const [providerGeminiApiKeyDraft, setProviderGeminiApiKeyDraft] = useState('');
+  const [providerAnthropicApiKey, setProviderAnthropicApiKey] = useState('');
+  const [providerAnthropicApiKeyDraft, setProviderAnthropicApiKeyDraft] = useState('');
   const [isProviderKeyVisible, setIsProviderKeyVisible] = useState(false);
+  const [isAnthropicProviderKeyVisible, setIsAnthropicProviderKeyVisible] = useState(false);
   const [isSavingProviderSettings, setIsSavingProviderSettings] = useState(false);
+  const [providerCodexImageAccounts, setProviderCodexImageAccounts] = useState<CodexImageAccount[]>([]);
+  const [activeProviderCodexImageAccountId, setActiveProviderCodexImageAccountId] = useState<string | null>(null);
+  const [isStartingCodexImageOAuth, setIsStartingCodexImageOAuth] = useState(false);
+  const [isRefreshingCodexImageLimits, setIsRefreshingCodexImageLimits] = useState(false);
+  const [codexImageAccountActionId, setCodexImageAccountActionId] = useState<string | null>(null);
   const [isPreparingSelectedImagesReference, setIsPreparingSelectedImagesReference] = useState(false);
   const [referenceSeedFiles, setReferenceSeedFiles] = useState<File[]>([]);
   const [deletingReference, setDeletingReference] = useState<{
@@ -1923,6 +1960,13 @@ export function App() {
   );
   const selectedProviderId = selectedModel.providerId;
   const effectiveFastMode = false;
+  const [directorReasoningEffort, setDirectorReasoningEffort] = useState<ReasoningEffort>('medium');
+  const cycleDirectorReasoningEffort = useCallback(() => {
+    setDirectorReasoningEffort((current) => {
+      const order: ReasoningEffort[] = ['low', 'medium', 'high'];
+      return order[(order.indexOf(current) + 1) % order.length];
+    });
+  }, []);
 
   useEffect(() => {
     if (generationWorkspaceMode === 'classic' && !selectedModel.capabilities.includes('image')) {
@@ -2258,6 +2302,15 @@ export function App() {
     isCheckingUpdates || updateStatus?.state === 'checking' || updateStatus?.state === 'downloading';
   const canInstallUpdate = updateStatus?.state === 'downloaded';
 
+  const syncProviderSettingsState = useCallback((settings: ProviderSettings) => {
+    setProviderGeminiApiKey(settings.text.gemini.apiKey);
+    setProviderGeminiApiKeyDraft(settings.text.gemini.apiKey);
+    setProviderAnthropicApiKey(settings.text.anthropic.apiKey);
+    setProviderAnthropicApiKeyDraft(settings.text.anthropic.apiKey);
+    setProviderCodexImageAccounts(settings.image.codex.accounts);
+    setActiveProviderCodexImageAccountId(settings.image.codex.activeAccountId);
+  }, []);
+
   useEffect(() => {
     let isMounted = true;
 
@@ -2284,8 +2337,7 @@ export function App() {
     void getProviderSettings()
       .then((settings) => {
         if (isMounted) {
-          setProviderGeminiApiKey(settings.text.gemini.apiKey);
-          setProviderGeminiApiKeyDraft(settings.text.gemini.apiKey);
+          syncProviderSettingsState(settings);
         }
       })
       .catch((error) => {
@@ -2300,7 +2352,7 @@ export function App() {
       isMounted = false;
       unsubscribe();
     };
-  }, []);
+  }, [syncProviderSettingsState]);
 
   const handleSaveProviderSettings = useCallback(async () => {
     setIsSavingProviderSettings(true);
@@ -2310,17 +2362,76 @@ export function App() {
           gemini: {
             apiKey: providerGeminiApiKeyDraft,
           },
+          anthropic: {
+            apiKey: providerAnthropicApiKeyDraft,
+          },
         },
       });
-      setProviderGeminiApiKey(settings.text.gemini.apiKey);
-      setProviderGeminiApiKeyDraft(settings.text.gemini.apiKey);
-      toast.success('Provider key saved');
+      syncProviderSettingsState(settings);
+      toast.success('Provider keys saved');
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to save provider key.'));
     } finally {
       setIsSavingProviderSettings(false);
     }
-  }, [providerGeminiApiKeyDraft]);
+  }, [providerGeminiApiKeyDraft, providerAnthropicApiKeyDraft, syncProviderSettingsState]);
+
+  const handleStartCodexImageOAuth = useCallback(async () => {
+    sounds.send();
+    setIsStartingCodexImageOAuth(true);
+    try {
+      const settings = await startCodexImageOAuth();
+      syncProviderSettingsState(settings);
+      toast.success('Codex image account connected');
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to connect Codex image account.'));
+    } finally {
+      setIsStartingCodexImageOAuth(false);
+    }
+  }, [syncProviderSettingsState]);
+
+  const handleSelectCodexImageAccount = useCallback(
+    async (accountId: string) => {
+      setCodexImageAccountActionId(accountId);
+      try {
+        const settings = await selectCodexImageAccount(accountId);
+        syncProviderSettingsState(settings);
+      } catch (error) {
+        toast.error(getErrorMessage(error, 'Failed to switch Codex image account.'));
+      } finally {
+        setCodexImageAccountActionId(null);
+      }
+    },
+    [syncProviderSettingsState]
+  );
+
+  const handleRemoveCodexImageAccount = useCallback(
+    async (accountId: string) => {
+      setCodexImageAccountActionId(accountId);
+      try {
+        const settings = await removeCodexImageAccount(accountId);
+        syncProviderSettingsState(settings);
+        toast.success('Codex image account removed');
+      } catch (error) {
+        toast.error(getErrorMessage(error, 'Failed to remove Codex image account.'));
+      } finally {
+        setCodexImageAccountActionId(null);
+      }
+    },
+    [syncProviderSettingsState]
+  );
+
+  const handleRefreshCodexImageLimits = useCallback(async () => {
+    setIsRefreshingCodexImageLimits(true);
+    try {
+      const settings = await refreshCodexImageAccountLimits();
+      syncProviderSettingsState(settings);
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to refresh Codex image limits.'));
+    } finally {
+      setIsRefreshingCodexImageLimits(false);
+    }
+  }, [syncProviderSettingsState]);
 
   useEffect(() => {
     activeDirectorChatIdRef.current = activeDirectorChatId;
@@ -2449,6 +2560,7 @@ export function App() {
       previewUrl: node.previewUrl,
       insertId: node.id,
       insertTitle: node.title,
+      group: 'saved',
       keepSelectorOpen: isNavigableReferenceNode(node, referenceMentionTree),
     }));
 
@@ -2461,13 +2573,24 @@ export function App() {
         previewUrl: img.previewUrl,
         insertId: img.id,
         insertTitle: titleWithoutExt,
+        group: 'attached',
       };
     });
 
-    return [...savedOpts, ...attachedOpts]
+    // Attached/selected images first, then the saved library. The render layer
+    // draws a divider where the group changes.
+    return [...attachedOpts, ...savedOpts]
       .filter((option) => option.title.toLowerCase().includes(base))
       .slice(0, 24);
   }, [referenceMentionMatch, referenceMentionTree, referenceImages]);
+  // Only label the attached/saved groups when both are actually present —
+  // otherwise a lone group gets a redundant header.
+  const showReferenceMentionGroups = useMemo(
+    () =>
+      referenceMentionOptions.some((option) => option.group === 'attached') &&
+      referenceMentionOptions.some((option) => option.group === 'saved'),
+    [referenceMentionOptions],
+  );
   const referenceMentionCandidates = useMemo(
     () => [
       ...referenceMentionTree.map((node) => ({
@@ -2892,6 +3015,50 @@ export function App() {
     });
     toast.success(
       selectedGeneratedImages.length === 1 ? 'Image deleted' : `Deleted ${selectedGeneratedImages.length} images`
+    );
+  }, [selectedGeneratedImages]);
+
+  const handleUnselectAllGeneratedImages = useCallback(() => {
+    setReferenceImages((current) => current.filter((reference) => !reference.sourceImageId));
+  }, []);
+
+  const allSelectedGeneratedImagesFavorited = useMemo(
+    () => selectedGeneratedImages.length > 0 && selectedGeneratedImages.every((image) => image.favorite),
+    [selectedGeneratedImages]
+  );
+
+  const handleFavoriteSelectedGeneratedImages = useCallback(async () => {
+    if (selectedGeneratedImages.length === 0) {
+      return;
+    }
+    // Toggle as a group: favorite everything unless all are already favorited.
+    const nextFavorite = !selectedGeneratedImages.every((image) => image.favorite);
+    const targetIds = new Set(selectedGeneratedImages.map((image) => image.id));
+
+    setGeneratedImages((current) =>
+      current.map((image) => (targetIds.has(image.id) ? { ...image, favorite: nextFavorite } : image))
+    );
+
+    try {
+      await Promise.all(
+        selectedGeneratedImages.map((image) => setGeneratedImageFavorite(image.id, nextFavorite))
+      );
+    } catch (error) {
+      // Roll back the optimistic update on failure.
+      setGeneratedImages((current) =>
+        current.map((image) => (targetIds.has(image.id) ? { ...image, favorite: !nextFavorite } : image))
+      );
+      throw error;
+    }
+
+    toast.success(
+      nextFavorite
+        ? selectedGeneratedImages.length === 1
+          ? 'Added to favorites'
+          : `Favorited ${selectedGeneratedImages.length} images`
+        : selectedGeneratedImages.length === 1
+          ? 'Removed from favorites'
+          : `Unfavorited ${selectedGeneratedImages.length} images`
     );
   }, [selectedGeneratedImages]);
 
@@ -3810,6 +3977,7 @@ export function App() {
           threadId: activeThreadId,
           prompt: promptText,
           modelId: selectedModel.id,
+          reasoningEffort: directorReasoningEffort,
           referenceImages: referencePayload,
         }),
     });
@@ -3824,6 +3992,7 @@ export function App() {
     savedReferences,
     selectedModel.id,
     selectedModel.label,
+    directorReasoningEffort,
     selectedPromptReferenceIds,
     selectedProjectId,
     setSelectedThreadIdImmediately,
@@ -5462,19 +5631,65 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
+    const appMountedAt = getStartupNowMs();
+    logStartupTiming('renderer app mounted', appMountedAt);
+
+    async function loadSavedReferences() {
+      const referencesStartedAt = getStartupNowMs();
+      logStartupTiming('renderer references load started', referencesStartedAt);
+      try {
+        const references = await withStartupTimeout(listReferences(), 'Startup references load');
+        logStartupTiming('renderer references loaded', referencesStartedAt, {
+          references: references.length,
+        });
+
+        const previewsStartedAt = getStartupNowMs();
+        const nextReferences = references.map(toSavedReferenceImage);
+        logStartupTiming('renderer reference previews prepared', previewsStartedAt, {
+          references: nextReferences.length,
+        });
+
+        if (!cancelled) {
+          setSavedReferences((current) => {
+            for (const reference of current) {
+              revokeReferencePreviewUrl(reference);
+            }
+            return nextReferences;
+          });
+        }
+      } catch (error) {
+        console.error('[crevn:startup] references load failed', error);
+      }
+    }
 
     async function loadWorkspace() {
+      const startupStartedAt = getStartupNowMs();
       try {
+        const workspaceStartedAt = getStartupNowMs();
+        logStartupTiming('renderer workspace load started', workspaceStartedAt);
         const workspace = await withStartupTimeout(ensureProjectThreadWorkspace(), 'Startup workspace load');
-        const [nextProjects, images, references, folders] = await withStartupTimeout(
+        logStartupTiming('renderer workspace loaded', workspaceStartedAt, {
+          projectId: workspace.project.id,
+          threadId: workspace.thread.id,
+        });
+
+        const projectDataStartedAt = getStartupNowMs();
+        logStartupTiming('renderer project data load started', projectDataStartedAt, {
+          threadId: workspace.thread.id,
+        });
+        const [nextProjects, images, folders] = await withStartupTimeout(
           Promise.all([
             listProjectsWithThreads(),
             listGeneratedImages(workspace.thread.id),
-            listReferences(),
             listReferenceFolders(),
           ]),
           'Startup project data load'
         );
+        logStartupTiming('renderer project data loaded', projectDataStartedAt, {
+          projects: nextProjects.length,
+          images: images.length,
+          folders: folders.length,
+        });
         if (!cancelled) {
           setProjects(nextProjects);
           setOpenProjects((current) => {
@@ -5489,12 +5704,6 @@ export function App() {
           setSelectedProjectId(workspace.project.id);
           setSelectedThreadIdImmediately(workspace.thread.id);
           syncVisibleThreadImages(workspace.thread.id, images);
-          setSavedReferences((current) => {
-            for (const reference of current) {
-              revokeReferencePreviewUrl(reference);
-            }
-            return references.map(toSavedReferenceImage);
-          });
           setReferenceFolders(sortReferenceFolders(folders));
         }
       } catch (error) {
@@ -5505,6 +5714,8 @@ export function App() {
       } finally {
         if (!cancelled) {
           setIsAppReady(true);
+          logStartupTiming('renderer shell ready', startupStartedAt);
+          void loadSavedReferences();
         }
       }
     }
@@ -5516,20 +5727,16 @@ export function App() {
     };
   }, [setSelectedThreadIdImmediately, syncVisibleThreadImages]);
 
-  // Warm up the img-fx shared renderer once the app has settled, while the
-  // browser is idle, so the GPU/shader init happens off the critical path.
   useEffect(() => {
     if (!isAppReady) {
       return undefined;
     }
 
-    const idle = window.requestIdleCallback?.bind(window);
-    if (idle) {
-      const handle = idle(() => setShouldWarmImageFx(true), { timeout: 3000 });
-      return () => window.cancelIdleCallback?.(handle);
-    }
-    const timer = window.setTimeout(() => setShouldWarmImageFx(true), 1200);
-    return () => window.clearTimeout(timer);
+    const splashPaintStartedAt = getStartupNowMs();
+    const frame = window.requestAnimationFrame(() => {
+      logStartupTiming('renderer splash removed paint', splashPaintStartedAt);
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [isAppReady]);
 
   useEffect(() => {
@@ -5971,32 +6178,6 @@ export function App() {
           </motion.div>
         ) : null}
       </AnimatePresence>
-      {shouldWarmImageFx ? (
-        <div
-          aria-hidden
-          style={{
-            position: 'fixed',
-            top: -9999,
-            left: -9999,
-            width: 8,
-            height: 8,
-            opacity: 0,
-            pointerEvents: 'none',
-          }}
-        >
-          <ImageGeneration
-            preset="pixels-organic"
-            theme="dark"
-            paused
-            strength={1}
-            cardBg="rgb(32, 32, 33)"
-            borderRadius={0}
-            className="h-full w-full"
-          >
-            <div className="h-full w-full" />
-          </ImageGeneration>
-        </div>
-      ) : null}
       <Toaster position="bottom-right" />
       <CreateProjectDialog
         open={isCreateProjectDialogOpen}
@@ -6127,7 +6308,7 @@ export function App() {
               : 'pb-10',
           isSidebarCollapsed ? 'pl-0' : 'pl-[260px]',
         ].join(' ')}
-        style={{ paddingRight: isScenesWorkspace || isDirectorWorkspace || activeStudioView === 'references' ? scenesSidebarWidth + 24 : 0 }}
+        style={{ paddingRight: isScenesWorkspace || isDirectorWorkspace ? scenesSidebarWidth + 24 : activeStudioView === 'references' ? scenesSidebarWidth : 0 }}
       >
         <AnimatePresence initial={false}>
           {activeStudioView === 'references' ? (
@@ -6138,6 +6319,7 @@ export function App() {
               route={activeReferenceLibraryRoute}
               sidebarWidth={scenesSidebarWidth}
               isSidebarCollapsed={isSidebarCollapsed}
+              onExpandSidebar={() => setIsSidebarCollapsed(false)}
               isSidebarResizing={isScenesSidebarResizing}
               onStartSidebarResize={startScenesSidebarResize}
               seedFiles={referenceSeedFiles}
@@ -6167,11 +6349,28 @@ export function App() {
               key="providers-workspace"
               geminiApiKey={providerGeminiApiKey}
               geminiApiKeyDraft={providerGeminiApiKeyDraft}
+              anthropicApiKey={providerAnthropicApiKey}
+              anthropicApiKeyDraft={providerAnthropicApiKeyDraft}
+              codexImageAccounts={providerCodexImageAccounts}
+              activeCodexImageAccountId={activeProviderCodexImageAccountId}
+              activeProviderTab={activeProviderSettingsTab}
               isKeyVisible={isProviderKeyVisible}
+              isAnthropicKeyVisible={isAnthropicProviderKeyVisible}
               isSaving={isSavingProviderSettings}
+              isStartingCodexOAuth={isStartingCodexImageOAuth}
+              isRefreshingCodexLimits={isRefreshingCodexImageLimits}
+              codexImageAccountActionId={codexImageAccountActionId}
+              isSidebarCollapsed={isSidebarCollapsed}
+              onExpandSidebar={() => setIsSidebarCollapsed(false)}
               onGeminiApiKeyChange={setProviderGeminiApiKeyDraft}
+              onAnthropicApiKeyChange={setProviderAnthropicApiKeyDraft}
               onKeyVisibleChange={setIsProviderKeyVisible}
+              onAnthropicKeyVisibleChange={setIsAnthropicProviderKeyVisible}
               onSave={() => void handleSaveProviderSettings()}
+              onStartCodexOAuth={() => void handleStartCodexImageOAuth()}
+              onSelectCodexImageAccount={(accountId) => void handleSelectCodexImageAccount(accountId)}
+              onRemoveCodexImageAccount={(accountId) => void handleRemoveCodexImageAccount(accountId)}
+              onRefreshCodexLimits={() => void handleRefreshCodexImageLimits()}
             />
           ) : (
             <div
@@ -6236,7 +6435,6 @@ export function App() {
                     <GeneratedImageGrid
                       images={generatedImages}
                       className="min-h-full w-full"
-                      loadingEffect="img-fx"
                       selectedImageIds={selectedGeneratedImageIds}
                       onImageSelect={(image) => {
                         void toggleGeneratedImageReference(image as GeneratedImageRecord).catch((error) => {
@@ -6531,40 +6729,72 @@ export function App() {
               innerClassName="bg-[rgba(15,16,16,0.9)]"
             >
               <div className="flex h-full items-center gap-1.5 px-2.5">
-                <motion.div
-                  initial={false}
-                  animate={{
-                    width: selectedGeneratedImages.length === 1 ? 'auto' : 0,
-                    opacity: selectedGeneratedImages.length === 1 ? 1 : 0,
-                  }}
-                  transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                  className="overflow-hidden"
+                <span
+                  className="inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-full bg-white/5 px-3 text-[13px] font-medium text-[var(--foreground)]"
+                  aria-label={`${selectedGeneratedImages.length} selected`}
                 >
-                  {selectedGeneratedImages.length === 1 ? (
-                    <motion.div
-                      initial={{ opacity: 0, filter: 'blur(6px)' }}
-                      animate={{ opacity: 1, filter: 'blur(0px)' }}
-                      exit={{ opacity: 0, filter: 'blur(6px)' }}
-                      transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-                    >
-                      <Button
-                        variant="surface"
-                        size="sm"
-                        aria-label="Copy selected images"
-                        className="h-8 whitespace-nowrap rounded-full border-white/8 bg-transparent px-3 text-[13px] hover:bg-white/6"
-                        onClick={() => {
-                          void handleCopySelectedGeneratedImages().catch((error) => {
-                            console.error('Failed to copy selected generated image', error);
-                            toast.error(getErrorMessage(error, 'Failed to copy selected image.'));
-                          });
-                        }}
-                      >
-                        <Copy className="size-3.5" />
-                        Copy
-                      </Button>
-                    </motion.div>
-                  ) : null}
-                </motion.div>
+                  <span>{selectedGeneratedImages.length}</span>
+                  <span className="text-[var(--muted-foreground)]">selected</span>
+                </span>
+
+                <Button
+                  variant="surface"
+                  size="sm"
+                  aria-label="Unselect all images"
+                  className="h-8 whitespace-nowrap rounded-full border-white/8 bg-transparent px-3 text-[13px] hover:bg-white/6"
+                  onClick={handleUnselectAllGeneratedImages}
+                >
+                  <X className="size-3.5" />
+                  Unselect all
+                </Button>
+
+                <Button
+                  variant="surface"
+                  size="sm"
+                  aria-label={allSelectedGeneratedImagesFavorited ? 'Remove selected images from favorites' : 'Favorite selected images'}
+                  className={[
+                    'h-8 whitespace-nowrap rounded-full border-white/8 bg-transparent px-3 text-[13px] hover:bg-white/6',
+                    allSelectedGeneratedImagesFavorited ? 'text-[rgb(255,205,90)]' : '',
+                  ].join(' ')}
+                  onClick={() => {
+                    void handleFavoriteSelectedGeneratedImages().catch((error) => {
+                      console.error('Failed to favorite selected generated images', error);
+                      toast.error(getErrorMessage(error, 'Failed to update favorites.'));
+                    });
+                  }}
+                >
+                  <Star className={['size-3.5', allSelectedGeneratedImagesFavorited ? 'fill-current' : ''].join(' ')} />
+                  {allSelectedGeneratedImagesFavorited ? 'Favorited' : 'Favorite'}
+                </Button>
+
+                <div
+                  className="t-resize h-8 overflow-hidden"
+                  style={{ width: selectedGeneratedImages.length === 1 ? 78 : 0 }}
+                >
+                  <Button
+                    variant="surface"
+                    size="sm"
+                    aria-label="Copy selected images"
+                    aria-hidden={selectedGeneratedImages.length !== 1}
+                    tabIndex={selectedGeneratedImages.length === 1 ? undefined : -1}
+                    disabled={selectedGeneratedImages.length !== 1}
+                    className={[
+                      'h-8 w-[78px] whitespace-nowrap rounded-full border-white/8 bg-transparent px-3 text-[13px] transition-[opacity,filter] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-white/6',
+                      selectedGeneratedImages.length === 1
+                        ? 'opacity-100 blur-0'
+                        : 'pointer-events-none opacity-0 blur-[6px]',
+                    ].join(' ')}
+                    onClick={() => {
+                      void handleCopySelectedGeneratedImages().catch((error) => {
+                        console.error('Failed to copy selected generated image', error);
+                        toast.error(getErrorMessage(error, 'Failed to copy selected image.'));
+                      });
+                    }}
+                  >
+                    <Copy className="size-3.5" />
+                    Copy
+                  </Button>
+                </div>
 
                 <Button
                   variant="surface"
@@ -6815,20 +7045,24 @@ export function App() {
                 <div className="px-3 text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
                   Providers
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveStudioView('providers');
-                  }}
-                  className={[
-                    'flex h-10 w-full items-center rounded-[12px] px-3 text-left text-[14px] transition-colors',
-                    activeStudioView === 'providers'
-                      ? 'bg-[var(--surface2)] text-[var(--foreground)]'
-                      : 'text-[var(--foreground)] hover:bg-[var(--surface2)]',
-                  ].join(' ')}
-                >
-                  Text
-                </button>
+                {(['text', 'image'] as ProvidersSettingsTab[]).map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => {
+                      setActiveProviderSettingsTab(tab);
+                      setActiveStudioView('providers');
+                    }}
+                    className={[
+                      'flex h-10 w-full items-center rounded-[12px] px-3 text-left text-[14px] transition-colors',
+                      activeStudioView === 'providers' && activeProviderSettingsTab === tab
+                        ? 'bg-[var(--surface2)] text-[var(--foreground)]'
+                        : 'text-[var(--foreground)] hover:bg-[var(--surface2)]',
+                    ].join(' ')}
+                  >
+                    {tab === 'text' ? 'Text' : 'Image'}
+                  </button>
+                ))}
               </div>
               <div className="mt-6 space-y-3 px-2">
                 <div className="px-3 text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
@@ -7134,6 +7368,14 @@ export function App() {
                     {index > 0 && reference.section && reference.section !== referenceMentionOptions[index - 1]?.section ? (
                       <div className="mx-2 my-1 border-t border-white/8 pt-1 text-[11px] text-[var(--muted-foreground)]">
                         {reference.section === 'primary' ? 'Referência principal' : 'Ângulos'}
+                      </div>
+                    ) : null}
+                    {showReferenceMentionGroups && reference.group && reference.group !== referenceMentionOptions[index - 1]?.group ? (
+                      <div className={[
+                        'mx-2 px-0.5 pb-1 text-[11px] font-medium text-[var(--muted-foreground)]',
+                        index > 0 ? 'mt-1 border-t border-white/8 pt-1.5' : 'pt-0.5',
+                      ].join(' ')}>
+                        {reference.group === 'attached' ? 'Anexadas' : 'Referências salvas'}
                       </div>
                     ) : null}
                     <button
@@ -7544,6 +7786,8 @@ export function App() {
         selectedModel={selectedModel}
         selectedProviderId={selectedProviderId}
         effectiveFastMode={effectiveFastMode}
+        reasoningEffort={directorReasoningEffort}
+        onCycleReasoningEffort={cycleDirectorReasoningEffort}
         isStreaming={Boolean(activeDirectorRun)}
         composerRef={directorComposerRef}
         referenceInputRef={directorReferenceInputRef}
@@ -8633,7 +8877,6 @@ function DirectorActionCard({
             images={displayedAssets}
             columnCount={Math.min(3, Math.max(1, displayedAssets.length))}
             fitHeight
-            loadingEffect="shimmer"
             className="overflow-hidden rounded-[20px] border border-[var(--border-soft)] bg-[var(--surface2)]/45 py-2"
           />
         ) : null}
@@ -9387,6 +9630,8 @@ function DirectorComposerBar({
   selectedModel,
   selectedProviderId,
   effectiveFastMode,
+  reasoningEffort,
+  onCycleReasoningEffort,
   isStreaming,
   composerRef,
   referenceInputRef,
@@ -9437,6 +9682,8 @@ function DirectorComposerBar({
   selectedModel: ReturnType<typeof getDefaultModelOption>;
   selectedProviderId: GenerationProviderId;
   effectiveFastMode: boolean;
+  reasoningEffort: ReasoningEffort;
+  onCycleReasoningEffort: () => void;
   isStreaming: boolean;
   composerRef: RefObject<PromptComposerHandle | null>;
   referenceInputRef: RefObject<HTMLInputElement | null>;
@@ -9502,6 +9749,14 @@ function DirectorComposerBar({
                   {index > 0 && reference.section && reference.section !== referenceMentionOptions[index - 1]?.section ? (
                     <div className="mx-2 my-1 border-t border-white/8 pt-1 text-[11px] text-[var(--muted-foreground)]">
                       {reference.section === 'primary' ? 'Referência principal' : 'Ângulos'}
+                    </div>
+                  ) : null}
+                  {showReferenceMentionGroups && reference.group && reference.group !== referenceMentionOptions[index - 1]?.group ? (
+                    <div className={[
+                      'mx-2 px-0.5 pb-1 text-[11px] font-medium text-[var(--muted-foreground)]',
+                      index > 0 ? 'mt-1 border-t border-white/8 pt-1.5' : 'pt-0.5',
+                    ].join(' ')}>
+                      {reference.group === 'attached' ? 'Anexadas' : 'Referências salvas'}
                     </div>
                   ) : null}
                   <button
@@ -9704,6 +9959,22 @@ function DirectorComposerBar({
                   onModelSelect={onModelSelect}
                   onKeepOpen={onKeepOpen}
                 />
+
+                <button
+                  type="button"
+                  tabIndex={isExpanded ? 0 : -1}
+                  aria-label={`Reasoning effort: ${reasoningEffort}`}
+                  title="Cycle reasoning effort"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    onKeepOpen(event);
+                  }}
+                  onClick={onCycleReasoningEffort}
+                  className="pointer-events-auto inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-3 text-[13px] font-medium text-[var(--muted-foreground)] backdrop-blur-xl transition-[background-color,border-color,color] duration-200 hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)] hover:text-[var(--foreground)]"
+                >
+                  <Gauge className="size-3.5 shrink-0" />
+                  <span className="capitalize">{reasoningEffort}</span>
+                </button>
 
                 <button
                   type="button"
@@ -11264,25 +11535,313 @@ function InlineAttachmentsRow({
   );
 }
 
+type ProvidersSettingsTab = 'text' | 'image';
+type CodexProviderLimitSnapshot = CodexImageAccount['limits'][number];
+type CodexProviderLimitWindow = NonNullable<CodexProviderLimitSnapshot['primary']>;
+type CodexProviderLimitKind = 'five-hour' | 'weekly' | 'monthly' | 'other';
+
+type CodexProviderDisplayLimit = {
+  id: string;
+  kind: CodexProviderLimitKind;
+  title: string;
+  sourceLabel: string;
+  usedPercent: number;
+  remainingPercent: number;
+  windowMinutes: number | null;
+  resetsAt: number | null;
+  isSecondary: boolean;
+};
+
+function formatCodexProviderTimestamp(value: string | null) {
+  if (!value) {
+    return 'Never';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return 'Unknown';
+  }
+  return date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function formatCodexProviderReset(value: number | null | undefined) {
+  if (!Number.isFinite(Number(value))) {
+    return 'No reset';
+  }
+  return formatCodexProviderTimestamp(new Date(Number(value) * 1000).toISOString());
+}
+
+function clampCodexProviderPercent(value: number | null | undefined) {
+  return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+}
+
+function isApproximateCodexProviderWindow(windowMinutes: number | null | undefined, expectedMinutes: number) {
+  const value = Number(windowMinutes);
+  if (!Number.isFinite(value) || value <= 0) {
+    return false;
+  }
+  return value >= expectedMinutes * 0.95 && value <= expectedMinutes * 1.05;
+}
+
+function getCodexProviderWindowKind(
+  window: CodexProviderLimitWindow,
+  limit: CodexProviderLimitSnapshot
+): CodexProviderLimitKind {
+  if (isApproximateCodexProviderWindow(window.windowMinutes, 5 * 60)) {
+    return 'five-hour';
+  }
+  if (isApproximateCodexProviderWindow(window.windowMinutes, 7 * 24 * 60)) {
+    return 'weekly';
+  }
+  if (isApproximateCodexProviderWindow(window.windowMinutes, 30 * 24 * 60)) {
+    return 'monthly';
+  }
+
+  const limitText = `${limit.limitId || ''} ${limit.limitName || ''}`.toLowerCase();
+  if (limitText.includes('five-hour') || limitText.includes('5-hour') || limitText.includes('5h')) {
+    return 'five-hour';
+  }
+  if (limitText.includes('weekly') || limitText.includes('week')) {
+    return 'weekly';
+  }
+  if (limitText.includes('monthly') || limitText.includes('month')) {
+    return 'monthly';
+  }
+  return 'other';
+}
+
+function getCodexProviderLimitTitle(kind: CodexProviderLimitKind, fallback: string) {
+  if (kind === 'five-hour') {
+    return '5h Limit';
+  }
+  if (kind === 'weekly') {
+    return 'Weekly Limit';
+  }
+  if (kind === 'monthly') {
+    return 'Monthly Limit';
+  }
+  return fallback;
+}
+
+function formatCodexProviderWindow(windowMinutes: number | null) {
+  if (isApproximateCodexProviderWindow(windowMinutes, 5 * 60)) {
+    return '5 hour window';
+  }
+  if (isApproximateCodexProviderWindow(windowMinutes, 7 * 24 * 60)) {
+    return '7 day window';
+  }
+  if (isApproximateCodexProviderWindow(windowMinutes, 30 * 24 * 60)) {
+    return '30 day window';
+  }
+  if (!Number.isFinite(Number(windowMinutes)) || Number(windowMinutes) <= 0) {
+    return 'Window not reported';
+  }
+  if (Number(windowMinutes) >= 60) {
+    return `${Math.round(Number(windowMinutes) / 60)} hour window`;
+  }
+  return `${Math.round(Number(windowMinutes))} minute window`;
+}
+
+function createCodexProviderDisplayLimit(
+  limit: CodexProviderLimitSnapshot,
+  window: CodexProviderLimitWindow,
+  isSecondary: boolean
+): CodexProviderDisplayLimit {
+  const kind = getCodexProviderWindowKind(window, limit);
+  const usedPercent = clampCodexProviderPercent(window.usedPercent);
+  const fallbackTitle = limit.limitName || limit.limitId || (isSecondary ? 'Secondary limit' : 'Codex limit');
+  return {
+    id: `${limit.limitId || 'codex'}-${isSecondary ? 'secondary' : 'primary'}-${window.windowMinutes ?? 'unknown'}`,
+    kind,
+    title: getCodexProviderLimitTitle(kind, fallbackTitle),
+    sourceLabel: limit.limitName || limit.limitId || 'codex',
+    usedPercent,
+    remainingPercent: 100 - usedPercent,
+    windowMinutes: window.windowMinutes,
+    resetsAt: window.resetsAt,
+    isSecondary,
+  };
+}
+
+function getCodexProviderDisplayLimits(account: CodexImageAccount) {
+  return account.limits.flatMap((limit) => {
+    const windows: CodexProviderDisplayLimit[] = [];
+    if (limit.primary) {
+      windows.push(createCodexProviderDisplayLimit(limit, limit.primary, false));
+    }
+    if (limit.secondary) {
+      windows.push(createCodexProviderDisplayLimit(limit, limit.secondary, true));
+    }
+    return windows;
+  });
+}
+
+function getCodexProviderLimitSlots(account: CodexImageAccount) {
+  const limits = getCodexProviderDisplayLimits(account);
+  const slots: {
+    fiveHour: CodexProviderDisplayLimit | null;
+    weekly: CodexProviderDisplayLimit | null;
+    monthly: CodexProviderDisplayLimit | null;
+    other: CodexProviderDisplayLimit[];
+  } = {
+    fiveHour: null,
+    weekly: null,
+    monthly: null,
+    other: [],
+  };
+
+  for (const limit of limits) {
+    if (limit.kind === 'five-hour' && !slots.fiveHour) {
+      slots.fiveHour = limit;
+    } else if (limit.kind === 'weekly' && !slots.weekly) {
+      slots.weekly = limit;
+    } else if (limit.kind === 'monthly' && !slots.monthly) {
+      slots.monthly = limit;
+    } else {
+      slots.other.push(limit);
+    }
+  }
+
+  return slots;
+}
+
+function CodexProviderLimitChip({
+  label,
+  limit,
+}: {
+  label: string;
+  limit: CodexProviderDisplayLimit | null;
+}) {
+  return (
+    <span className="inline-flex h-8 items-center gap-2 rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] px-3 text-[11px] leading-none text-[var(--muted-foreground)]">
+      <span className="font-medium text-[var(--foreground)]">{label}</span>
+      <span className="font-mono">{limit ? `${limit.remainingPercent}% left` : 'No data'}</span>
+    </span>
+  );
+}
+
+function CodexProviderLimitPanel({
+  title,
+  limit,
+}: {
+  title: string;
+  limit: CodexProviderDisplayLimit | null;
+}) {
+  const usedPercent = limit?.usedPercent ?? 0;
+  return (
+    <div className="rounded-[18px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.46)] p-3.5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h4 className="text-[13px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+            {title}
+          </h4>
+          <p className="mt-0.5 text-[11px] leading-4 text-[var(--muted-foreground)]">
+            {limit ? formatCodexProviderWindow(limit.windowMinutes) : 'Window not reported'}
+          </p>
+        </div>
+        <span className="shrink-0 font-mono text-[13px] leading-5 text-[var(--foreground)]">
+          {limit ? `${limit.remainingPercent}%` : '--'}
+        </span>
+      </div>
+      <div className="mt-3 h-2 overflow-hidden rounded-full bg-[var(--surface)]">
+        <div
+          className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300 ease-out"
+          style={{ width: `${usedPercent}%` }}
+        />
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-3 text-[11px] leading-4 text-[var(--muted-foreground)]">
+        <span>{limit ? `${limit.usedPercent}% used` : 'No usage data'}</span>
+        <span>{limit ? `Resets ${formatCodexProviderReset(limit.resetsAt)}` : 'No reset'}</span>
+      </div>
+    </div>
+  );
+}
+
 function ProvidersWorkspace({
   geminiApiKey,
   geminiApiKeyDraft,
+  anthropicApiKey,
+  anthropicApiKeyDraft,
+  codexImageAccounts,
+  activeCodexImageAccountId,
+  activeProviderTab,
   isKeyVisible,
+  isAnthropicKeyVisible,
   isSaving,
+  isStartingCodexOAuth,
+  isRefreshingCodexLimits,
+  codexImageAccountActionId,
+  isSidebarCollapsed,
+  onExpandSidebar,
   onGeminiApiKeyChange,
+  onAnthropicApiKeyChange,
   onKeyVisibleChange,
+  onAnthropicKeyVisibleChange,
   onSave,
+  onStartCodexOAuth,
+  onSelectCodexImageAccount,
+  onRemoveCodexImageAccount,
+  onRefreshCodexLimits,
 }: {
   geminiApiKey: string;
   geminiApiKeyDraft: string;
+  anthropicApiKey: string;
+  anthropicApiKeyDraft: string;
+  codexImageAccounts: CodexImageAccount[];
+  activeCodexImageAccountId: string | null;
+  activeProviderTab: ProvidersSettingsTab;
   isKeyVisible: boolean;
+  isAnthropicKeyVisible: boolean;
   isSaving: boolean;
+  isStartingCodexOAuth: boolean;
+  isRefreshingCodexLimits: boolean;
+  codexImageAccountActionId: string | null;
+  isSidebarCollapsed: boolean;
+  onExpandSidebar: () => void;
   onGeminiApiKeyChange: (apiKey: string) => void;
+  onAnthropicApiKeyChange: (apiKey: string) => void;
+  onAnthropicKeyVisibleChange: (isVisible: boolean) => void;
   onKeyVisibleChange: (isVisible: boolean) => void;
   onSave: () => void;
+  onStartCodexOAuth: () => void;
+  onSelectCodexImageAccount: (accountId: string) => void;
+  onRemoveCodexImageAccount: (accountId: string) => void;
+  onRefreshCodexLimits: () => void;
 }) {
+  const prefersReducedMotion = useReducedMotion();
   const hasSavedGeminiKey = geminiApiKey.trim().length > 0;
-  const hasDraftChanged = geminiApiKeyDraft !== geminiApiKey;
+  const hasSavedAnthropicKey = anthropicApiKey.trim().length > 0;
+  const hasDraftChanged =
+    geminiApiKeyDraft !== geminiApiKey || anthropicApiKeyDraft !== anthropicApiKey;
+  const hasCodexAccounts = codexImageAccounts.length > 0;
+  const activeCodexAccount =
+    codexImageAccounts.find((account) => account.id === activeCodexImageAccountId) ?? null;
+  const codexImageAccountIdsKey = codexImageAccounts.map((account) => account.id).join('|');
+  const [expandedCodexAccountId, setExpandedCodexAccountId] = useState<string | null>(
+    activeCodexImageAccountId
+  );
+  const providerContentTransition = prefersReducedMotion
+    ? { duration: 0 }
+    : { duration: 0.18, ease: 'easeInOut' };
+  const codexAccountDetailsTransition = prefersReducedMotion
+    ? { duration: 0 }
+    : { duration: 0.22, ease: [0.22, 1, 0.36, 1] };
+
+  useEffect(() => {
+    setExpandedCodexAccountId((current) => {
+      if (!codexImageAccounts.length) {
+        return null;
+      }
+      if (current && codexImageAccounts.some((account) => account.id === current)) {
+        return current;
+      }
+      return activeCodexImageAccountId || codexImageAccounts[0]?.id || null;
+    });
+  }, [activeCodexImageAccountId, codexImageAccountIdsKey]);
 
   return (
     <motion.section
@@ -11290,97 +11849,409 @@ function ProvidersWorkspace({
       animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
       exit={{ opacity: 0, y: -6, filter: 'blur(8px)' }}
       transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-      className="min-h-full px-8 pb-10 pt-8"
+      className="min-h-full px-8 pb-10 pt-1.5"
     >
+      {isSidebarCollapsed ? (
+        <header className="fixed left-3 top-[8px] z-40 flex h-9 items-center rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] px-2.5 shadow-[0_10px_30px_rgba(0,0,0,0.3)] backdrop-blur-2xl">
+          <button
+            type="button"
+            aria-label="Expand sidebar"
+            onClick={onExpandSidebar}
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-transparent hover:text-[var(--foreground)]"
+          >
+            <PanelLeftOpen className="size-3.5" />
+          </button>
+        </header>
+      ) : null}
       <div className="mx-auto flex w-full max-w-[1060px] flex-col gap-8">
         <div>
-          <h1 className="text-[26px] font-semibold leading-none tracking-[0] text-[var(--foreground)]">
-            Providers
-          </h1>
-          <p className="mt-4 max-w-[640px] text-[16px] leading-6 tracking-[0] text-[var(--muted-foreground)]">
-            Add provider credentials for Director and future text generation workflows.
-          </p>
+          <div>
+            <h1 className="text-[26px] font-semibold leading-none tracking-[0] text-[var(--foreground)]">
+              Providers
+            </h1>
+            <p className="mt-4 max-w-[640px] text-[16px] leading-6 tracking-[0] text-[var(--muted-foreground)]">
+              Manage text credentials and Codex image accounts used by generation workflows.
+            </p>
+          </div>
         </div>
 
-        <section className="rounded-[28px] border border-[var(--border-soft)] bg-[var(--surface)] p-5">
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="inline-flex size-11 items-center justify-center rounded-[16px] bg-[var(--surface2)]">
-                <KeyRound className="size-5 text-[var(--muted-foreground)]" />
-              </div>
-              <div>
-                <h2 className="text-[16px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
-                  Text provider
-                </h2>
-                <p className="mt-1 text-[13px] leading-5 text-[var(--muted-foreground)]">
-                  Only Gemini is available right now.
-                </p>
-              </div>
-            </div>
-            <span
-              className={[
-                'inline-flex h-8 items-center rounded-full border px-3 text-[12px] font-medium',
-                hasSavedGeminiKey
-                  ? 'border-[rgba(84,190,120,0.28)] bg-[rgba(84,190,120,0.12)] text-[rgb(147,220,169)]'
-                  : 'border-[var(--border-soft)] bg-[var(--surface2)] text-[var(--muted-foreground)]',
-              ].join(' ')}
+        <AnimatePresence mode="wait" initial={false}>
+          {activeProviderTab === 'text' ? (
+            <motion.section
+              key="providers-text"
+              initial={{ opacity: 0, filter: 'blur(2px)' }}
+              animate={{ opacity: 1, filter: 'blur(0px)' }}
+              exit={{ opacity: 0, filter: 'blur(2px)' }}
+              transition={providerContentTransition}
+              className="grid gap-4"
             >
-              {hasSavedGeminiKey ? 'Configured' : 'Missing key'}
-            </span>
-          </div>
-
-          <div className="mt-6 rounded-[22px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.42)] p-4">
-            <div className="flex items-center gap-3">
-              <div className="inline-flex size-10 items-center justify-center rounded-[14px] bg-[var(--surface2)]">
-                <img src={geminiIcon} alt="" aria-hidden="true" className="size-6 object-contain" />
-              </div>
-              <div>
-                <h3 className="text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
-                  Gemini
-                </h3>
-                <p className="text-[12px] leading-4 text-[var(--muted-foreground)]">
-                  Used by the Google model picker and Director text responses.
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-5 grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
-              <label className="grid gap-2">
-                <span className="text-[12px] font-medium leading-4 tracking-[0] text-[var(--muted-foreground)]">
-                  Gemini API key
-                </span>
-                <div className="flex h-11 items-center rounded-full border border-[var(--border-soft)] bg-[var(--surface)] px-3">
-                  <Input
-                    aria-label="Gemini API key"
-                    type={isKeyVisible ? 'text' : 'password'}
-                    value={geminiApiKeyDraft}
-                    onChange={(event) => onGeminiApiKeyChange(event.target.value)}
-                    placeholder="GEMINI_API_KEY"
-                    className="h-9 min-w-0 flex-1 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
-                  />
-                  <button
-                    type="button"
-                    aria-label={isKeyVisible ? 'Hide Gemini API key' : 'Show Gemini API key'}
-                    onClick={() => onKeyVisibleChange(!isKeyVisible)}
-                    className="ml-2 inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
-                  >
-                    {isKeyVisible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                  </button>
+              <div className="flex flex-wrap items-center justify-between gap-3 px-1">
+                <div className="flex items-center gap-3">
+                  <div className="inline-flex size-11 items-center justify-center rounded-[16px] bg-[var(--surface2)]">
+                    <KeyRound className="size-5 text-[var(--muted-foreground)]" />
+                  </div>
+                  <div>
+                    <h2 className="text-[16px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                      Text provider
+                    </h2>
+                    <p className="mt-1 text-[13px] leading-5 text-[var(--muted-foreground)]">
+                      Gemini and Claude credentials for text workflows.
+                    </p>
+                  </div>
                 </div>
-              </label>
+                <span
+                  className={[
+                    'inline-flex h-8 items-center rounded-full border px-3 text-[12px] font-medium',
+                    hasSavedGeminiKey || hasSavedAnthropicKey
+                      ? 'border-[rgba(84,190,120,0.28)] bg-[rgba(84,190,120,0.12)] text-[rgb(147,220,169)]'
+                      : 'border-[var(--border-soft)] bg-[var(--surface2)] text-[var(--muted-foreground)]',
+                  ].join(' ')}
+                >
+                  {hasSavedGeminiKey || hasSavedAnthropicKey ? 'Configured' : 'Missing key'}
+                </span>
+              </div>
 
-              <Button
-                type="button"
-                onClick={onSave}
-                disabled={isSaving || !hasDraftChanged}
-                className="h-11 rounded-full px-4"
-              >
-                {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : <Check className="size-4" />}
-                Save provider key
-              </Button>
-            </div>
-          </div>
-        </section>
+              <article className="rounded-[24px] border border-[var(--border-soft)] bg-[var(--surface)] p-5">
+                <div className="flex items-center gap-3">
+                  <div className="inline-flex size-10 items-center justify-center rounded-[14px] bg-[var(--surface2)]">
+                    <img src={geminiIcon} alt="" aria-hidden="true" className="size-6 object-contain" />
+                  </div>
+                  <div>
+                    <h3 className="text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                      Gemini
+                    </h3>
+                    <p className="text-[12px] leading-4 text-[var(--muted-foreground)]">
+                      Used by the Google model picker and Director text responses.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+                  <label className="grid gap-2">
+                    <span className="text-[12px] font-medium leading-4 tracking-[0] text-[var(--muted-foreground)]">
+                      Gemini API key
+                    </span>
+                    <div className="flex h-11 items-center rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] px-3">
+                      <Input
+                        aria-label="Gemini API key"
+                        type={isKeyVisible ? 'text' : 'password'}
+                        value={geminiApiKeyDraft}
+                        onChange={(event) => onGeminiApiKeyChange(event.target.value)}
+                        placeholder="GEMINI_API_KEY"
+                        className="h-9 min-w-0 flex-1 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
+                      />
+                      <button
+                        type="button"
+                        aria-label={isKeyVisible ? 'Hide Gemini API key' : 'Show Gemini API key'}
+                        onClick={() => onKeyVisibleChange(!isKeyVisible)}
+                        className="ml-2 inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
+                      >
+                        {isKeyVisible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                      </button>
+                    </div>
+                  </label>
+
+                  <Button
+                    type="button"
+                    onClick={onSave}
+                    disabled={isSaving || !hasDraftChanged}
+                    className="h-11 rounded-full px-4"
+                  >
+                    {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : <Check className="size-4" />}
+                    Save provider keys
+                  </Button>
+                </div>
+              </article>
+
+              <article className="rounded-[24px] border border-[var(--border-soft)] bg-[var(--surface)] p-5">
+                <div className="flex items-center gap-3">
+                  <div className="inline-flex size-10 items-center justify-center rounded-[14px] bg-[var(--surface2)]">
+                    <img src={claudeIcon} alt="" aria-hidden="true" className="size-6 object-contain" />
+                  </div>
+                  <div>
+                    <h3 className="text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                      Claude
+                    </h3>
+                    <p className="text-[12px] leading-4 text-[var(--muted-foreground)]">
+                      Used by the Claude model picker and Director text responses.
+                    </p>
+                  </div>
+                  <span
+                    className={[
+                      'ml-auto inline-flex h-7 items-center rounded-full border px-2.5 text-[11px] font-medium',
+                      hasSavedAnthropicKey
+                        ? 'border-[rgba(84,190,120,0.28)] bg-[rgba(84,190,120,0.12)] text-[rgb(147,220,169)]'
+                        : 'border-[var(--border-soft)] bg-[var(--surface2)] text-[var(--muted-foreground)]',
+                    ].join(' ')}
+                  >
+                    {hasSavedAnthropicKey ? 'Configured' : 'Missing key'}
+                  </span>
+                </div>
+
+                <div className="mt-5 grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+                  <label className="grid gap-2">
+                    <span className="text-[12px] font-medium leading-4 tracking-[0] text-[var(--muted-foreground)]">
+                      Anthropic API key
+                    </span>
+                    <div className="flex h-11 items-center rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] px-3">
+                      <Input
+                        aria-label="Anthropic API key"
+                        type={isAnthropicKeyVisible ? 'text' : 'password'}
+                        value={anthropicApiKeyDraft}
+                        onChange={(event) => onAnthropicApiKeyChange(event.target.value)}
+                        placeholder="ANTHROPIC_API_KEY"
+                        className="h-9 min-w-0 flex-1 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
+                      />
+                      <button
+                        type="button"
+                        aria-label={isAnthropicKeyVisible ? 'Hide Anthropic API key' : 'Show Anthropic API key'}
+                        onClick={() => onAnthropicKeyVisibleChange(!isAnthropicKeyVisible)}
+                        className="ml-2 inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
+                      >
+                        {isAnthropicKeyVisible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                      </button>
+                    </div>
+                  </label>
+
+                  <Button
+                    type="button"
+                    onClick={onSave}
+                    disabled={isSaving || !hasDraftChanged}
+                    className="h-11 rounded-full px-4"
+                  >
+                    {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : <Check className="size-4" />}
+                    Save provider keys
+                  </Button>
+                </div>
+              </article>
+            </motion.section>
+          ) : (
+            <motion.section
+              key="providers-image"
+              initial={{ opacity: 0, filter: 'blur(2px)' }}
+              animate={{ opacity: 1, filter: 'blur(0px)' }}
+              exit={{ opacity: 0, filter: 'blur(2px)' }}
+              transition={providerContentTransition}
+              className="grid gap-4"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-4 px-1">
+                <div className="flex items-center gap-3">
+                  <div className="inline-flex size-11 items-center justify-center rounded-[16px] bg-[var(--surface2)]">
+                    <ImagePlus className="size-5 text-[var(--muted-foreground)]" />
+                  </div>
+                  <div>
+                    <h2 className="text-[16px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                      Codex image auth
+                    </h2>
+                    <p className="mt-1 text-[13px] leading-5 text-[var(--muted-foreground)]">
+                      {activeCodexAccount
+                        ? `Active account: ${activeCodexAccount.email || activeCodexAccount.accountId}`
+                        : 'No active Codex image account.'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    onClick={onRefreshCodexLimits}
+                    disabled={!hasCodexAccounts || isRefreshingCodexLimits}
+                    className="h-10 rounded-full px-3"
+                  >
+                    {isRefreshingCodexLimits ? (
+                      <LoaderCircle className="size-4 animate-spin" />
+                    ) : (
+                      <RotateCcw className="size-4" />
+                    )}
+                    Refresh limits
+                  </Button>
+                  <Button
+                    type="button"
+                    onClick={onStartCodexOAuth}
+                    disabled={isStartingCodexOAuth}
+                    className="h-10 rounded-full px-3"
+                  >
+                    {isStartingCodexOAuth ? (
+                      <LoaderCircle className="size-4 animate-spin" />
+                    ) : (
+                      <Plus className="size-4" />
+                    )}
+                    Add account
+                  </Button>
+                </div>
+              </div>
+
+              {hasCodexAccounts ? (
+                <div className="grid gap-3">
+                  {codexImageAccounts.map((account) => {
+                    const isActive = account.id === activeCodexImageAccountId;
+                    const isExpanded = expandedCodexAccountId === account.id;
+                    const isAccountBusy = codexImageAccountActionId === account.id;
+                    const limits = getCodexProviderLimitSlots(account);
+                    const accountLabel = account.email || account.accountId;
+                    const detailsId = `codex-account-details-${account.id}`;
+                    return (
+                      <article
+                        key={account.id}
+                        className={[
+                          'overflow-hidden rounded-[24px] border bg-[var(--surface)] transition-colors',
+                          isActive ? 'border-[rgba(65,130,230,0.7)]' : 'border-[var(--border-soft)]',
+                        ].join(' ')}
+                      >
+                        <div className="grid gap-3 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+                          <button
+                            type="button"
+                            aria-expanded={isExpanded}
+                            aria-controls={detailsId}
+                            aria-label={`${isExpanded ? 'Collapse' : 'Expand'} Codex image account ${accountLabel}`}
+                            onClick={() =>
+                              setExpandedCodexAccountId((current) => (current === account.id ? null : account.id))
+                            }
+                            className="min-w-0 rounded-[18px] text-left outline-none transition-colors hover:bg-white/5 focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                          >
+                            <div className="flex min-w-0 items-center gap-3 px-3 py-2">
+                              <div className="inline-flex size-10 shrink-0 items-center justify-center rounded-[14px] bg-[var(--surface2)]">
+                                {isAccountBusy ? (
+                                  <LoaderCircle className="size-4 animate-spin text-[var(--muted-foreground)]" />
+                                ) : isActive ? (
+                                  <Check className="size-4 text-[rgb(147,220,169)]" />
+                                ) : (
+                                  <KeyRound className="size-4 text-[var(--muted-foreground)]" />
+                                )}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                  <h3 className="max-w-full truncate text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                                    {accountLabel}
+                                  </h3>
+                                  {isActive ? (
+                                    <span className="inline-flex h-6 shrink-0 items-center rounded-full border border-[rgba(65,130,230,0.42)] bg-[rgba(65,130,230,0.14)] px-2 text-[11px] font-medium text-[rgb(145,184,244)]">
+                                      Active
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  <CodexProviderLimitChip label="5h" limit={limits.fiveHour} />
+                                  <CodexProviderLimitChip label="Weekly" limit={limits.weekly} />
+                                  <CodexProviderLimitChip label="Monthly" limit={limits.monthly} />
+                                </div>
+                              </div>
+                              <ChevronDown
+                                className={[
+                                  'size-4 shrink-0 text-[var(--muted-foreground)] transition-transform duration-200',
+                                  isExpanded ? 'rotate-180' : 'rotate-0',
+                                ].join(' ')}
+                              />
+                            </div>
+                          </button>
+
+                          <div className="flex flex-wrap items-center justify-end gap-2">
+                            {isActive ? (
+                              <span className="inline-flex h-9 items-center rounded-full border border-[rgba(84,190,120,0.28)] bg-[rgba(84,190,120,0.12)] px-3 text-[12px] font-medium text-[rgb(147,220,169)]">
+                                In use
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                aria-label={`Use Codex image account ${accountLabel}`}
+                                onClick={() => onSelectCodexImageAccount(account.id)}
+                                disabled={isAccountBusy}
+                                className="inline-flex h-9 items-center gap-2 rounded-full border border-[rgba(65,130,230,0.48)] bg-[rgba(65,130,230,0.14)] px-3 text-[12px] font-medium text-[rgb(170,203,255)] transition-colors hover:bg-[rgba(65,130,230,0.2)] disabled:opacity-60"
+                              >
+                                {isAccountBusy ? <LoaderCircle className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+                                Use account
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              aria-label={`Remove Codex image account ${accountLabel}`}
+                              onClick={() => onRemoveCodexImageAccount(account.id)}
+                              disabled={isAccountBusy}
+                              className="inline-flex size-9 shrink-0 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] text-[var(--muted-foreground)] transition-colors hover:border-[rgba(190,58,58,0.45)] hover:bg-[rgba(190,58,58,0.12)] hover:text-[rgb(255,154,154)] disabled:opacity-60"
+                            >
+                              {isAccountBusy ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                            </button>
+                          </div>
+                        </div>
+
+                        <AnimatePresence initial={false}>
+                          {isExpanded ? (
+                            <motion.div
+                              id={detailsId}
+                              initial={{ height: 0, opacity: 0, filter: 'blur(6px)' }}
+                              animate={{ height: 'auto', opacity: 1, filter: 'blur(0px)' }}
+                              exit={{ height: 0, opacity: 0, filter: 'blur(6px)' }}
+                              transition={codexAccountDetailsTransition}
+                              className="overflow-hidden border-t border-[var(--border-soft)]"
+                            >
+                              <div className="grid gap-4 p-4 pt-3">
+                                {account.limitsError ? (
+                                  <div className="flex items-start gap-2 rounded-[16px] border border-[rgba(190,58,58,0.24)] bg-[rgba(190,58,58,0.1)] px-3 py-2 text-[12px] leading-5 text-[rgb(255,174,174)]">
+                                    <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                                    <span>{account.limitsError}</span>
+                                  </div>
+                                ) : null}
+
+                                <div className="grid gap-2 text-[12px] leading-4 text-[var(--muted-foreground)] sm:grid-cols-2 lg:grid-cols-4">
+                                  <span className="rounded-full bg-[var(--surface2)] px-3 py-2">
+                                    Plan: {account.planType || 'Unknown'}
+                                  </span>
+                                  <span className="rounded-full bg-[var(--surface2)] px-3 py-2">
+                                    Account: {account.accountId}
+                                  </span>
+                                  <span className="rounded-full bg-[var(--surface2)] px-3 py-2">
+                                    Limits: {formatCodexProviderTimestamp(account.limitsLastCheckedAt)}
+                                  </span>
+                                  <span className="rounded-full bg-[var(--surface2)] px-3 py-2">
+                                    Token: {formatCodexProviderTimestamp(account.lastRefresh)}
+                                  </span>
+                                </div>
+
+                                <div className="grid gap-3 lg:grid-cols-3">
+                                  <CodexProviderLimitPanel title="5h Limit" limit={limits.fiveHour} />
+                                  <CodexProviderLimitPanel title="Weekly Limit" limit={limits.weekly} />
+                                  <CodexProviderLimitPanel title="Monthly Limit" limit={limits.monthly} />
+                                </div>
+
+                                {limits.other.length > 0 ? (
+                                  <div className="grid gap-2">
+                                    <h4 className="text-[12px] font-medium leading-4 text-[var(--muted-foreground)]">
+                                      Other Codex buckets
+                                    </h4>
+                                    <div className="grid gap-3 lg:grid-cols-2">
+                                      {limits.other.map((limit) => (
+                                        <CodexProviderLimitPanel
+                                          key={limit.id}
+                                          title={limit.title || limit.sourceLabel}
+                                          limit={limit}
+                                        />
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </div>
+                            </motion.div>
+                          ) : null}
+                        </AnimatePresence>
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="flex min-h-[220px] flex-col items-center justify-center rounded-[24px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)] px-6 text-center">
+                  <div className="inline-flex size-12 items-center justify-center rounded-[18px] bg-[var(--surface2)]">
+                    <Gauge className="size-5 text-[var(--muted-foreground)]" />
+                  </div>
+                  <h3 className="mt-4 text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                    No Codex image accounts
+                  </h3>
+                  <p className="mt-2 max-w-[420px] text-[13px] leading-5 text-[var(--muted-foreground)]">
+                    Connect a ChatGPT account with the Codex OAuth flow to generate images and monitor account limits.
+                  </p>
+                </div>
+              )}
+            </motion.section>
+          )}
+        </AnimatePresence>
       </div>
     </motion.section>
   );
@@ -11475,14 +12346,12 @@ function SortableRefFolderListRow({
     >
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <div className="group/card relative grid" style={{ gridTemplateColumns: '1fr 2.25fr', gap: '16px' }}>
-            <div className="relative overflow-hidden rounded-2xl bg-[var(--surface2)] border border-[var(--border-soft)]">
+          <div className="group/card relative grid" style={{ gridTemplateColumns: '360px 1fr', gap: '16px', height: '276px' }}>
+            <div className="relative flex h-full items-center justify-center overflow-hidden rounded-2xl bg-[var(--surface2)] border border-[var(--border-soft)]">
               {cover ? (
-                <img src={cover.previewUrl} alt={folder.title} className="block w-full transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover/card:scale-[1.03]" draggable={false} />
+                <img src={cover.previewUrl} alt={folder.title} className="max-h-full max-w-full object-contain transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover/card:scale-[1.03]" draggable={false} />
               ) : (
-                <div className="flex aspect-[4/3] items-center justify-center">
-                  <Folder className="size-8 text-[var(--muted-foreground)]/30" />
-                </div>
+                <Folder className="size-8 text-[var(--muted-foreground)]/30" />
               )}
               {/* Drag handle — top-left */}
               <div
@@ -11640,7 +12509,7 @@ function SortableRefImageListRow({
         <ContextMenuTrigger asChild>
           <div
             className="group/card relative grid cursor-pointer"
-            style={{ gridTemplateColumns: '1fr 2.25fr', gap: '16px' }}
+            style={{ gridTemplateColumns: '360px 1fr', gap: '16px' }}
             onClick={onClick}
             onDoubleClick={onDoubleClick}
           >
@@ -11808,9 +12677,9 @@ function SortableCarouselImage({
       style={{
         transform: CSS.Transform.toString(transform),
         transition: transition || 'transform 200ms cubic-bezier(0.22,1,0.36,1)',
-        flex: '0 0 calc(28% - 4px)',
+        flex: '0 0 auto',
+        height: 'calc(100% - 8px)',
         aspectRatio: '1 / 1',
-        padding: '8px',
         zIndex: isDragging ? 30 : undefined,
       }}
       className="group/img relative shrink-0"
@@ -11974,7 +12843,7 @@ function FolderImageCarousel({
     >
       <SortableContext items={orderedIds} strategy={horizontalListSortingStrategy}>
         <div className="overflow-hidden h-full" ref={setViewport}>
-          <div className="flex h-full gap-1.5 p-1.5">
+          <div className="flex h-full items-center gap-1.5 p-1.5">
             {images.map((image) => (
               <SortableCarouselImage
                 key={image.id}
@@ -11996,6 +12865,7 @@ function ReferencesWorkspace({
   route,
   sidebarWidth,
   isSidebarCollapsed,
+  onExpandSidebar,
   isSidebarResizing,
   onStartSidebarResize,
   seedFiles,
@@ -12017,6 +12887,7 @@ function ReferencesWorkspace({
   route: ReferenceLibraryRoute;
   sidebarWidth: number;
   isSidebarCollapsed: boolean;
+  onExpandSidebar: () => void;
   isSidebarResizing: boolean;
   onStartSidebarResize: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   seedFiles: File[];
@@ -12040,8 +12911,6 @@ function ReferencesWorkspace({
   const [openFolderId, setOpenFolderId] = useState<string | null>(null);
   const [isNewFolderDialogOpen, setIsNewFolderDialogOpen] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
-  const [isRenamingTitle, setIsRenamingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [selectedImageIds, setSelectedImageIds] = useState<string[]>([]);
   const [renameImageTarget, setRenameImageTarget] = useState<SavedReferenceImage | null>(null);
@@ -12061,7 +12930,6 @@ function ReferencesWorkspace({
   const hasInitializedRouteRef = useRef(false);
   const dragDepthRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const titleInputRef = useRef<HTMLInputElement>(null);
 
   const toggleImageSelection = useCallback((imageId: string) => {
     setSelectedImageIds((current) =>
@@ -12201,8 +13069,6 @@ function ReferencesWorkspace({
     setOpenFolderId(null);
     setIsNewFolderDialogOpen(false);
     setIsDragActive(false);
-    setIsRenamingTitle(false);
-    setTitleDraft('');
     setSelectedImageIds([]);
     setRenameImageTarget(null);
     setRenameFolderTarget(null);
@@ -12211,13 +13077,6 @@ function ReferencesWorkspace({
     setAnimatedTitleText(referenceRouteHeaderLabels[route]);
     setRefViewMode('grid');
   }, [route]);
-
-  useEffect(() => {
-    if (isRenamingTitle && titleInputRef.current) {
-      titleInputRef.current.focus();
-      titleInputRef.current.select();
-    }
-  }, [isRenamingTitle]);
 
   useEffect(() => {
     if (!displayFolder) {
@@ -12271,20 +13130,6 @@ function ReferencesWorkspace({
     } finally {
       setIsSaving(false);
     }
-  }
-
-  async function commitRename() {
-    if (!activeFolderId || !displayFolder || !titleDraft.trim()) {
-      setIsRenamingTitle(false);
-      return;
-    }
-    const newTitle = titleDraft.trim();
-    if (newTitle === displayFolder.title) {
-      setIsRenamingTitle(false);
-      return;
-    }
-    setIsRenamingTitle(false);
-    await onRenameFolder({ folderId: activeFolderId, category: route, newTitle });
   }
 
   function downloadReferenceImage(image: SavedReferenceImage) {
@@ -12548,7 +13393,7 @@ function ReferencesWorkspace({
       >
         <AnimatePresence mode="wait" initial={false}>
           <motion.div
-            key={`reference-header-${route}-${displayFolder?.id ?? 'empty'}-${isRenamingTitle ? 'editing' : 'view'}`}
+            key={`reference-header-${route}-${displayFolder?.id ?? 'empty'}`}
             initial={{ opacity: 0, filter: 'blur(6px)', y: 4 }}
             animate={{ opacity: 1, filter: 'blur(0px)', y: 0 }}
             exit={{ opacity: 0, filter: 'blur(6px)', y: -3 }}
@@ -12556,13 +13401,22 @@ function ReferencesWorkspace({
             data-testid="reference-header-chrome"
             className="flex h-9 items-center gap-1.5 overflow-hidden rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] px-2.5 shadow-[0_10px_30px_rgba(0,0,0,0.3)] backdrop-blur-2xl"
           >
+            {isSidebarCollapsed ? (
+              <button
+                type="button"
+                aria-label="Expand sidebar"
+                onClick={onExpandSidebar}
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-transparent hover:text-[var(--foreground)]"
+              >
+                <PanelLeftOpen className="size-3.5" />
+              </button>
+            ) : null}
             {parentFolder ? (
               <button
                 type="button"
                 aria-label={`Voltar para ${parentFolder.title}`}
                 onClick={() => {
                   setOpenFolderId(parentFolder.id);
-                  setIsRenamingTitle(false);
                 }}
                 className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
               >
@@ -12573,56 +13427,24 @@ function ReferencesWorkspace({
               aria-label={breadcrumbAriaLabel}
               className="min-w-0 text-[16px] font-medium leading-none tracking-[0] text-[var(--foreground)]"
             >
-              {isRenamingTitle && displayFolder ? (
-                <input
-                  ref={titleInputRef}
-                  value={titleDraft}
-                  onChange={(e) => setTitleDraft(e.target.value)}
-                  onBlur={() => {
-                    void commitRename();
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      void commitRename();
-                    }
-                    if (e.key === 'Escape') {
-                      setIsRenamingTitle(false);
-                    }
-                  }}
-                  className="min-w-[240px] bg-transparent text-[16px] font-medium leading-none tracking-[0] text-[var(--foreground)] outline-none"
-                />
-              ) : displayFolder ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTitleDraft(displayFolder.title);
-                    setIsRenamingTitle(true);
-                  }}
-                  className="group inline-flex min-w-0 max-w-full items-center text-left"
-                  title="Clique para renomear"
-                >
-                  <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--muted-foreground)]">
-                    <span className="rounded-full border border-white/8 bg-[rgba(32,32,33,0.78)] px-2.5 py-1 text-[11px] uppercase">
-                      {referenceRouteHeaderLabels[route]}
+              {displayFolder ? (
+                <span className="inline-flex min-w-0 max-w-full items-center">
+                  {openFolderPath.length > 1 ? (
+                    <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--muted-foreground)]">
+                      {openFolderPath.slice(0, -1).map((folder) => (
+                        <Fragment key={`reference-breadcrumb-parent-${folder.id}`}>
+                          <span className="max-w-[160px] truncate text-[13px] text-[var(--muted-foreground)]">
+                            {folder.title}
+                          </span>
+                          <ChevronRight className="size-3.5 text-[var(--muted-foreground)]/70" />
+                        </Fragment>
+                      ))}
                     </span>
-                    {openFolderPath.slice(0, -1).map((folder) => (
-                      <Fragment key={`reference-breadcrumb-parent-${folder.id}`}>
-                        <ChevronRight className="size-3.5 text-[var(--muted-foreground)]/70" />
-                        <span className="max-w-[160px] truncate text-[13px] text-[var(--muted-foreground)]">
-                          {folder.title}
-                        </span>
-                      </Fragment>
-                    ))}
-                    <ChevronRight className="size-3.5 text-[var(--muted-foreground)]/70" />
-                  </span>
-                  <span className="relative min-w-0 max-w-[320px] pr-0">
+                  ) : null}
+                  <span className="min-w-0 max-w-[320px]">
                     <SlotText text={animatedTitleText} className="truncate text-[16px] text-[var(--foreground)]" />
-                    <span className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 opacity-0 transition-[opacity,transform] duration-200 group-hover:translate-x-4 group-hover:opacity-55">
-                      <Pencil className="size-3.5" />
-                    </span>
                   </span>
-                </button>
+                </span>
               ) : (
                 <SlotText text={animatedTitleText} className="truncate" />
               )}
@@ -12736,7 +13558,6 @@ function ReferencesWorkspace({
                           type="button"
                           onClick={() => {
                             setOpenFolderId(topLevelFolder.id);
-                            setIsRenamingTitle(false);
                           }}
                           className={[
                             'flex min-h-10 w-full items-center rounded-[12px] px-3 text-left text-[13px] transition-colors',
@@ -12780,7 +13601,7 @@ function ReferencesWorkspace({
         animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
         exit={{ opacity: 0, y: -4, filter: 'blur(6px)' }}
         transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
-        className="min-h-full px-8 pb-10 pt-8"
+        className="min-h-full px-4 pb-10 pt-1.5"
         onDragEnter={(e) => {
           if (isSoloFolder || !displayFolder) return;
           e.preventDefault();
@@ -12830,7 +13651,7 @@ function ReferencesWorkspace({
           </div>
         ) : null}
 
-        <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-8 pt-6">
+        <div className="flex w-full flex-col gap-8">
           {displayFolder ? (
             <>
               <AnimatePresence mode="wait" initial={false}>

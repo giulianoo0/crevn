@@ -211,12 +211,94 @@ vi.mock('./lib/electron-api', () => ({
       gemini: {
         apiKey: '',
       },
+      anthropic: {
+        apiKey: '',
+      },
+    },
+    image: {
+      codex: {
+        activeAccountId: null,
+        accounts: [],
+      },
     },
   })),
   updateProviderSettings: vi.fn(async () => ({
     text: {
       gemini: {
         apiKey: 'saved-gemini-key',
+      },
+      anthropic: {
+        apiKey: '',
+      },
+    },
+    image: {
+      codex: {
+        activeAccountId: null,
+        accounts: [],
+      },
+    },
+  })),
+  startCodexImageOAuth: vi.fn(async () => ({
+    text: {
+      gemini: {
+        apiKey: '',
+      },
+      anthropic: {
+        apiKey: '',
+      },
+    },
+    image: {
+      codex: {
+        activeAccountId: null,
+        accounts: [],
+      },
+    },
+  })),
+  selectCodexImageAccount: vi.fn(async () => ({
+    text: {
+      gemini: {
+        apiKey: '',
+      },
+      anthropic: {
+        apiKey: '',
+      },
+    },
+    image: {
+      codex: {
+        activeAccountId: null,
+        accounts: [],
+      },
+    },
+  })),
+  removeCodexImageAccount: vi.fn(async () => ({
+    text: {
+      gemini: {
+        apiKey: '',
+      },
+      anthropic: {
+        apiKey: '',
+      },
+    },
+    image: {
+      codex: {
+        activeAccountId: null,
+        accounts: [],
+      },
+    },
+  })),
+  refreshCodexImageAccountLimits: vi.fn(async () => ({
+    text: {
+      gemini: {
+        apiKey: '',
+      },
+      anthropic: {
+        apiKey: '',
+      },
+    },
+    image: {
+      codex: {
+        activeAccountId: null,
+        accounts: [],
       },
     },
   })),
@@ -861,6 +943,7 @@ vi.mock('framer-motion', async () => {
   return {
     AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
     motion,
+    useReducedMotion: () => false,
   };
 });
 
@@ -872,14 +955,9 @@ vi.mock('@number-flow/react', () => ({
   default: ({ value }: { value: number }) => <span>{value}</span>,
 }));
 
-vi.mock('img-fx', () => ({
-  ImageGeneration: ({ children }: { children: unknown }) => <>{children}</>,
-}));
-
 vi.mock('./components/generated-image-grid', () => ({
   GeneratedImageGrid: ({
     images,
-    loadingEffect,
     selectedImageIds,
     onImageSelect,
     onImageOpen,
@@ -889,7 +967,6 @@ vi.mock('./components/generated-image-grid', () => ({
     onImageDelete,
   }: {
     images?: Array<{ id: string; fileName: string; prompt?: string | null }>;
-    loadingEffect?: 'shimmer' | 'img-fx';
     selectedImageIds?: string[];
     onImageSelect?: (image: { id: string; fileName: string; prompt?: string | null }) => void;
     onImageOpen?: (image: { id: string; fileName: string; prompt?: string | null }) => void;
@@ -901,7 +978,7 @@ vi.mock('./components/generated-image-grid', () => ({
     const clickTimeouts = new Map<string, number>();
 
     return (
-      <div data-testid="generated-image-grid" data-loading-effect={loadingEffect ?? 'shimmer'}>
+      <div data-testid="generated-image-grid">
         {images?.map((image) => (
           <div key={image.id}>
             {'isLoading' in image && image.isLoading ? (
@@ -1176,6 +1253,51 @@ describe('App header thread title', () => {
     expect(document.querySelector('.app-splash-logo')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
     expect(toast.error).toHaveBeenCalledWith('Startup workspace load timed out after 12000ms.');
+  });
+
+  it('opens the app shell without eagerly decoding saved reference previews during startup', async () => {
+    const atobSpy = vi.spyOn(window, 'atob');
+    vi.mocked(electronApi.listReferences).mockResolvedValueOnce([
+      {
+        id: 'reference-1',
+        name: 'startup-reference.png',
+        title: 'Startup Reference',
+        description: null,
+        mimeType: 'image/png',
+        bytesBase64: ONE_PIXEL_PNG_BASE64,
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'characters',
+        collectionId: null,
+        environmentId: null,
+        parentFolderId: null,
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
+    expect(document.querySelector('.app-splash-logo')).not.toBeInTheDocument();
+    expect(atobSpy).not.toHaveBeenCalled();
+  });
+
+  it('opens the app shell before saved references finish loading during startup', async () => {
+    vi.mocked(electronApi.listReferences).mockImplementationOnce(
+      () => new Promise<never>(() => undefined)
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
+    expect(document.querySelector('.app-splash-logo')).not.toBeInTheDocument();
   });
 
   it('uses the compact 36px thread header and centered tab selection chrome', async () => {
@@ -1968,7 +2090,7 @@ describe('App header thread title', () => {
     expect(screen.queryByLabelText('Remove frame-1.png')).not.toBeInTheDocument();
   });
 
-  it('uses img-fx loading tiles in the Classic generated image grid', async () => {
+  it('uses the default loading tiles in the Classic generated image grid', async () => {
     vi.mocked(electronApi.listGeneratedImages).mockResolvedValue([
       {
         id: 'generated-1',
@@ -1984,7 +2106,7 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(screen.getByTestId('generated-image-grid')).toHaveAttribute('data-loading-effect', 'img-fx');
+    expect(screen.getByTestId('generated-image-grid')).not.toHaveAttribute('data-loading-effect');
   });
 
   it('opens a generated image preview dialog on double click without selecting it', async () => {
@@ -2941,7 +3063,7 @@ describe('App header thread title', () => {
     fireEvent.change(screen.getByLabelText('Gemini API key'), {
       target: { value: 'saved-gemini-key' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save provider key' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Save provider keys' })[0]);
 
     await act(async () => {
       await vi.runAllTimersAsync();
@@ -2952,8 +3074,139 @@ describe('App header thread title', () => {
         gemini: {
           apiKey: 'saved-gemini-key',
         },
+        anthropic: {
+          apiKey: '',
+        },
       },
     });
+  });
+
+  it('switches persisted Codex image accounts from the Providers Image sidebar view', async () => {
+    const codexAccounts = [
+      {
+        id: 'codex-account-1',
+        accountId: 'chatgpt-account-1',
+        email: 'first@example.com',
+        planType: 'pro',
+        chatgptUserId: 'user-1',
+        isFedrampAccount: false,
+        lastRefresh: '2026-06-15T10:00:00.000Z',
+        limits: [
+          {
+            limitId: 'codex',
+            limitName: null,
+            primary: {
+              usedPercent: 9,
+              windowMinutes: 300,
+              resetsAt: 1781515800,
+            },
+            secondary: {
+              usedPercent: 50,
+              windowMinutes: 7 * 24 * 60,
+              resetsAt: 1781906400,
+            },
+            credits: null,
+            individualLimit: null,
+            planType: 'free',
+            rateLimitReachedType: null,
+          },
+          {
+            limitId: 'monthly-limit',
+            limitName: 'monthly-limit',
+            primary: {
+              usedPercent: 35,
+              windowMinutes: 30 * 24 * 60,
+              resetsAt: 1784102400,
+            },
+            secondary: null,
+            credits: null,
+            individualLimit: null,
+            planType: 'free',
+            rateLimitReachedType: null,
+          },
+        ],
+        limitsLastCheckedAt: '2026-06-15T10:30:00.000Z',
+        limitsError: null,
+        createdAt: '2026-06-15T10:00:00.000Z',
+        updatedAt: '2026-06-15T10:00:00.000Z',
+      },
+      {
+        id: 'codex-account-2',
+        accountId: 'chatgpt-account-2',
+        email: 'second@example.com',
+        planType: 'plus',
+        chatgptUserId: 'user-2',
+        isFedrampAccount: false,
+        lastRefresh: '2026-06-15T11:00:00.000Z',
+        limits: [],
+        limitsLastCheckedAt: null,
+        limitsError: null,
+        createdAt: '2026-06-15T11:00:00.000Z',
+        updatedAt: '2026-06-15T11:00:00.000Z',
+      },
+    ];
+    vi.mocked(electronApi.getProviderSettings).mockResolvedValueOnce({
+      text: {
+        gemini: {
+          apiKey: '',
+        },
+        anthropic: {
+          apiKey: '',
+        },
+      },
+      image: {
+        codex: {
+          activeAccountId: 'codex-account-1',
+          accounts: codexAccounts,
+        },
+      },
+    });
+    vi.mocked(electronApi.selectCodexImageAccount).mockResolvedValueOnce({
+      text: {
+        gemini: {
+          apiKey: '',
+        },
+        anthropic: {
+          apiKey: '',
+        },
+      },
+      image: {
+        codex: {
+          activeAccountId: 'codex-account-2',
+          accounts: codexAccounts,
+        },
+      },
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Image' }));
+
+    expect(screen.getByRole('heading', { name: 'Codex image auth' })).toBeInTheDocument();
+    expect(screen.getByText('first@example.com')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Collapse Codex image account first@example.com' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '5h Limit' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Weekly Limit' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Monthly Limit' })).toBeInTheDocument();
+    expect(screen.getByText('5 hour window')).toBeInTheDocument();
+    expect(screen.getByText('7 day window')).toBeInTheDocument();
+    expect(screen.getByText('30 day window')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Codex image account first@example.com' }));
+    expect(screen.queryByText('5 hour window')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Use Codex image account second@example.com' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(electronApi.selectCodexImageAccount).toHaveBeenCalledWith('codex-account-2');
   });
 
   it('exports projects and threads from sidebar row actions', async () => {

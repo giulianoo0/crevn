@@ -150,13 +150,18 @@ export function MentionPlugin({
         const beforeAt = text.slice(0, matchStart);
         const afterMatch = text.slice(matchEnd);
         const previousSibling = targetNode.getPreviousSibling();
+        // The selector folding logic below only makes sense when the trigger is
+        // a selector char (`.`, `#`, `/`, `:`) drilling into the preceding chip.
+        // A plain `@` mention that merely follows another chip (e.g. typing
+        // "@Tito @Nina") must NOT fold into / replace that chip.
+        const isSelectorTrigger = text[matchStart] !== '@';
         // The selector (`.`) sits right after a chip, possibly with stray
         // whitespace between them (the trailing space we insert after a chip).
         // Treat that case as "attached to the chip" so we reuse/replace it
         // instead of leaving a duplicate, and drop the blank gap.
         const beforeIsBlank = beforeAt.trim().length === 0;
         const previousIsMention = Boolean(
-          beforeIsBlank && previousSibling && $isMentionNode(previousSibling),
+          isSelectorTrigger && beforeIsBlank && previousSibling && $isMentionNode(previousSibling),
         );
         const effectiveBeforeAt = previousIsMention ? '' : beforeAt;
         const shouldReusePreviousMention =

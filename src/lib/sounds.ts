@@ -15,6 +15,7 @@ export const sounds = {
   copy: () => play('copy'),
   select: () => play('select'),
   move: () => play('copy'),
+  send: () => play('send'),
   success: () => play('success'),
   notification: () => play('notification'),
   error: () => play('error'),

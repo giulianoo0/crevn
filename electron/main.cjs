@@ -1,10 +1,22 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol } = require('electron');
+const mainStartupStartedAt = Date.now();
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const fs = require('node:fs/promises');
 const path = require('path');
 const { pathToFileURL } = require('node:url');
 const { createAutoUpdateManager } = require('./autoUpdate.cjs');
 const { createAppLogger, installConsoleFileLogger } = require('./appLogger.cjs');
+const {
+  getActiveCodexImageAccount,
+  refreshAllCodexImageAccountLimits: refreshCodexImageAccountLimitsInSettings,
+  refreshCodexImageAccountToken,
+  removeCodexImageAccount,
+  runCodexImageOAuthFlow,
+  selectCodexImageAccount,
+  shouldRefreshCodexImageAccountToken,
+  toPublicProviderSettings,
+  upsertCodexImageAccount,
+} = require('./codexImageAuth.cjs');
 const { createGenerationStore, getAppDataPaths } = require('./generation.cjs');
 const { applyProviderSettingsToEnv, createProviderSettingsStore } = require('./providerSettings.cjs');
 const packageManifest = require('../package.json');
@@ -29,6 +41,84 @@ const appLogger = createAppLogger();
 
 installConsoleFileLogger(appLogger);
 console.info(`[crenv:app] logFile: ${appLogger.logFilePath}`);
+
+function getStartupDurationMs(startedAt = mainStartupStartedAt) {
+  return Math.max(0, Date.now() - startedAt);
+}
+
+function safeStartupFields(fields = {}) {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, value]) =>
+      ['string', 'number', 'boolean'].includes(typeof value) || value === null
+    )
+  );
+}
+
+function logStartup(label, startedAt = mainStartupStartedAt, fields = {}) {
+  console.info(
+    `[crenv:startup] ${label} ${JSON.stringify({
+      durationMs: getStartupDurationMs(startedAt),
+      elapsedMs: getStartupDurationMs(mainStartupStartedAt),
+      ...safeStartupFields(fields),
+    })}`
+  );
+}
+
+function summarizeStartupResult(result) {
+  if (Array.isArray(result)) {
+    return { resultType: 'array', count: result.length };
+  }
+  if (result && typeof result === 'object') {
+    if (result.project && result.thread) {
+      return {
+        resultType: 'workspace',
+        projectId: result.project.id ?? null,
+        threadId: result.thread.id ?? null,
+      };
+    }
+    if (typeof result.state === 'string') {
+      return {
+        resultType: 'updateStatus',
+        state: result.state,
+        version: result.version ?? null,
+      };
+    }
+    if (typeof result.name === 'string' && typeof result.version === 'string') {
+      return {
+        resultType: 'appInfo',
+        name: result.name,
+        version: result.version,
+      };
+    }
+    return { resultType: 'object' };
+  }
+  return { resultType: typeof result };
+}
+
+function handleStartupIpc(channel, handler) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    const startedAt = Date.now();
+    logStartup(`ipc ${channel} started`, startedAt, {
+      argCount: args.length,
+      firstArg: typeof args[0] === 'string' ? args[0] : null,
+    });
+    try {
+      const result = await handler(event, ...args);
+      logStartup(`ipc ${channel} completed`, startedAt, summarizeStartupResult(result));
+      return result;
+    } catch (error) {
+      logStartup(`ipc ${channel} failed`, startedAt, {
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  });
+}
+
+logStartup('main module loaded', mainStartupStartedAt, {
+  pid: process.pid,
+  nodeEnv: process.env.NODE_ENV ?? null,
+});
 
 process.on('uncaughtException', (error) => {
   console.error('[crenv:app] uncaughtException', error);
@@ -116,7 +206,74 @@ function getSourceAppInfo() {
   };
 }
 
+async function readPublicProviderSettings() {
+  return toPublicProviderSettings(await providerSettingsStore.read());
+}
+
+async function updateTextProviderSettings(payload) {
+  const current = await providerSettingsStore.read();
+  const updated = await providerSettingsStore.update({
+    ...current,
+    text: payload?.text ?? current.text,
+  });
+  return toPublicProviderSettings(updated);
+}
+
+function toImageGenerationCodexAuth(account) {
+  if (!account?.tokens?.accessToken || !account?.accountId) {
+    return null;
+  }
+  return {
+    accessToken: account.tokens.accessToken,
+    accountId: account.accountId,
+    isFedrampAccount: Boolean(account.isFedrampAccount),
+  };
+}
+
+async function getActiveCodexImageAuthForGeneration() {
+  let settings = await providerSettingsStore.read();
+  let account = getActiveCodexImageAccount(settings);
+  if (!account) {
+    return null;
+  }
+
+  if (shouldRefreshCodexImageAccountToken(account)) {
+    const refreshed = await refreshCodexImageAccountToken(account);
+    settings = await providerSettingsStore.update(upsertCodexImageAccount(settings, refreshed));
+    account = getActiveCodexImageAccount(settings);
+  }
+
+  return toImageGenerationCodexAuth(account);
+}
+
+async function refreshCodexImageAccountLimitsForStore() {
+  const settings = await providerSettingsStore.read();
+  const refreshed = await refreshCodexImageAccountLimitsInSettings(settings);
+  return providerSettingsStore.update(refreshed);
+}
+
+async function startCodexImageOAuthAndPersistAccount() {
+  const account = await runCodexImageOAuthFlow({
+    openExternal: (url) => shell.openExternal(url),
+  });
+  const withAccount = upsertCodexImageAccount(await providerSettingsStore.read(), account);
+  const refreshed = await refreshCodexImageAccountLimitsInSettings(withAccount);
+  return toPublicProviderSettings(await providerSettingsStore.update(refreshed));
+}
+
+async function selectCodexImageAccountInStore(accountId) {
+  const selected = selectCodexImageAccount(await providerSettingsStore.read(), accountId);
+  return toPublicProviderSettings(await providerSettingsStore.update(selected));
+}
+
+async function removeCodexImageAccountFromStore(accountId) {
+  const removed = removeCodexImageAccount(await providerSettingsStore.read(), accountId);
+  return toPublicProviderSettings(await providerSettingsStore.update(removed));
+}
+
 const createWindow = () => {
+  const createWindowStartedAt = Date.now();
+  logStartup('browser window create started', createWindowStartedAt);
   mainWindow = new BrowserWindow({
     width: 1024,
     height: 768,
@@ -128,9 +285,44 @@ const createWindow = () => {
       backgroundThrottling: false,
     },
   });
+  logStartup('browser window constructed', createWindowStartedAt);
 
   mainWindow.on('closed', () => {
+    logStartup('browser window closed', createWindowStartedAt);
     mainWindow = null;
+  });
+
+  mainWindow.on('unresponsive', () => {
+    logStartup('browser window unresponsive', createWindowStartedAt);
+  });
+
+  mainWindow.on('responsive', () => {
+    logStartup('browser window responsive', createWindowStartedAt);
+  });
+
+  let loadStartedAt = Date.now();
+  mainWindow.webContents.on('did-start-loading', () => {
+    loadStartedAt = Date.now();
+    logStartup('webContents did-start-loading', loadStartedAt);
+  });
+  mainWindow.webContents.on('dom-ready', () => {
+    logStartup('webContents dom-ready', loadStartedAt);
+  });
+  mainWindow.webContents.on('did-finish-load', () => {
+    logStartup('webContents did-finish-load', loadStartedAt);
+  });
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    logStartup('webContents did-fail-load', loadStartedAt, {
+      errorCode,
+      errorDescription,
+      url: validatedURL,
+    });
+  });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    logStartup('webContents render-process-gone', loadStartedAt, {
+      reason: details.reason,
+      exitCode: details.exitCode,
+    });
   });
 
   mainWindow.setMenuBarVisibility(false);
@@ -152,10 +344,23 @@ const createWindow = () => {
   });
 
   if (process.env.NODE_ENV === 'development') {
-    mainWindow.loadURL('http://127.0.0.1:5173');
+    loadStartedAt = Date.now();
+    logStartup('webContents load requested', loadStartedAt, { target: 'vite-dev-server' });
+    mainWindow.loadURL('http://127.0.0.1:5173').catch((error) => {
+      logStartup('webContents load rejected', loadStartedAt, {
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    });
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    loadStartedAt = Date.now();
+    logStartup('webContents load requested', loadStartedAt, { target: 'dist-index' });
+    mainWindow.loadFile(path.join(__dirname, '../dist/index.html')).catch((error) => {
+      logStartup('webContents load rejected', loadStartedAt, {
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
+  logStartup('browser window create completed', createWindowStartedAt);
 };
 
 function registerAssetProtocol() {
@@ -179,62 +384,87 @@ function registerAssetProtocol() {
 }
 
 app.whenReady().then(async () => {
+  logStartup('app.whenReady resolved', mainStartupStartedAt, {
+    userDataDir: app.getPath('userData'),
+  });
   console.info(`[crenv:app] ready userDataDir=${app.getPath('userData')}`);
+  const assetProtocolStartedAt = Date.now();
   registerAssetProtocol();
+  logStartup('asset protocol registered', assetProtocolStartedAt);
+  const providerStoreStartedAt = Date.now();
   providerSettingsStore = createProviderSettingsStore(app.getPath('userData'));
+  logStartup('provider settings store created', providerStoreStartedAt);
+
+  ipcMain.on('app:startupLog', (_event, payload) => {
+    const fields =
+      payload && typeof payload === 'object' && payload.fields && typeof payload.fields === 'object'
+        ? payload.fields
+        : {};
+    const label = payload && typeof payload.label === 'string' ? payload.label : 'renderer startup log';
+    console.info(`[crenv:startup] ${label} ${JSON.stringify(safeStartupFields(fields))}`);
+  });
 
   // Initialize the generation store in the background so the window can be
   // created (and the renderer can begin loading) in parallel with the database
   // init. Every IPC handler awaits `storeReady` before touching the store.
   const initStore = async () => {
+    const initStoreStartedAt = Date.now();
+    logStartup('generation store init started', initStoreStartedAt);
+    const providerReadStartedAt = Date.now();
     applyProviderSettingsToEnv(await providerSettingsStore.read());
+    logStartup('provider settings read and applied', providerReadStartedAt);
+    const createStoreStartedAt = Date.now();
     const store = await createGenerationStore(app.getPath('userData'), {
-    onScenePlan: (payload) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('generation:scenePlan', payload);
-      }
-    },
-    onSceneFrameReady: (payload) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('generation:sceneFrameReady', payload);
-      }
-    },
-    onImageReady: (payload) => {
-      console.info(
-        `[crenv:renderer] generation:imageReady jobId=${payload.jobId} assetId=${payload.asset?.id ?? 'unknown'} clientRunId=${payload.clientRunId ?? 'none'}`
-      );
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('generation:imageReady', payload);
-      }
-    },
-    onDirectorMessageStart: (payload) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('generation:directorMessageStart', payload);
-      }
-    },
-    onDirectorMessageDelta: (payload) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('generation:directorMessageDelta', payload);
-      }
-    },
-    onDirectorMessageComplete: (payload) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('generation:directorMessageComplete', payload);
-      }
-    },
-    onDirectorMessageError: (payload) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('generation:directorMessageError', payload);
-      }
-    },
-    onDirectorSceneReady: (payload) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('generation:directorSceneReady', payload);
-      }
-    },
+      getActiveCodexImageAuth: getActiveCodexImageAuthForGeneration,
+      refreshAllCodexImageAccountLimits: refreshCodexImageAccountLimitsForStore,
+      onScenePlan: (payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('generation:scenePlan', payload);
+        }
+      },
+      onSceneFrameReady: (payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('generation:sceneFrameReady', payload);
+        }
+      },
+      onImageReady: (payload) => {
+        console.info(
+          `[crenv:renderer] generation:imageReady jobId=${payload.jobId} assetId=${payload.asset?.id ?? 'unknown'} clientRunId=${payload.clientRunId ?? 'none'}`
+        );
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('generation:imageReady', payload);
+        }
+      },
+      onDirectorMessageStart: (payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('generation:directorMessageStart', payload);
+        }
+      },
+      onDirectorMessageDelta: (payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('generation:directorMessageDelta', payload);
+        }
+      },
+      onDirectorMessageComplete: (payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('generation:directorMessageComplete', payload);
+        }
+      },
+      onDirectorMessageError: (payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('generation:directorMessageError', payload);
+        }
+      },
+      onDirectorSceneReady: (payload) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('generation:directorSceneReady', payload);
+        }
+      },
     });
+    logStartup('createGenerationStore resolved', createStoreStartedAt);
     generationStore = store;
     resolveStoreReady(store);
+    logStartup('generation store init completed', initStoreStartedAt);
     console.info('[crenv:app] generation store ready');
   };
   initStore().catch((error) => {
@@ -242,19 +472,19 @@ app.whenReady().then(async () => {
     rejectStoreReady(error);
   });
 
-  ipcMain.handle('generation:listGeneratedImages', async (_event, threadId) => {
+  handleStartupIpc('generation:listGeneratedImages', async (_event, threadId) => {
     return (await storeReady).listGeneratedImages(threadId);
   });
 
-  ipcMain.handle('generation:listProjectsWithThreads', async () => {
+  handleStartupIpc('generation:listProjectsWithThreads', async () => {
     return (await storeReady).listProjectsWithThreads();
   });
 
-  ipcMain.handle('generation:listReferences', async () => {
+  handleStartupIpc('generation:listReferences', async () => {
     return (await storeReady).listReferences();
   });
 
-  ipcMain.handle('generation:listReferenceFolders', async () => {
+  handleStartupIpc('generation:listReferenceFolders', async () => {
     return (await storeReady).listReferenceFolders();
   });
 
@@ -334,7 +564,7 @@ app.whenReady().then(async () => {
     return (await storeReady).describeReferenceCollection(payload);
   });
 
-  ipcMain.handle('generation:ensureProjectThreadWorkspace', async () => {
+  handleStartupIpc('generation:ensureProjectThreadWorkspace', async () => {
     return (await storeReady).ensureProjectThreadWorkspace();
   });
 
@@ -538,26 +768,46 @@ app.whenReady().then(async () => {
     await (await storeReady).deleteGeneratedImage(imageId);
   });
 
+  ipcMain.handle('generation:setGeneratedImageFavorite', async (_event, imageId, favorite) => {
+    return (await storeReady).setGeneratedImageFavorite(imageId, Boolean(favorite));
+  });
+
   autoUpdateManager = createAutoUpdateManager({
     app,
     autoUpdater,
     getWindow: () => mainWindow,
   });
 
-  ipcMain.handle('app:getUpdateStatus', async () => {
+  handleStartupIpc('app:getUpdateStatus', async () => {
     return autoUpdateManager.getStatus();
   });
 
-  ipcMain.handle('app:getInfo', async () => {
+  handleStartupIpc('app:getInfo', async () => {
     return getSourceAppInfo();
   });
 
-  ipcMain.handle('app:getProviderSettings', async () => {
-    return providerSettingsStore.read();
+  handleStartupIpc('app:getProviderSettings', async () => {
+    return readPublicProviderSettings();
   });
 
   ipcMain.handle('app:updateProviderSettings', async (_event, payload) => {
-    return providerSettingsStore.update(payload);
+    return updateTextProviderSettings(payload);
+  });
+
+  handleStartupIpc('app:startCodexImageOAuth', async () => {
+    return startCodexImageOAuthAndPersistAccount();
+  });
+
+  handleStartupIpc('app:selectCodexImageAccount', async (_event, accountId) => {
+    return selectCodexImageAccountInStore(accountId);
+  });
+
+  handleStartupIpc('app:removeCodexImageAccount', async (_event, accountId) => {
+    return removeCodexImageAccountFromStore(accountId);
+  });
+
+  handleStartupIpc('app:refreshCodexImageAccountLimits', async () => {
+    return toPublicProviderSettings(await refreshCodexImageAccountLimitsForStore());
   });
 
   ipcMain.handle('app:checkForUpdates', async () => {

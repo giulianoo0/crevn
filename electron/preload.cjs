@@ -1,11 +1,32 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+const preloadStartupStartedAt = Date.now();
+
+function getPreloadDurationMs() {
+  return Math.max(0, Date.now() - preloadStartupStartedAt);
+}
+
+function logStartup(label, fields = {}) {
+  ipcRenderer.send('app:startupLog', {
+    label,
+    fields: {
+      durationMs: getPreloadDurationMs(),
+      ...fields,
+    },
+  });
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
+  logStartup,
   getAppInfo: () => ipcRenderer.invoke('app:getInfo'),
   getUpdateStatus: () => ipcRenderer.invoke('app:getUpdateStatus'),
   getProviderSettings: () => ipcRenderer.invoke('app:getProviderSettings'),
   updateProviderSettings: (payload) => ipcRenderer.invoke('app:updateProviderSettings', payload),
+  startCodexImageOAuth: () => ipcRenderer.invoke('app:startCodexImageOAuth'),
+  selectCodexImageAccount: (accountId) => ipcRenderer.invoke('app:selectCodexImageAccount', accountId),
+  removeCodexImageAccount: (accountId) => ipcRenderer.invoke('app:removeCodexImageAccount', accountId),
+  refreshCodexImageAccountLimits: () => ipcRenderer.invoke('app:refreshCodexImageAccountLimits'),
   checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
   installUpdate: () => ipcRenderer.invoke('app:installUpdate'),
   listGeneratedImages: (threadId) => ipcRenderer.invoke('generation:listGeneratedImages', threadId),
@@ -64,6 +85,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   copyGeneratedImage: (imageId) => ipcRenderer.invoke('generation:copyGeneratedImage', imageId),
   downloadGeneratedImage: (imageId) => ipcRenderer.invoke('generation:downloadGeneratedImage', imageId),
   deleteGeneratedImage: (imageId) => ipcRenderer.invoke('generation:deleteGeneratedImage', imageId),
+  setGeneratedImageFavorite: (imageId, favorite) =>
+    ipcRenderer.invoke('generation:setGeneratedImageFavorite', imageId, favorite),
   subscribeToUpdateStatus: (listener) => {
     const wrappedListener = (_event, payload) => listener(payload);
     ipcRenderer.on('app:updateStatus', wrappedListener);
@@ -128,3 +151,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
 });
+
+logStartup('preload ready', { platform: process.platform });

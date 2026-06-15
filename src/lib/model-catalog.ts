@@ -1,6 +1,6 @@
 export type GenerationCapability = 'image' | 'text';
 
-export type GenerationProviderId = 'codex' | 'google';
+export type GenerationProviderId = 'codex' | 'google' | 'anthropic';
 
 export type ModelProviderOption = {
   id: GenerationProviderId;
@@ -20,6 +20,7 @@ export type ModelOption = {
 export const MODEL_PROVIDER_OPTIONS: ModelProviderOption[] = [
   { id: 'codex', label: 'Codex', capabilities: ['image'] },
   { id: 'google', label: 'Google', capabilities: ['text'] },
+  { id: 'anthropic', label: 'Claude', capabilities: ['text'] },
 ];
 
 export const MODEL_OPTIONS: ModelOption[] = [
@@ -49,6 +50,27 @@ export const MODEL_OPTIONS: ModelOption[] = [
     label: 'Gemini 3 Pro',
     providerId: 'google',
     tanstackModel: 'gemini-3-pro-preview',
+    capabilities: ['text'],
+  },
+  {
+    id: 'anthropic-claude-opus-4-8',
+    label: 'Claude Opus 4.8',
+    providerId: 'anthropic',
+    runtimeModel: 'claude-opus-4-8',
+    capabilities: ['text'],
+  },
+  {
+    id: 'anthropic-claude-sonnet-4-6',
+    label: 'Claude Sonnet 4.6',
+    providerId: 'anthropic',
+    runtimeModel: 'claude-sonnet-4-6',
+    capabilities: ['text'],
+  },
+  {
+    id: 'anthropic-claude-haiku-4-5',
+    label: 'Claude Haiku 4.5',
+    providerId: 'anthropic',
+    runtimeModel: 'claude-haiku-4-5',
     capabilities: ['text'],
   },
 ];

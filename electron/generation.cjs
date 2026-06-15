@@ -43,8 +43,43 @@ const DIRECTOR_MODEL_OPTIONS = [
     providerId: 'google',
     runtimeModel: 'gemini-3-pro-preview',
   },
+  {
+    id: 'anthropic-claude-opus-4-8',
+    label: 'Claude Opus 4.8',
+    providerId: 'anthropic',
+    runtimeModel: 'claude-opus-4-8',
+  },
+  {
+    id: 'anthropic-claude-sonnet-4-6',
+    label: 'Claude Sonnet 4.6',
+    providerId: 'anthropic',
+    runtimeModel: 'claude-sonnet-4-6',
+  },
+  {
+    id: 'anthropic-claude-haiku-4-5',
+    label: 'Claude Haiku 4.5',
+    providerId: 'anthropic',
+    runtimeModel: 'claude-haiku-4-5',
+  },
 ];
 const DEFAULT_DIRECTOR_MODEL_ID = 'google-gemini-3-5-flash';
+
+function getStartupDurationMs(startedAt) {
+  return Math.max(0, Date.now() - startedAt);
+}
+
+function logStartup(label, startedAt, fields = {}) {
+  console.info(
+    `[crenv:startup] ${label} ${JSON.stringify({
+      durationMs: getStartupDurationMs(startedAt),
+      ...Object.fromEntries(
+        Object.entries(fields).filter(([, value]) =>
+          ['string', 'number', 'boolean'].includes(typeof value) || value === null
+        )
+      ),
+    })}`
+  );
+}
 
 const IMAGE_MODEL_OPTIONS = [
   {
@@ -461,6 +496,7 @@ const generatedAssetsTable = sqliteTable('generated_assets', {
   providerImageId: text('provider_image_id'),
   outputIndex: integer('output_index'),
   reviewStatus: text('review_status'),
+  favorite: integer('favorite').notNull().default(0),
   createdAt: text('created_at').notNull(),
 });
 
@@ -719,6 +755,7 @@ const CREATE_GENERATED_ASSETS_TABLE_SQL = `
     provider_image_id TEXT,
     output_index INTEGER,
     review_status TEXT,
+    favorite INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     FOREIGN KEY (job_id) REFERENCES generation_jobs(id)
   )
@@ -1323,22 +1360,32 @@ async function resetGenerationJobsDirectory(generationJobsTempDir) {
 }
 
 async function createGenerationStore(userDataDir, options = {}) {
+  const storeStartupStartedAt = Date.now();
   const paths = getAppDataPaths(userDataDir);
   const activeSceneGroupCancellations = new Map();
   const activeDirectorChatCancellations = new Map();
   const createDirectorPartStream = options.createDirectorPartStream ?? createAiSdkDirectorPartStream;
   const executeImageGenerationBatch = options.runImageGenerationBatch ?? runImageGenerationBatch;
+  const getActiveCodexImageAuth = options.getActiveCodexImageAuth ?? (async () => null);
+  const refreshAllCodexImageAccountLimits = options.refreshAllCodexImageAccountLimits ?? (async () => undefined);
+  const directoriesStartedAt = Date.now();
   fs.mkdirSync(path.dirname(paths.databasePath), { recursive: true });
+  logStartup('generation paths ready', directoriesStartedAt, {
+    databasePath: paths.databasePath,
+  });
   console.info('[crenv:generation] initialized store');
   console.info('[crenv:generation] userDataDir:', paths.userDataDir);
   console.info('[crenv:generation] databasePath:', paths.databasePath);
   console.info('[crenv:generation] generatedImagesDir:', paths.generatedImagesDir);
 
+  const dbClientStartedAt = Date.now();
   const client = createClient({
     url: pathToFileURL(paths.databasePath).toString(),
   });
   const db = drizzle({ client });
+  logStartup('generation db client created', dbClientStartedAt);
 
+  const schemaStartedAt = Date.now();
   await db.run(sql.raw(CREATE_PROJECTS_TABLE_SQL));
   await db.run(sql.raw(CREATE_THREADS_TABLE_SQL));
   await db.run(sql.raw(CREATE_GENERATION_JOBS_TABLE_SQL));
@@ -1358,6 +1405,9 @@ async function createGenerationStore(userDataDir, options = {}) {
   await db.run(sql.raw(CREATE_SCENE_FRAME_ASSETS_TABLE_SQL));
   await db.run(sql.raw(CREATE_DIRECTOR_CHATS_TABLE_SQL));
   await ensureStructuredDirectorMessagesTable(db);
+  logStartup('generation schema ensured', schemaStartedAt);
+
+  const migrationsStartedAt = Date.now();
   await migrateLegacyReferencesTable(db);
   await ensureEnvironmentAttachmentDescriptionColumn(db);
   await ensureReferenceAttachmentTitleColumns(db);
@@ -1370,15 +1420,26 @@ async function createGenerationStore(userDataDir, options = {}) {
   await ensureGenerationBenchmarkColumns(db);
   await ensureGeneratedAssetProviderColumns(db);
   await ensureDirectorRuntimeColumns(db);
+  logStartup('generation migrations ensured', migrationsStartedAt);
+
+  const interruptedJobsStartedAt = Date.now();
   await failInterruptedGenerationJobs(db);
+  logStartup('generation interrupted jobs reconciled', interruptedJobsStartedAt);
+  logStartup('generation store created', storeStartupStartedAt);
 
   async function ensureProjectThreadWorkspace() {
+    const startedAt = Date.now();
     const projects = await listProjectsWithThreads();
     const firstProject = projects[0];
 
     if (!firstProject) {
       const project = await createProjectRecord(DEFAULT_PROJECT_NAME);
       const thread = await createThreadRecord(project.id);
+      logStartup('generation ensure workspace completed', startedAt, {
+        projectId: project.id,
+        threadId: thread.id,
+        createdProject: true,
+      });
       return {
         project: { ...project, threads: [thread] },
         thread,
@@ -1387,10 +1448,20 @@ async function createGenerationStore(userDataDir, options = {}) {
 
     const firstThread = firstProject.threads[0];
     if (firstThread) {
+      logStartup('generation ensure workspace completed', startedAt, {
+        projectId: firstProject.id,
+        threadId: firstThread.id,
+        createdProject: false,
+      });
       return { project: firstProject, thread: firstThread };
     }
 
     const thread = await createThreadRecord(firstProject.id);
+    logStartup('generation ensure workspace completed', startedAt, {
+      projectId: firstProject.id,
+      threadId: thread.id,
+      createdThread: true,
+    });
     return {
       project: {
         ...firstProject,
@@ -1463,6 +1534,7 @@ async function createGenerationStore(userDataDir, options = {}) {
   }
 
   async function listProjectsWithThreads() {
+    const startedAt = Date.now();
     const projects = await db
       .select()
       .from(projectsTable)
@@ -1496,10 +1568,16 @@ async function createGenerationStore(userDataDir, options = {}) {
       threadsByProjectId.set(thread.projectId, projectThreads);
     }
 
-    return projects.map((project) => ({
+    const result = projects.map((project) => ({
       ...project,
       threads: threadsByProjectId.get(project.id) ?? [],
     }));
+    logStartup('generation listProjectsWithThreads completed', startedAt, {
+      projects: result.length,
+      threads: threads.length,
+      runningThreads: runningThreadIds.size,
+    });
+    return result;
   }
 
   async function collectThreadExportRecords(threadIds) {
@@ -2256,6 +2334,7 @@ function mapReferenceCollectionAttachment({
 }
 
 async function listReferenceFolders() {
+  const startedAt = Date.now();
   const [characterFolders, objectFolders, environmentFolders] = await Promise.all([
     db
       .select({
@@ -2289,11 +2368,18 @@ async function listReferenceFolders() {
       .orderBy(desc(environmentReferencesTable.createdAt), desc(environmentReferencesTable.id)),
   ]);
 
-  return [
+  const folders = [
     ...characterFolders.map((folder) => ({ ...folder, category: 'characters' })),
     ...objectFolders.map((folder) => ({ ...folder, category: 'objects' })),
     ...environmentFolders.map((folder) => ({ ...folder, category: 'environment' })),
   ];
+  logStartup('generation listReferenceFolders completed', startedAt, {
+    folders: folders.length,
+    characterFolders: characterFolders.length,
+    objectFolders: objectFolders.length,
+    environmentFolders: environmentFolders.length,
+  });
+  return folders;
 }
 
   async function createReferenceFolder(payload) {
@@ -2646,6 +2732,7 @@ async function listReferenceFolders() {
   }
 
   async function listReferences() {
+    const startedAt = Date.now();
     const [characters, objects, groupedCharacters, groupedObjects, environments] = await Promise.all([
       db
         .select()
@@ -2775,6 +2862,15 @@ async function listReferenceFolders() {
       return b.createdAt.localeCompare(a.createdAt);
     });
 
+    logStartup('generation listReferences completed', startedAt, {
+      references: allReferences.length,
+      characters: characters.length,
+      objects: objects.length,
+      groupedCharacters: groupedCharacters.length,
+      groupedObjects: groupedObjects.length,
+      environments: environments.length,
+    });
+
     return allReferences;
   }
 
@@ -2876,6 +2972,7 @@ async function listReferenceFolders() {
     prompt,
     modelId,
     fastMode = false,
+    reasoningEffort,
     referenceImages = [],
     previousMessagesOverride,
     regenerateSourceUserMessage = null,
@@ -3010,6 +3107,8 @@ async function listReferenceFolders() {
       });
 
       for await (const nextParts of createDirectorPartStream({
+        providerId: selectedModel.providerId,
+        reasoningEffort,
         modelId: selectedModel.runtimeModel,
         messages,
         abortController,
@@ -3116,6 +3215,7 @@ async function listReferenceFolders() {
       prompt,
       modelId: input?.modelId,
       fastMode: input?.fastMode === true,
+      reasoningEffort: input?.reasoningEffort,
       referenceImages: Array.isArray(input?.referenceImages) ? input.referenceImages : [],
     });
   }
@@ -3420,6 +3520,11 @@ async function listReferenceFolders() {
       throw new Error(`Unsupported image generation provider: ${provider}`);
     }
 
+    const codexAuth = await getActiveCodexImageAuth();
+    if (!codexAuth?.accessToken || !codexAuth?.accountId) {
+      throw new Error('Add a Codex image account in Providers > Image before generating images.');
+    }
+
     const imageModel = resolveImageModel(request.modelId);
     const jobId = nanoid();
     const createdAt = new Date().toISOString();
@@ -3636,6 +3741,7 @@ async function listReferenceFolders() {
         prompt: request.prompt ?? '',
         count: pendingJob.requestedCount,
         references: request.referenceImages ?? [],
+        auth: codexAuth,
         onImageUpdated: upsertImportedAsset,
       });
 
@@ -3711,11 +3817,23 @@ async function listReferenceFolders() {
         error: errorMessage,
       });
       throw error;
+    } finally {
+      await refreshAllCodexImageAccountLimits().catch((refreshError) => {
+        console.info('[crenv:generation] Codex image account limit refresh failed', {
+          jobId,
+          error: refreshError instanceof Error ? refreshError.message : String(refreshError),
+        });
+      });
     }
   }
 
   async function listGeneratedImages(threadId) {
+    const startedAt = Date.now();
     if (!threadId) {
+      logStartup('generation listGeneratedImages completed', startedAt, {
+        threadId: null,
+        assets: 0,
+      });
       return [];
     }
 
@@ -3730,6 +3848,7 @@ async function listReferenceFolders() {
         width: generatedAssetsTable.width,
         height: generatedAssetsTable.height,
         outputIndex: generatedAssetsTable.outputIndex,
+        favorite: generatedAssetsTable.favorite,
         createdAt: generatedAssetsTable.createdAt,
         prompt: generationJobsTable.prompt,
         provider: generationJobsTable.provider,
@@ -3743,7 +3862,12 @@ async function listReferenceFolders() {
       .where(eq(generationJobsTable.threadId, threadId))
       .orderBy(desc(generatedAssetsTable.createdAt), desc(generatedAssetsTable.id));
 
-    return assets.map(toRendererAsset);
+    const result = assets.map(toRendererAsset);
+    logStartup('generation listGeneratedImages completed', startedAt, {
+      threadId,
+      assets: result.length,
+    });
+    return result;
   }
 
   async function listSceneGroups(threadId) {
@@ -4193,6 +4317,19 @@ async function listReferenceFolders() {
     await fsp.rm(asset.storedPath, { force: true });
   }
 
+  async function setGeneratedImageFavorite(imageId, favorite) {
+    const asset = await getGeneratedImage(imageId);
+    if (!asset) {
+      throw new Error('Generated image not found.');
+    }
+
+    await db
+      .update(generatedAssetsTable)
+      .set({ favorite: favorite ? 1 : 0 })
+      .where(eq(generatedAssetsTable.id, imageId));
+    return { id: imageId, favorite: Boolean(favorite) };
+  }
+
   function close() {
     client.close();
   }
@@ -4217,6 +4354,7 @@ async function listReferenceFolders() {
     generateImages,
     getGeneratedImage,
     deleteGeneratedImage,
+    setGeneratedImageFavorite,
     listGeneratedImages,
     listSceneGroups,
     listDirectorChats,
@@ -4558,6 +4696,10 @@ async function ensureGeneratedAssetProviderColumns(db) {
     await db.run(sql.raw('ALTER TABLE generated_assets ADD COLUMN review_status TEXT'));
   }
 
+  if (!columnNames.has('favorite')) {
+    await db.run(sql.raw('ALTER TABLE generated_assets ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0'));
+  }
+
   await db.run(
     sql.raw(
       'CREATE UNIQUE INDEX IF NOT EXISTS generated_assets_job_provider_image_id_unique ON generated_assets(job_id, provider_image_id) WHERE provider_image_id IS NOT NULL'
@@ -4736,6 +4878,7 @@ function toRendererAsset(asset) {
     references: parseGenerationReferenceMetadata(asset.referenceImagesJson),
     durationMs: asset.durationMs ?? null,
     outputIndex: asset.outputIndex ?? null,
+    favorite: Boolean(asset.favorite),
   };
 }
 

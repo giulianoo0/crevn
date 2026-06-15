@@ -7,6 +7,11 @@ const { createGenerationStore } = require('./generation.cjs');
 
 describe('generation store startup', () => {
   const tempDirs: string[] = [];
+  const activeCodexImageAuth = {
+    accessToken: 'access-token-123',
+    accountId: 'chatgpt-account-456',
+    isFedrampAccount: false,
+  };
 
   afterEach(async () => {
     await Promise.all(tempDirs.map((tempDir) => fs.rm(tempDir, { recursive: true, force: true })));
@@ -221,6 +226,7 @@ describe('generation store startup', () => {
       model: string;
       count: number;
       prompt: string;
+      auth: typeof activeCodexImageAuth;
       onImageUpdated?: (payload: {
         run: number;
         savedPath: string;
@@ -243,6 +249,7 @@ describe('generation store startup', () => {
       expect(input.model).toBe('gpt-5.4');
       expect(input.count).toBe(2);
       expect(input.prompt).toContain('Aspect ratio: 16:9');
+      expect(input.auth).toEqual(activeCodexImageAuth);
       expect(input.references).toHaveLength(1);
       expect(input.references[0]?.name).toBe('hero-face.png');
       expect(input.references[0]?.mimeType).toBe('image/png');
@@ -316,9 +323,12 @@ describe('generation store startup', () => {
         ],
       };
     });
+    const refreshAllCodexImageAccountLimits = vi.fn(async () => undefined);
 
     const store = await createGenerationStore(userDataDir, {
       runImageGenerationBatch,
+      getActiveCodexImageAuth: vi.fn(async () => activeCodexImageAuth),
+      refreshAllCodexImageAccountLimits,
       onImageReady: (payload: unknown) => imageReadyEvents.push(payload),
     });
 
@@ -342,6 +352,7 @@ describe('generation store startup', () => {
     });
 
     expect(runImageGenerationBatch).toHaveBeenCalledTimes(1);
+    expect(refreshAllCodexImageAccountLimits).toHaveBeenCalledTimes(1);
     expect(result.assets).toHaveLength(2);
     expect(result.assets[0]?.modelId).toBe('codex-gpt-5-4-mini');
     expect(result.assets[0]?.modelLabel).toBe('GPT-5.4 Mini');
@@ -378,6 +389,71 @@ describe('generation store startup', () => {
     store.close();
   });
 
+  it('requires an active Codex image auth account before image generation', async () => {
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crenv-generation-startup-'));
+    tempDirs.push(userDataDir);
+    const runImageGenerationBatch = vi.fn();
+    const refreshAllCodexImageAccountLimits = vi.fn(async () => undefined);
+
+    const store = await createGenerationStore(userDataDir, {
+      runImageGenerationBatch,
+      getActiveCodexImageAuth: vi.fn(async () => null),
+      refreshAllCodexImageAccountLimits,
+    });
+
+    const workspace = await store.ensureProjectThreadWorkspace();
+    await expect(
+      store.generateImages({
+        threadId: workspace.thread.id,
+        provider: 'codex',
+        modelId: 'codex-gpt-5-4-mini',
+        prompt: 'Hero portrait',
+        count: 1,
+        referenceImages: [],
+      })
+    ).rejects.toThrow('Add a Codex image account in Providers > Image before generating images.');
+
+    expect(runImageGenerationBatch).not.toHaveBeenCalled();
+    expect(refreshAllCodexImageAccountLimits).not.toHaveBeenCalled();
+    expect(await store.listGeneratedImages(workspace.thread.id)).toHaveLength(0);
+
+    store.close();
+  });
+
+  it('refreshes Codex image account limits after a failed image generation without replacing the generation error', async () => {
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crenv-generation-startup-'));
+    tempDirs.push(userDataDir);
+    const runImageGenerationBatch = vi.fn(async () => {
+      throw new Error('backend failed');
+    });
+    const refreshAllCodexImageAccountLimits = vi.fn(async () => {
+      throw new Error('refresh failed');
+    });
+
+    const store = await createGenerationStore(userDataDir, {
+      runImageGenerationBatch,
+      getActiveCodexImageAuth: vi.fn(async () => activeCodexImageAuth),
+      refreshAllCodexImageAccountLimits,
+    });
+
+    const workspace = await store.ensureProjectThreadWorkspace();
+    await expect(
+      store.generateImages({
+        threadId: workspace.thread.id,
+        provider: 'codex',
+        modelId: 'codex-gpt-5-4-mini',
+        prompt: 'Hero portrait',
+        count: 1,
+        referenceImages: [],
+      })
+    ).rejects.toThrow('backend failed');
+
+    expect(runImageGenerationBatch).toHaveBeenCalledTimes(1);
+    expect(refreshAllCodexImageAccountLimits).toHaveBeenCalledTimes(1);
+
+    store.close();
+  });
+
   it('approves a Director generateImages tool call through the app generation path', async () => {
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crenv-generation-startup-'));
     tempDirs.push(userDataDir);
@@ -389,7 +465,9 @@ describe('generation store startup', () => {
       outputDirectory: string;
       count: number;
       prompt: string;
+      auth: typeof activeCodexImageAuth;
     }) => {
+      expect(input.auth).toEqual(activeCodexImageAuth);
       const imagePath = path.join(input.outputDirectory, 'approved.png');
       await fs.mkdir(input.outputDirectory, { recursive: true });
       await fs.writeFile(imagePath, Buffer.from(pngBase64, 'base64'));
@@ -409,12 +487,15 @@ describe('generation store startup', () => {
         ],
       };
     });
+    const refreshAllCodexImageAccountLimits = vi.fn(async () => undefined);
 
     const store = await createGenerationStore(userDataDir, {
       onImageReady: (event: unknown) => {
         imageReadyEvents.push(event);
       },
       runImageGenerationBatch,
+      getActiveCodexImageAuth: vi.fn(async () => activeCodexImageAuth),
+      refreshAllCodexImageAccountLimits,
       createDirectorPartStream: async function* () {
         yield [
           { type: 'text', text: 'Ready to generate the selected frame.' },
@@ -451,6 +532,7 @@ describe('generation store startup', () => {
     });
 
     expect(runImageGenerationBatch).toHaveBeenCalledTimes(1);
+    expect(refreshAllCodexImageAccountLimits).toHaveBeenCalledTimes(1);
     expect(runImageGenerationBatch.mock.calls[0]?.[0].prompt).toContain('Aspect ratio: 16:9');
     expect(approved).toEqual(
       expect.objectContaining({

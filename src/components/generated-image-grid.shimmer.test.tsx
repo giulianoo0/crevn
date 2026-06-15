@@ -3,8 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 
 const shimmerSurfaceSpy = vi.fn((props: Record<string, unknown>) => <div data-testid="shimmer-surface" {...props} />);
 
-vi.mock('img-fx', () => ({
-  ImageGeneration: ({ children }: { children: unknown }) => <div data-testid="img-fx-surface">{children}</div>,
+vi.mock('border-beam', () => ({
+  BorderBeam: ({ children }: { children: unknown } & Record<string, unknown>) => (
+    <div data-testid="border-beam">
+      {children}
+    </div>
+  ),
 }));
 
 vi.mock('./ai-elements/shimmer', () => ({
@@ -14,7 +18,7 @@ vi.mock('./ai-elements/shimmer', () => ({
 import { GeneratedImageGrid } from './generated-image-grid';
 
 describe('GeneratedImageGrid shimmer integration', () => {
-  it('uses the shared shimmer surface for loading tiles', () => {
+  it('uses BorderBeam instead of the shared shimmer surface for loading tiles', () => {
     render(
       <GeneratedImageGrid
         images={[
@@ -28,8 +32,8 @@ describe('GeneratedImageGrid shimmer integration', () => {
       />
     );
 
-    expect(screen.getByTestId('shimmer-surface')).toBeInTheDocument();
-    expect(screen.queryByTestId('img-fx-surface')).not.toBeInTheDocument();
-    expect(shimmerSurfaceSpy).toHaveBeenCalled();
+    expect(screen.getByTestId('border-beam')).toBeInTheDocument();
+    expect(screen.queryByTestId('shimmer-surface')).not.toBeInTheDocument();
+    expect(shimmerSurfaceSpy).not.toHaveBeenCalled();
   });
 });

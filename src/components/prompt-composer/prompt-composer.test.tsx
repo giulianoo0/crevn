@@ -273,6 +273,43 @@ describe('PromptComposer', () => {
     expect(onMentionIdsChange).toHaveBeenLastCalledWith(['reference-garage']);
   });
 
+  it('keeps a prior chip when inserting a second @mention separated only by a space', async () => {
+    const onMentionIdsChange = vi.fn();
+    const composerRef = createRef<PromptComposerHandle>();
+
+    render(
+      <PromptComposer
+        ref={composerRef}
+        ariaLabel="Prompt"
+        placeholder="Write something"
+        isExpanded
+        hasReferenceImages={false}
+        mentionCandidates={[
+          { id: 'reference-tito', title: 'Tito' },
+          { id: 'reference-nina', title: 'Nina' },
+        ]}
+        onTextChange={() => {}}
+        onMentionMatch={() => {}}
+        onMentionIdsChange={onMentionIdsChange}
+      />,
+    );
+
+    const input = screen.getByRole('textbox', { name: 'Prompt' });
+
+    // First mention is already a chip, followed by " @Nin" the user is typing.
+    // The chip is the previous sibling of that text node, separated only by a
+    // space — the case that used to make the second mention replace the first.
+    await act(async () => {
+      composerRef.current?.setText('@Tito @Nin');
+    });
+    await act(async () => {
+      composerRef.current?.insertMention('reference-nina', 'Nina', { start: 5, end: 9 });
+    });
+
+    expect(input).toHaveTextContent('Tito Nina');
+    expect(onMentionIdsChange).toHaveBeenLastCalledWith(['reference-tito', 'reference-nina']);
+  });
+
   it('deletes a whole mention chip with a single backspace', async () => {
     const onMentionIdsChange = vi.fn();
     const composerRef = createRef<PromptComposerHandle>();

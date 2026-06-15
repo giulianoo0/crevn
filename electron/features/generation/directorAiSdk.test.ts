@@ -194,6 +194,39 @@ describe('Director AI SDK stream options', () => {
     expect(options.system).toBe('Follow the studio rules.');
     expect(options.messages).toEqual([{ role: 'user', content: 'Plan a shot.' }]);
   });
+
+  it('maps the reasoning effort to Anthropic provider options', () => {
+    const options = buildDirectorStreamOptions({
+      providerId: 'anthropic',
+      reasoningEffort: 'high',
+      model: 'claude-model',
+      messages: [{ role: 'user', content: 'Plan a shot.' }],
+      abortSignal: undefined,
+      smoothStream: () => undefined,
+      tool: (definition: unknown) => definition,
+      jsonSchema: (schema: unknown) => schema,
+    });
+
+    expect(options.providerOptions.anthropic.effort).toBe('high');
+    expect(options.tools.findSkills).toBeTruthy();
+    expect(options.tools.loadSkill).toBeTruthy();
+    expect(options.tools.generateImages).toBeTruthy();
+    // loadSkill now supports progressive disclosure via a section argument.
+    expect(options.tools.loadSkill.inputSchema.properties.section).toBeTruthy();
+  });
+
+  it('defaults to Google thinking config when no provider is given', () => {
+    const options = buildDirectorStreamOptions({
+      model: 'gemini-model',
+      messages: [{ role: 'user', content: 'Plan a shot.' }],
+      abortSignal: undefined,
+      smoothStream: () => undefined,
+      tool: (definition: unknown) => definition,
+      jsonSchema: (schema: unknown) => schema,
+    });
+
+    expect(options.providerOptions.google.thinkingConfig.includeThoughts).toBe(true);
+  });
 });
 
 describe('Director AI SDK logging summaries', () => {

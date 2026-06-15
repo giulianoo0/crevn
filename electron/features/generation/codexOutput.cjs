@@ -1,9 +1,7 @@
 const fs = require('node:fs/promises');
-const os = require('node:os');
 const path = require('node:path');
 const { performance } = require('node:perf_hooks');
 
-const AUTH_FILE_PATH = path.join(os.homedir(), '.codex', 'auth.json');
 const CODEX_USER_AGENT = 'codex_cli_rs/0.137.0';
 const CODEX_VERSION = '0.137.0';
 const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
@@ -96,23 +94,22 @@ async function buildInputContent({ prompt, references, run, count }) {
   return content;
 }
 
-async function loadCodexAuth(authFilePath = AUTH_FILE_PATH) {
-  const authContent = await fs.readFile(authFilePath, 'utf8');
-  const parsed = JSON.parse(authContent);
-  const accessToken = parsed?.tokens?.access_token;
-  const accountId = parsed?.tokens?.account_id;
+function resolveCodexAuth(auth) {
+  const accessToken = auth?.accessToken;
+  const accountId = auth?.accountId;
 
   if (typeof accessToken !== 'string' || !accessToken.trim()) {
-    throw new Error(`Missing tokens.access_token in ${authFilePath}.`);
+    throw new Error('Add a Codex image account in Providers > Image before generating images.');
   }
 
   if (typeof accountId !== 'string' || !accountId.trim()) {
-    throw new Error(`Missing tokens.account_id in ${authFilePath}.`);
+    throw new Error('The active Codex image account is missing an account id. Reconnect it in Providers > Image.');
   }
 
   return {
-    accessToken,
-    accountId,
+    accessToken: accessToken.trim(),
+    accountId: accountId.trim(),
+    isFedrampAccount: Boolean(auth?.isFedrampAccount),
   };
 }
 
@@ -354,10 +351,10 @@ async function runSingleCodexImageGeneration(input) {
       logCodexImage(`run ${input.run} reference[${index + 1}]`, summarizeReferenceForLog(reference, index));
     }
 
-    const auth = await loadCodexAuth(input.authFilePath);
+    const auth = resolveCodexAuth(input.auth);
     logCodexImage(`run ${input.run} auth loaded`, {
       accountId: auth.accountId,
-      authFilePath: input.authFilePath ?? AUTH_FILE_PATH,
+      source: 'app-provider-settings',
     });
     const cookieJar = new CookieJar();
     await primeCookies({ fetchImpl, cookieJar });
@@ -396,6 +393,9 @@ async function runSingleCodexImageGeneration(input) {
     const cookieHeader = cookieJar.toHeaderValue();
     if (cookieHeader) {
       headers.Cookie = cookieHeader;
+    }
+    if (auth.isFedrampAccount) {
+      headers['X-OpenAI-Fedramp'] = 'true';
     }
 
     logCodexImage(`run ${input.run} POST /backend-api/codex/responses`, {

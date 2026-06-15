@@ -7,14 +7,27 @@ vi.mock('@number-flow/react', () => ({
   default: ({ value }: { value: number }) => <span>{value}</span>,
 }));
 
-vi.mock('img-fx', () => ({
-  ImageGeneration: ({
+vi.mock('border-beam', () => ({
+  BorderBeam: ({
     children,
-    ...props
+    size,
+    colorVariant,
+    theme,
+    strength,
   }: {
     children: unknown;
+    size?: string;
+    colorVariant?: string;
+    theme?: string;
+    strength?: number;
   } & Record<string, unknown>) => (
-    <div data-testid="img-fx-surface" {...props}>
+    <div
+      data-testid="border-beam"
+      data-size={size}
+      data-color-variant={colorVariant}
+      data-theme={theme}
+      data-strength={strength}
+    >
       {children}
     </div>
   ),
@@ -68,7 +81,9 @@ describe('GeneratedImageGrid', () => {
     expect(screen.queryByRole('button', { name: 'Select 60.png' })).not.toBeInTheDocument();
   });
 
-  it('renders shimmer placeholders for loading entries', () => {
+  it('renders BorderBeam placeholders with a large elapsed counter for loading entries', () => {
+    vi.setSystemTime(new Date('2026-05-26T10:30:42.000Z'));
+
     render(
       <GeneratedImageGrid
         images={[
@@ -87,12 +102,14 @@ describe('GeneratedImageGrid', () => {
 
     const placeholder = screen.getByLabelText('Generating 1 loading');
     expect(placeholder).toBeInTheDocument();
-    expect(placeholder).toHaveClass('animate-skeleton-shimmer');
-    expect(placeholder).not.toHaveClass('animate-pulse');
-    expect(screen.getByText('GPT-5.4 Mini')).toBeInTheDocument();
+    expect(screen.getByTestId('border-beam')).toBeInTheDocument();
+    expect(screen.getByTestId('border-beam')).toHaveAttribute('data-color-variant', 'colorful');
+    expect(screen.getByTestId('border-beam')).toHaveAttribute('data-strength', '1');
+    expect(screen.getByLabelText('00:42')).toHaveClass('text-[44px]');
+    expect(screen.queryByText('GPT-5.4 Mini')).not.toBeInTheDocument();
   });
 
-  it('can use img-fx placeholders for loading entries', () => {
+  it('uses BorderBeam placeholders without WebGL loading surfaces', () => {
     render(
       <GeneratedImageGrid
         images={[
@@ -103,12 +120,11 @@ describe('GeneratedImageGrid', () => {
             provider: 'api',
           },
         ]}
-        loadingEffect="img-fx"
         className="h-[300px]"
       />
     );
 
-    expect(screen.getByTestId('img-fx-surface')).toBeInTheDocument();
+    expect(screen.getByTestId('border-beam')).toBeInTheDocument();
     expect(screen.getByLabelText('Generating 1 loading')).toBeInTheDocument();
     expect(screen.queryByTestId('shimmer-surface')).not.toBeInTheDocument();
   });

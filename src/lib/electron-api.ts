@@ -24,15 +24,71 @@ export interface UpdateProjectSettingsPayload {
   artStyle: string;
 }
 
+export interface CodexLimitWindowSnapshot {
+  usedPercent: number;
+  windowMinutes: number | null;
+  resetsAt: number | null;
+}
+
+export interface CodexCreditsSnapshot {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: string | null;
+}
+
+export interface CodexIndividualLimitSnapshot {
+  limit: string;
+  used: string;
+  remainingPercent: number;
+  resetsAt: number;
+}
+
+export interface CodexRateLimitSnapshot {
+  limitId: string;
+  limitName: string | null;
+  primary: CodexLimitWindowSnapshot | null;
+  secondary: CodexLimitWindowSnapshot | null;
+  credits: CodexCreditsSnapshot | null;
+  individualLimit: CodexIndividualLimitSnapshot | null;
+  planType: string | null;
+  rateLimitReachedType: string | null;
+}
+
+export interface CodexImageAccount {
+  id: string;
+  accountId: string;
+  email: string | null;
+  planType: string | null;
+  chatgptUserId: string | null;
+  isFedrampAccount: boolean;
+  lastRefresh: string | null;
+  limits: CodexRateLimitSnapshot[];
+  limitsLastCheckedAt: string | null;
+  limitsError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ProviderSettings {
   text: {
     gemini: {
       apiKey: string;
     };
+    anthropic: {
+      apiKey: string;
+    };
+  };
+  image: {
+    codex: {
+      activeAccountId: string | null;
+      accounts: CodexImageAccount[];
+    };
   };
 }
 
-export type UpdateProviderSettingsPayload = ProviderSettings;
+export type UpdateProviderSettingsPayload = {
+  text: ProviderSettings['text'];
+};
 
 export type ExportResult =
   | {
@@ -253,6 +309,7 @@ export interface GeneratedImageRecord extends GeneratedImageGridImage {
   }>;
   durationMs?: number | null;
   generationStartedAt?: string;
+  favorite?: boolean;
 }
 
 export interface ScenePlanEvent {
@@ -351,12 +408,15 @@ export interface DirectorMessageRecord {
   updatedAt: string;
 }
 
+export type ReasoningEffort = 'low' | 'medium' | 'high';
+
 export interface SendDirectorMessagePayload {
   chatId: string;
   threadId: string;
   prompt: string;
   modelId?: string;
   fastMode?: boolean;
+  reasoningEffort?: ReasoningEffort;
   referenceImages: Array<{
     name: string;
     title?: string;
@@ -503,6 +563,8 @@ export interface AppInfo {
   version: string;
 }
 
+export type StartupLogFields = Record<string, string | number | boolean | null | undefined>;
+
 const fallbackUpdateStatus: UpdateStatus = {
   state: 'disabled',
   message: 'Electron API bridge is unavailable.',
@@ -514,6 +576,9 @@ const fallbackUpdateStatus: UpdateStatus = {
 function getElectronApi() {
   if (!window.electronAPI) {
     return {
+      logStartup: (label: string, fields: StartupLogFields = {}) => {
+        console.info(`[crevn:startup] ${label} ${JSON.stringify(fields)}`);
+      },
       getAppInfo: async () => ({ name: 'crevn', version: '0.0.0' }),
       getUpdateStatus: async () => fallbackUpdateStatus,
       getProviderSettings: async () => ({
@@ -521,9 +586,51 @@ function getElectronApi() {
           gemini: {
             apiKey: '',
           },
+          anthropic: {
+            apiKey: '',
+          },
+        },
+        image: {
+          codex: {
+            activeAccountId: null,
+            accounts: [],
+          },
         },
       }),
-      updateProviderSettings: async (payload: ProviderSettings) => payload,
+      updateProviderSettings: async (payload: UpdateProviderSettingsPayload) => ({
+        ...payload,
+        image: {
+          codex: {
+            activeAccountId: null,
+            accounts: [],
+          },
+        },
+      }),
+      startCodexImageOAuth: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      selectCodexImageAccount: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      removeCodexImageAccount: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      refreshCodexImageAccountLimits: async () => ({
+        text: {
+          gemini: {
+            apiKey: '',
+          },
+          anthropic: {
+            apiKey: '',
+          },
+        },
+        image: {
+          codex: {
+            activeAccountId: null,
+            accounts: [],
+          },
+        },
+      }),
       checkForUpdates: async () => fallbackUpdateStatus,
       installUpdate: async () => fallbackUpdateStatus,
       listGeneratedImages: async () => [],
@@ -626,6 +733,9 @@ function getElectronApi() {
       deleteGeneratedImage: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
+      setGeneratedImageFavorite: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
       listSceneGroups: async () => [],
       createSceneGroup: async () => {
         throw new Error('Electron API bridge is unavailable.');
@@ -675,6 +785,10 @@ function getElectronApi() {
   return window.electronAPI;
 }
 
+export function writeStartupLog(label: string, fields: StartupLogFields = {}) {
+  return getElectronApi().logStartup(label, fields);
+}
+
 export function listGeneratedImages(threadId: string) {
   return getElectronApi().listGeneratedImages(threadId) as Promise<GeneratedImageRecord[]>;
 }
@@ -693,6 +807,22 @@ export function getProviderSettings() {
 
 export function updateProviderSettings(payload: UpdateProviderSettingsPayload) {
   return getElectronApi().updateProviderSettings(payload) as Promise<ProviderSettings>;
+}
+
+export function startCodexImageOAuth() {
+  return getElectronApi().startCodexImageOAuth() as Promise<ProviderSettings>;
+}
+
+export function selectCodexImageAccount(accountId: string) {
+  return getElectronApi().selectCodexImageAccount(accountId) as Promise<ProviderSettings>;
+}
+
+export function removeCodexImageAccount(accountId: string) {
+  return getElectronApi().removeCodexImageAccount(accountId) as Promise<ProviderSettings>;
+}
+
+export function refreshCodexImageAccountLimits() {
+  return getElectronApi().refreshCodexImageAccountLimits() as Promise<ProviderSettings>;
 }
 
 export function checkForUpdates() {
@@ -998,4 +1128,11 @@ export function downloadGeneratedImage(imageId: string) {
 
 export function deleteGeneratedImage(imageId: string) {
   return getElectronApi().deleteGeneratedImage(imageId) as Promise<void>;
+}
+
+export function setGeneratedImageFavorite(imageId: string, favorite: boolean) {
+  return getElectronApi().setGeneratedImageFavorite(imageId, favorite) as Promise<{
+    id: string;
+    favorite: boolean;
+  }>;
 }

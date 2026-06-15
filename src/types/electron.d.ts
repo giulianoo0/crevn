@@ -16,6 +16,7 @@ interface ElectronGeneratedImageRecord {
     previewUrl?: string | null;
   }>;
   durationMs?: number | null;
+  favorite?: boolean;
 }
 
 type ElectronUpdateStatusState =
@@ -40,6 +41,51 @@ interface ElectronUpdateStatus {
 interface ElectronAppInfo {
   name: string;
   version: string;
+}
+
+interface ElectronCodexLimitWindowSnapshot {
+  usedPercent: number;
+  windowMinutes: number | null;
+  resetsAt: number | null;
+}
+
+interface ElectronCodexCreditsSnapshot {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: string | null;
+}
+
+interface ElectronCodexIndividualLimitSnapshot {
+  limit: string;
+  used: string;
+  remainingPercent: number;
+  resetsAt: number;
+}
+
+interface ElectronCodexRateLimitSnapshot {
+  limitId: string;
+  limitName: string | null;
+  primary: ElectronCodexLimitWindowSnapshot | null;
+  secondary: ElectronCodexLimitWindowSnapshot | null;
+  credits: ElectronCodexCreditsSnapshot | null;
+  individualLimit: ElectronCodexIndividualLimitSnapshot | null;
+  planType: string | null;
+  rateLimitReachedType: string | null;
+}
+
+interface ElectronCodexImageAccount {
+  id: string;
+  accountId: string;
+  email: string | null;
+  planType: string | null;
+  chatgptUserId: string | null;
+  isFedrampAccount: boolean;
+  lastRefresh: string | null;
+  limits: ElectronCodexRateLimitSnapshot[];
+  limitsLastCheckedAt: string | null;
+  limitsError: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface ElectronThreadRecord {
@@ -71,7 +117,20 @@ interface ElectronProviderSettings {
     gemini: {
       apiKey: string;
     };
+    anthropic: {
+      apiKey: string;
+    };
   };
+  image: {
+    codex: {
+      activeAccountId: string | null;
+      accounts: ElectronCodexImageAccount[];
+    };
+  };
+}
+
+interface ElectronUpdateProviderSettingsPayload {
+  text: ElectronProviderSettings['text'];
 }
 
 type ElectronExportResult =
@@ -368,6 +427,7 @@ interface ElectronSendDirectorMessagePayload {
   prompt: string;
   modelId?: string;
   fastMode?: boolean;
+  reasoningEffort?: 'low' | 'medium' | 'high';
   referenceImages: Array<{
     name: string;
     title?: string;
@@ -493,10 +553,18 @@ interface ElectronSceneGroupRecord {
 interface Window {
   electronAPI?: {
     platform: string;
+    logStartup: (
+      label: string,
+      fields?: Record<string, string | number | boolean | null | undefined>
+    ) => void;
     getAppInfo: () => Promise<ElectronAppInfo>;
     getUpdateStatus: () => Promise<ElectronUpdateStatus>;
     getProviderSettings: () => Promise<ElectronProviderSettings>;
-    updateProviderSettings: (payload: ElectronProviderSettings) => Promise<ElectronProviderSettings>;
+    updateProviderSettings: (payload: ElectronUpdateProviderSettingsPayload) => Promise<ElectronProviderSettings>;
+    startCodexImageOAuth: () => Promise<ElectronProviderSettings>;
+    selectCodexImageAccount: (accountId: string) => Promise<ElectronProviderSettings>;
+    removeCodexImageAccount: (accountId: string) => Promise<ElectronProviderSettings>;
+    refreshCodexImageAccountLimits: () => Promise<ElectronProviderSettings>;
     checkForUpdates: () => Promise<ElectronUpdateStatus>;
     installUpdate: () => Promise<ElectronUpdateStatus>;
     listGeneratedImages: (threadId: string) => Promise<ElectronGeneratedImageRecord[]>;
@@ -638,6 +706,10 @@ interface Window {
     copyGeneratedImage: (imageId: string) => Promise<void>;
     downloadGeneratedImage: (imageId: string) => Promise<boolean>;
     deleteGeneratedImage: (imageId: string) => Promise<void>;
+    setGeneratedImageFavorite: (
+      imageId: string,
+      favorite: boolean,
+    ) => Promise<{ id: string; favorite: boolean }>;
     subscribeToUpdateStatus: (listener: (event: ElectronUpdateStatus) => void) => () => void;
     subscribeToScenePlan: (listener: (event: ElectronScenePlanEvent) => void) => () => void;
     subscribeToSceneFrameReady: (listener: (event: ElectronSceneFrameReadyEvent) => void) => () => void;

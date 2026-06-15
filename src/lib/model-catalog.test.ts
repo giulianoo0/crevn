@@ -9,10 +9,11 @@ import {
 } from './model-catalog';
 
 describe('model catalog', () => {
-  it('offers Codex image models alongside the Google text models', () => {
+  it('offers Codex image models alongside the Google and Claude text models', () => {
     expect(MODEL_PROVIDER_OPTIONS).toEqual([
       { id: 'codex', label: 'Codex', capabilities: ['image'] },
       { id: 'google', label: 'Google', capabilities: ['text'] },
+      { id: 'anthropic', label: 'Claude', capabilities: ['text'] },
     ]);
     expect(DEFAULT_MODEL_ID).toBe('codex-gpt-5-4-mini');
     expect(getDefaultModelOption()).toEqual(
@@ -34,5 +35,19 @@ describe('model catalog', () => {
       'gemini-3-pro-preview',
     ]);
     expect(MODEL_OPTIONS.some((model) => model.providerId === 'codex')).toBe(true);
+  });
+
+  it('exposes the three Claude text models', () => {
+    expect(getModelsForProvider('anthropic').map((model) => model.label)).toEqual([
+      'Claude Opus 4.8',
+      'Claude Sonnet 4.6',
+      'Claude Haiku 4.5',
+    ]);
+    expect(getModelsForProvider('anthropic').map((model) => model.runtimeModel)).toEqual([
+      'claude-opus-4-8',
+      'claude-sonnet-4-6',
+      'claude-haiku-4-5',
+    ]);
+    expect(getModelsForProvider('anthropic').every((model) => model.capabilities.includes('text'))).toBe(true);
   });
 });

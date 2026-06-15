@@ -48,17 +48,6 @@ describe('runImageGenerationBatch', () => {
     const workingDirectory = await createTempDir();
     const outputDirectory = path.join(workingDirectory, 'output');
     const artifactsDirectory = path.join(workingDirectory, 'artifacts');
-    const authFilePath = path.join(workingDirectory, 'auth.json');
-    await fs.writeFile(
-      authFilePath,
-      JSON.stringify({
-        tokens: {
-          access_token: 'access-token-123',
-          account_id: 'account-456',
-        },
-      }),
-      'utf8'
-    );
 
     const requests: Array<{ url: string; headers?: Record<string, string>; body?: string }> = [];
     const fetchImpl = vi.fn(async (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => {
@@ -128,6 +117,11 @@ describe('runImageGenerationBatch', () => {
       model: 'gpt-5.4',
       prompt: 'Generate a happy dog image.',
       count: 1,
+      auth: {
+        accessToken: 'access-token-123',
+        accountId: 'account-456',
+        isFedrampAccount: false,
+      },
       references: [
         {
           name: 'reference.png',
@@ -135,7 +129,6 @@ describe('runImageGenerationBatch', () => {
           bytesBase64: PNG_BASE64,
         },
       ],
-      authFilePath,
       fetchImpl,
       onImageUpdated: async (update: { run: number; savedPath: string; benchmark: Record<string, string | null> }) => {
         imageUpdates.push(update);
