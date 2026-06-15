@@ -107,14 +107,14 @@ describe('Director AI SDK loadSkill tool stream', () => {
       type: 'tool-call',
       toolCallId: 'skill-1',
       toolName: 'loadSkill',
-      input: { name: 'seedance-cartoon' },
+      input: { name: 'seedance-macal' },
     });
 
     expect(accumulator.snapshot()).toEqual([
       {
         type: 'tool-loadSkill',
         toolCallId: 'skill-1',
-        skillName: 'seedance-cartoon',
+        skillName: 'seedance-macal',
         reference: undefined,
         state: 'running',
       },
@@ -124,17 +124,17 @@ describe('Director AI SDK loadSkill tool stream', () => {
       type: 'tool-result',
       toolCallId: 'skill-1',
       toolName: 'loadSkill',
-      output: { found: true, name: 'seedance-cartoon', title: 'Seedance Cartoon', content: '...' },
+      output: { found: true, name: 'seedance-macal', title: 'Seedance MACAL', content: '...' },
     });
 
     expect(accumulator.snapshot()).toEqual([
       {
         type: 'tool-loadSkill',
         toolCallId: 'skill-1',
-        skillName: 'seedance-cartoon',
+        skillName: 'seedance-macal',
         reference: undefined,
         state: 'output-available',
-        title: 'Seedance Cartoon',
+        title: 'Seedance MACAL',
         found: true,
       },
     ]);
