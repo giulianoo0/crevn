@@ -179,7 +179,13 @@ interface ElectronReferenceFolderRecord {
   title: string;
   description?: string | null;
   parentFolderId?: string | null;
+  voiceUrl?: string | null;
   createdAt: string;
+}
+
+interface ElectronSetCharacterVoiceUrlPayload {
+  collectionId: string;
+  voiceUrl: string | null;
 }
 
 interface ElectronCreateReferencePayload {
@@ -567,6 +573,7 @@ interface Window {
     refreshCodexImageAccountLimits: () => Promise<ElectronProviderSettings>;
     checkForUpdates: () => Promise<ElectronUpdateStatus>;
     installUpdate: () => Promise<ElectronUpdateStatus>;
+    openExternal: (url: string) => Promise<boolean>;
     listGeneratedImages: (threadId: string) => Promise<ElectronGeneratedImageRecord[]>;
     listProjectsWithThreads: () => Promise<ElectronProjectRecord[]>;
     listReferences: () => Promise<ElectronReferenceImageRecord[]>;
@@ -597,6 +604,9 @@ interface Window {
     createReferenceFolder: (
       payload: ElectronCreateReferenceFolderPayload
     ) => Promise<ElectronReferenceFolderRecord>;
+    setCharacterVoiceUrl: (
+      payload: ElectronSetCharacterVoiceUrlPayload
+    ) => Promise<{ collectionId: string; voiceUrl: string | null }>;
     createEnvironmentReference: (
       payload: ElectronCreateEnvironmentReferencePayload
     ) => Promise<ElectronReferenceImageRecord[]>;

@@ -544,6 +544,10 @@ app.whenReady().then(async () => {
     return (await storeReady).createReferenceCollection(payload);
   });
 
+  ipcMain.handle('generation:setCharacterVoiceUrl', async (_event, payload) => {
+    return (await storeReady).setCharacterVoiceUrl(payload);
+  });
+
   ipcMain.handle('generation:updateReference', async (_event, payload) => {
     return (await storeReady).updateReference(payload);
   });
@@ -816,6 +820,15 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('app:installUpdate', async () => {
     return autoUpdateManager.installNow();
+  });
+
+  ipcMain.handle('app:openExternal', async (_event, url) => {
+    const target = String(url ?? '').trim();
+    if (!/^https?:\/\//i.test(target)) {
+      throw new Error('Only http(s) URLs can be opened externally.');
+    }
+    await shell.openExternal(target);
+    return true;
   });
 
   ipcMain.handle('app:enhancePrompt', async (_event, payload) => {

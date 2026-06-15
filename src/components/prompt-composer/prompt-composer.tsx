@@ -242,23 +242,36 @@ function parsePromptMentionText(
     candidatesByTitle.set(key, candidate);
   }
 
-  const mentionPattern = /(^|[\s([{'"`])@([^\s@.,!?;:()[\]{}'"`]+)/g;
+  const sortedCandidates = [...candidatesByTitle.values()].sort(
+    (left, right) => right.title.length - left.title.length,
+  );
+  const mentionStartPattern = /(^|[\s([{'"`])@/g;
   const segments: ClipboardPromptSegment[] = [];
   let hasMention = false;
   let lastIndex = 0;
 
-  for (const match of text.matchAll(mentionPattern)) {
-    const fullMatch = match[0];
+  for (const match of text.matchAll(mentionStartPattern)) {
     const leadingText = match[1] ?? '';
-    const rawTitle = match[2] ?? '';
     const matchIndex = match.index ?? -1;
     if (matchIndex < 0) continue;
 
-    const { mentionTitle, selectorSuffix } = splitMentionSelectorToken(rawTitle);
-    const mentionCandidate = candidatesByTitle.get(mentionTitle.toLocaleLowerCase());
+    const mentionStart = matchIndex + leadingText.length;
+    const titleStart = mentionStart + 1;
+    const textAfterAt = text.slice(titleStart);
+    const textAfterAtLower = textAfterAt.toLocaleLowerCase();
+    const mentionCandidate = sortedCandidates.find((candidate) => {
+      const candidateTitle = candidate.title.trim();
+      if (!candidateTitle) return false;
+      if (!textAfterAtLower.startsWith(candidateTitle.toLocaleLowerCase())) return false;
+
+      const nextCharacter = textAfterAt[candidateTitle.length] ?? '';
+      return !nextCharacter || /[\s.,!?;:()[\]{}'"`#/.]/.test(nextCharacter);
+    });
     if (!mentionCandidate) continue;
 
-    const mentionStart = matchIndex + leadingText.length;
+    const titleEnd = titleStart + mentionCandidate.title.length;
+    const selectorMatch = text.slice(titleEnd).match(/^[#/:.][^\s@]*/);
+    const selectorSuffix = selectorMatch?.[0] ?? '';
     const prefix = text.slice(lastIndex, mentionStart);
     if (prefix) {
       segments.push({ type: 'text', text: prefix });
@@ -274,7 +287,7 @@ function parsePromptMentionText(
       segments.push({ type: 'text', text: selectorSuffix });
     }
     hasMention = true;
-    lastIndex = matchIndex + fullMatch.length;
+    lastIndex = titleEnd + selectorSuffix.length;
   }
 
   if (!hasMention) {

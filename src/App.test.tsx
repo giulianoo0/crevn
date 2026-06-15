@@ -340,6 +340,10 @@ vi.mock('./lib/electron-api', () => ({
     parentFolderId: payload.parentFolderId ?? null,
     createdAt: '2026-05-26T12:00:00.000Z',
   })),
+  setCharacterVoiceUrl: vi.fn(async (payload) => ({
+    collectionId: payload.collectionId,
+    voiceUrl: payload.voiceUrl,
+  })),
   createEnvironmentReference: vi.fn(async (payload) =>
     payload.attachments.map((attachment: { name: string; title?: string; mimeType: string; bytesBase64: string; section?: 'primary' | 'angles' }, index: number) => ({
       id: `environment-reference-${index + 1}`,
@@ -4768,6 +4772,154 @@ describe('App header thread title', () => {
     expect(screen.getByLabelText('When to use this reference group')).toHaveValue('Use for all Lumo generations.');
   });
 
+  it('saves character voice URLs from the reference metadata dialog', async () => {
+    const setCharacterVoiceUrlMock = vi.mocked(electronApi.setCharacterVoiceUrl);
+    vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
+      {
+        id: 'character-folder-parent',
+        category: 'characters',
+        title: 'Characters',
+        parentFolderId: null,
+        createdAt: '2026-05-26T13:00:00.000Z',
+      },
+      {
+        id: 'character-folder-child',
+        category: 'characters',
+        title: 'Lumo',
+        parentFolderId: 'character-folder-parent',
+        voiceUrl: 'https://elevenlabs.io/app/voice-library/voice-123',
+        createdAt: '2026-05-26T12:00:00.000Z',
+      },
+    ]);
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'character-reference-1',
+        collectionId: 'character-folder-child',
+        environmentId: null,
+        name: 'front.png',
+        title: 'Front view',
+        groupTitle: 'Lumo',
+        description: 'Use for face continuity.',
+        groupDescription: 'Use for all Lumo generations.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:01:00.000Z',
+        category: 'characters',
+        parentFolderId: 'character-folder-parent',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const lumoFolderRow = screen
+      .getAllByRole('button', { name: 'Lumo' })
+      .find((element) => element.className.includes('group/card'));
+    expect(lumoFolderRow).toBeDefined();
+    fireEvent.doubleClick(lumoFolderRow!);
+
+    expect(screen.getByLabelText('Character voice URL')).toHaveValue(
+      'https://elevenlabs.io/app/voice-library/voice-123',
+    );
+
+    fireEvent.change(screen.getByLabelText('Character voice URL'), {
+      target: { value: 'https://elevenlabs.io/app/voice-library/voice-456' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save voice URL' }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(setCharacterVoiceUrlMock).toHaveBeenCalledWith({
+      collectionId: 'character-folder-child',
+      voiceUrl: 'https://elevenlabs.io/app/voice-library/voice-456',
+    });
+  });
+
+  it('manages character voice URLs from the settings sidebar context menu', async () => {
+    const setCharacterVoiceUrlMock = vi.mocked(electronApi.setCharacterVoiceUrl);
+    const writeTextMock = vi.mocked(navigator.clipboard.writeText);
+    vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
+      {
+        id: 'character-folder-lumo',
+        category: 'characters',
+        title: 'Lumo',
+        parentFolderId: null,
+        voiceUrl: 'https://elevenlabs.io/app/voice-library/voice-123',
+        createdAt: '2026-05-26T12:00:00.000Z',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const settingsSidebar = screen.getByTestId('settings-sidebar');
+    fireEvent.contextMenu(within(settingsSidebar).getByRole('button', { name: 'Lumo' }));
+
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy voice URL' }));
+    expect(writeTextMock).toHaveBeenLastCalledWith('https://elevenlabs.io/app/voice-library/voice-123');
+
+    fireEvent.contextMenu(within(settingsSidebar).getByRole('button', { name: 'Lumo' }));
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy voice ID' }));
+    expect(writeTextMock).toHaveBeenLastCalledWith('voice-123');
+
+    fireEvent.contextMenu(within(settingsSidebar).getByRole('button', { name: 'Lumo' }));
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy character ID' }));
+    expect(writeTextMock).toHaveBeenLastCalledWith('character-folder-lumo');
+
+    fireEvent.contextMenu(within(settingsSidebar).getByRole('button', { name: 'Lumo' }));
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit voice URL' }));
+
+    expect(screen.getByRole('dialog', { name: 'Edit voice URL' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Voice URL')).toHaveValue('https://elevenlabs.io/app/voice-library/voice-123');
+
+    fireEvent.change(screen.getByLabelText('Voice URL'), {
+      target: { value: 'https://elevenlabs.io/app/voice-library/voice-456' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save voice URL' }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(setCharacterVoiceUrlMock).toHaveBeenCalledWith({
+      collectionId: 'character-folder-lumo',
+      voiceUrl: 'https://elevenlabs.io/app/voice-library/voice-456',
+    });
+  });
+
   it('does not enter a reference subfolder on single click', async () => {
     vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
       {
@@ -7909,6 +8061,44 @@ describe('App header thread title', () => {
     expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Garagem');
     expect(directorInput).toHaveValue('Plan shots in Garagem ');
     expect(screen.queryByRole('option', { name: 'Garagem' })).not.toBeInTheDocument();
+  });
+
+  it('opens Director @ reference search for multi-word non-ASCII references', async () => {
+    vi.mocked(electronApi.listReferences).mockResolvedValue([
+      {
+        id: 'rainha-reference',
+        collectionId: 'rainha-character',
+        environmentId: null,
+        name: 'rainha.png',
+        title: 'Rainha do açucar',
+        groupTitle: 'Rainha do açucar',
+        description: 'Character portrait.',
+        groupDescription: 'Main character.',
+        mimeType: 'image/png',
+        bytesBase64: 'AQID',
+        createdAt: '2026-05-26T12:00:00.000Z',
+        category: 'characters',
+      },
+    ]);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+
+    const directorInput = screen.getAllByRole('textbox').at(-1)!;
+    await act(async () => {
+      fireEvent.change(directorInput, {
+        target: { value: 'Plan @' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByRole('listbox', { name: 'Prompt references' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Rainha do açucar' })).toBeInTheDocument();
   });
 
   it('inserts grouped @ references from the Director composer with Enter', async () => {

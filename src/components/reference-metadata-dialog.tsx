@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  AudioLines,
   Check,
+  Copy,
+  ExternalLink,
   Folder,
   GripVertical,
   TriangleAlert,
@@ -331,14 +334,34 @@ function MetadataPanel({
   activeTitle,
   activeDescription,
   saveStatus,
+  voiceUrlDraft,
+  savedVoiceUrl,
+  canEditVoiceUrl,
+  isSavingVoiceUrl,
+  voiceUrlError,
   onUpdateField,
+  onVoiceUrlChange,
+  onSaveVoiceUrl,
+  onCopyVoiceUrl,
+  onOpenVoiceUrl,
 }: {
   selectedImage: ReferenceMetadataImageDraft | null;
   activeTitle: string;
   activeDescription: string;
   saveStatus: SaveStatus;
+  voiceUrlDraft: string;
+  savedVoiceUrl: string;
+  canEditVoiceUrl: boolean;
+  isSavingVoiceUrl: boolean;
+  voiceUrlError: string | null;
   onUpdateField: (field: "title" | "description", value: string) => void;
+  onVoiceUrlChange: (value: string) => void;
+  onSaveVoiceUrl: () => void;
+  onCopyVoiceUrl: () => void;
+  onOpenVoiceUrl: () => void;
 }) {
+  const isVoiceUrlChanged = voiceUrlDraft.trim() !== savedVoiceUrl;
+
   return (
     <section className="flex min-h-0 flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
@@ -367,6 +390,72 @@ function MetadataPanel({
               className="resize-none rounded-[14px] border border-[var(--border-soft)] bg-[rgba(7,7,7,0.72)] px-3 py-3 text-[13px] leading-5 text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[color-mix(in_srgb,var(--accent)_45%,white_6%)]"
             />
           </label>
+          {canEditVoiceUrl && !selectedImage ? (
+            <div className="flex flex-col gap-3 rounded-[18px] border border-[var(--border-soft)] bg-[rgba(7,7,7,0.42)] p-3">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex size-7 items-center justify-center rounded-full bg-[var(--surface2)] text-[var(--muted-foreground)]">
+                  <AudioLines className="size-3.5" />
+                </span>
+                <div className="min-w-0">
+                  <div className="text-[12px] font-medium text-[var(--foreground)]">Character voice</div>
+                  <div className="text-[11px] text-[var(--muted-foreground)]">ElevenLabs voice reference URL</div>
+                </div>
+              </div>
+              <label className="flex flex-col gap-2">
+                <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                  Voice URL
+                </span>
+                <input
+                  type="url"
+                  inputMode="url"
+                  aria-label="Character voice URL"
+                  value={voiceUrlDraft}
+                  onChange={(e) => onVoiceUrlChange(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      onSaveVoiceUrl();
+                    }
+                  }}
+                  placeholder="https://elevenlabs.io/..."
+                  className="h-10 rounded-[14px] border border-[var(--border-soft)] bg-[rgba(7,7,7,0.72)] px-3 text-[13px] text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[color-mix(in_srgb,var(--accent)_45%,white_6%)]"
+                />
+              </label>
+              {voiceUrlError ? (
+                <div className="text-[11px] leading-4 text-[rgb(245,178,178)]">{voiceUrlError}</div>
+              ) : null}
+              <div className="grid grid-cols-[1fr_auto_auto] gap-2">
+                <button
+                  type="button"
+                  onClick={onSaveVoiceUrl}
+                  disabled={isSavingVoiceUrl || !isVoiceUrlChanged}
+                  className="inline-flex h-9 items-center justify-center rounded-full bg-[var(--accent)] px-3 text-[12px] font-medium text-black transition-opacity hover:opacity-90 disabled:opacity-40"
+                >
+                  {isSavingVoiceUrl ? "Saving..." : voiceUrlDraft.trim() ? "Save voice URL" : "Remove voice URL"}
+                </button>
+                <button
+                  type="button"
+                  aria-label="Copy character voice URL"
+                  title="Copy voice URL"
+                  onClick={onCopyVoiceUrl}
+                  disabled={!savedVoiceUrl}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] disabled:opacity-35"
+                >
+                  <Copy className="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Open character voice URL"
+                  title="Open voice URL"
+                  onClick={onOpenVoiceUrl}
+                  disabled={!savedVoiceUrl}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] disabled:opacity-35"
+                >
+                  <ExternalLink className="size-3.5" />
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </section>
@@ -378,16 +467,26 @@ export function ReferenceMetadataDialog({
   folderId,
   initialDraft,
   initialImageId,
+  voiceUrl = null,
+  canEditVoiceUrl = false,
   onOpenChange,
   onSave,
+  onSaveVoiceUrl,
+  onCopyVoiceUrl,
+  onOpenVoiceUrl,
   onDeleteImage,
 }: {
   open: boolean;
   folderId: string;
   initialDraft: ReferenceMetadataDraft;
   initialImageId: string | null;
+  voiceUrl?: string | null;
+  canEditVoiceUrl?: boolean;
   onOpenChange: (open: boolean) => void;
   onSave: (draft: ReferenceMetadataDraft) => Promise<void>;
+  onSaveVoiceUrl?: (voiceUrl: string | null) => Promise<void>;
+  onCopyVoiceUrl?: (voiceUrl: string) => void;
+  onOpenVoiceUrl?: (voiceUrl: string) => void;
   onDeleteImage?: (imageId: string) => void;
 }) {
   const [draft, setDraft] = useState(initialDraft);
@@ -395,6 +494,9 @@ export function ReferenceMetadataDialog({
     initialImageId,
   );
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const [voiceUrlDraft, setVoiceUrlDraft] = useState(voiceUrl?.trim() ?? "");
+  const [isSavingVoiceUrl, setIsSavingVoiceUrl] = useState(false);
+  const [voiceUrlError, setVoiceUrlError] = useState<string | null>(null);
   const draftRef = useRef(draft);
   const popupRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -432,8 +534,10 @@ export function ReferenceMetadataDialog({
     draftRef.current = sortedDraft;
     setSelectedImageId(initialImageId);
     setSaveStatus("idle");
+    setVoiceUrlDraft(voiceUrl?.trim() ?? "");
+    setVoiceUrlError(null);
     lastQueuedSignatureRef.current = getDraftSignature(sortedDraft);
-  }, [folderId, initialDraft, initialImageId, open]);
+  }, [folderId, initialDraft, initialImageId, open, voiceUrl]);
 
   useEffect(() => {
     return () => {
@@ -610,6 +714,36 @@ export function ReferenceMetadataDialog({
     });
   }
 
+  async function handleSaveVoiceUrl() {
+    if (!onSaveVoiceUrl) return;
+    const nextVoiceUrl = voiceUrlDraft.trim();
+    if (nextVoiceUrl && !/^https?:\/\//i.test(nextVoiceUrl)) {
+      setVoiceUrlError("Enter a valid URL starting with http(s)://");
+      return;
+    }
+    setVoiceUrlError(null);
+    setIsSavingVoiceUrl(true);
+    try {
+      await onSaveVoiceUrl(nextVoiceUrl || null);
+    } catch {
+      setVoiceUrlError("Failed to save voice URL.");
+    } finally {
+      setIsSavingVoiceUrl(false);
+    }
+  }
+
+  function handleCopyVoiceUrl() {
+    const savedVoiceUrl = voiceUrl?.trim() ?? "";
+    if (!savedVoiceUrl) return;
+    onCopyVoiceUrl?.(savedVoiceUrl);
+  }
+
+  function handleOpenVoiceUrl() {
+    const savedVoiceUrl = voiceUrl?.trim() ?? "";
+    if (!savedVoiceUrl) return;
+    onOpenVoiceUrl?.(savedVoiceUrl);
+  }
+
   return (
     <Dialog
       open={open}
@@ -761,7 +895,21 @@ export function ReferenceMetadataDialog({
                     activeTitle={activeTitle}
                     activeDescription={activeDescription}
                     saveStatus={saveStatus}
+                    voiceUrlDraft={voiceUrlDraft}
+                    savedVoiceUrl={voiceUrl?.trim() ?? ""}
+                    canEditVoiceUrl={canEditVoiceUrl}
+                    isSavingVoiceUrl={isSavingVoiceUrl}
+                    voiceUrlError={voiceUrlError}
                     onUpdateField={updateActiveMetadata}
+                    onVoiceUrlChange={(value) => {
+                      setVoiceUrlDraft(value);
+                      setVoiceUrlError(null);
+                    }}
+                    onSaveVoiceUrl={() => {
+                      void handleSaveVoiceUrl();
+                    }}
+                    onCopyVoiceUrl={handleCopyVoiceUrl}
+                    onOpenVoiceUrl={handleOpenVoiceUrl}
                   />
                 </motion.div>
               ) : (

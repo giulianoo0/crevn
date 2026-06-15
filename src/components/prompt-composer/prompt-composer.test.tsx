@@ -47,6 +47,74 @@ describe('PromptComposer', () => {
     expect(onMentionIdsChange).toHaveBeenLastCalledWith(['reference-tito']);
   });
 
+  it('replaces pasted multi-word non-ASCII @mentions with registered references', async () => {
+    const onTextChange = vi.fn();
+    const onMentionIdsChange = vi.fn();
+
+    render(
+      <PromptComposer
+        ariaLabel="Prompt"
+        placeholder="Write something"
+        isExpanded
+        hasReferenceImages={false}
+        mentionCandidates={[
+          {
+            id: 'reference-rainha',
+            title: 'Rainha do açucar',
+          },
+        ]}
+        onTextChange={onTextChange}
+        onMentionMatch={() => {}}
+        onMentionIdsChange={onMentionIdsChange}
+      />,
+    );
+
+    const input = screen.getByRole('textbox', { name: 'Prompt' });
+
+    await act(async () => {
+      fireEvent.paste(input, {
+        clipboardData: {
+          files: [],
+          getData: (type: string) => {
+            if (type === 'text/plain') return 'Plano com @Rainha do açucar entrando';
+            return '';
+          },
+        },
+      });
+    });
+
+    expect(screen.getByTestId('selected-reference-mention')).toHaveTextContent('Rainha do açucar');
+    expect(input).toHaveTextContent('Plano com Rainha do açucar entrando');
+    expect(onTextChange).toHaveBeenLastCalledWith('Plano com Rainha do açucar entrando');
+    expect(onMentionIdsChange).toHaveBeenLastCalledWith(['reference-rainha']);
+  });
+
+  it('opens mention search for a bare @ without throwing', async () => {
+    const onMentionMatch = vi.fn();
+
+    render(
+      <PromptComposer
+        ariaLabel="Prompt"
+        placeholder="Write something"
+        isExpanded
+        hasReferenceImages={false}
+        mentionCandidates={[{ id: 'reference-rainha', title: 'Rainha do açucar' }]}
+        onTextChange={() => {}}
+        onMentionMatch={onMentionMatch}
+        onMentionIdsChange={() => {}}
+      />,
+    );
+
+    const input = screen.getByRole('textbox', { name: 'Prompt' }) as HTMLDivElement & { value: string };
+
+    await act(async () => {
+      input.value = '@';
+      fireEvent.input(input);
+    });
+
+    expect(onMentionMatch).toHaveBeenLastCalledWith({ query: '', start: 0 });
+  });
+
   it('renders inserted references with inline preview metadata', async () => {
     const composerRef = createRef<PromptComposerHandle>();
 

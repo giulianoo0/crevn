@@ -148,7 +148,13 @@ export interface ReferenceFolderRecord {
   title: string;
   description?: string | null;
   parentFolderId?: string | null;
+  voiceUrl?: string | null;
   createdAt: string;
+}
+
+export interface SetCharacterVoiceUrlPayload {
+  collectionId: string;
+  voiceUrl: string | null;
 }
 
 export interface CreateReferencePayload {
@@ -633,6 +639,9 @@ function getElectronApi() {
       }),
       checkForUpdates: async () => fallbackUpdateStatus,
       installUpdate: async () => fallbackUpdateStatus,
+      openExternal: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
       enhancePrompt: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
@@ -670,6 +679,9 @@ function getElectronApi() {
         throw new Error('Electron API bridge is unavailable.');
       },
       createReferenceFolder: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
+      setCharacterVoiceUrl: async () => {
         throw new Error('Electron API bridge is unavailable.');
       },
       createEnvironmentReference: async () => [],
@@ -910,6 +922,17 @@ export function listReferenceFolders() {
 
 export function createReferenceFolder(payload: CreateReferenceFolderPayload) {
   return getElectronApi().createReferenceFolder(payload) as Promise<ReferenceFolderRecord>;
+}
+
+export function setCharacterVoiceUrl(payload: SetCharacterVoiceUrlPayload) {
+  return getElectronApi().setCharacterVoiceUrl(payload) as Promise<{
+    collectionId: string;
+    voiceUrl: string | null;
+  }>;
+}
+
+export function openExternal(url: string) {
+  return getElectronApi().openExternal(url) as Promise<boolean>;
 }
 
 export function createEnvironmentReference(payload: CreateEnvironmentReferencePayload) {

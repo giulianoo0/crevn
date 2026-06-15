@@ -38,6 +38,7 @@ describe('ReferenceMetadataDialog', () => {
     render(
       <ReferenceMetadataDialog
         open
+        folderId="folder-1"
         initialDraft={initialDraft}
         initialImageId="image-2"
         onOpenChange={() => {}}
@@ -55,6 +56,7 @@ describe('ReferenceMetadataDialog', () => {
     render(
       <ReferenceMetadataDialog
         open
+        folderId="folder-1"
         initialDraft={initialDraft}
         initialImageId={null}
         onOpenChange={() => {}}
@@ -92,6 +94,7 @@ describe('ReferenceMetadataDialog', () => {
     render(
       <ReferenceMetadataDialog
         open
+        folderId="folder-1"
         initialDraft={initialDraft}
         initialImageId="image-1"
         onOpenChange={onOpenChange}
@@ -119,5 +122,47 @@ describe('ReferenceMetadataDialog', () => {
       })
     );
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('shows and saves the character voice URL on the group settings panel', async () => {
+    const onSaveVoiceUrl = vi.fn(async () => {});
+    const onCopyVoiceUrl = vi.fn();
+    const onOpenVoiceUrl = vi.fn();
+    render(
+      <ReferenceMetadataDialog
+        open
+        folderId="folder-1"
+        initialDraft={initialDraft}
+        initialImageId={null}
+        voiceUrl="https://elevenlabs.io/app/voice-library/voice-123"
+        canEditVoiceUrl
+        onOpenChange={() => {}}
+        onSave={vi.fn()}
+        onSaveVoiceUrl={onSaveVoiceUrl}
+        onCopyVoiceUrl={onCopyVoiceUrl}
+        onOpenVoiceUrl={onOpenVoiceUrl}
+      />
+    );
+
+    expect(screen.getByLabelText('Character voice URL')).toHaveValue(
+      'https://elevenlabs.io/app/voice-library/voice-123',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy character voice URL' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open character voice URL' }));
+
+    expect(onCopyVoiceUrl).toHaveBeenCalledWith('https://elevenlabs.io/app/voice-library/voice-123');
+    expect(onOpenVoiceUrl).toHaveBeenCalledWith('https://elevenlabs.io/app/voice-library/voice-123');
+
+    fireEvent.change(screen.getByLabelText('Character voice URL'), {
+      target: { value: 'https://elevenlabs.io/app/voice-library/voice-456' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save voice URL' }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onSaveVoiceUrl).toHaveBeenCalledWith('https://elevenlabs.io/app/voice-library/voice-456');
   });
 });

@@ -182,6 +182,8 @@ import {
   createProject,
   createReferenceCollection,
   createReferenceFolder,
+  setCharacterVoiceUrl,
+  openExternal,
   createReference,
   createDirectorChat,
   createSceneFrame,
@@ -1085,8 +1087,23 @@ type ReferenceLibraryFolderSummary = {
   title: string;
   images: SavedReferenceImage[];
   parentFolderId: string | null;
+  voiceUrl: string | null;
   latestActivityAt: string;
 };
+
+function getVoiceIdFromUrl(voiceUrl: string) {
+  const trimmedUrl = voiceUrl.trim();
+  if (!trimmedUrl) return '';
+
+  try {
+    const url = new URL(trimmedUrl);
+    const segments = url.pathname.split('/').filter(Boolean);
+    return segments[segments.length - 1] ?? trimmedUrl;
+  } catch {
+    const segments = trimmedUrl.split(/[/?#]/)[0]?.split('/').filter(Boolean) ?? [];
+    return segments[segments.length - 1] ?? trimmedUrl;
+  }
+}
 
 function buildReferenceLibraryFolders(
   route: ReferenceLibraryRoute,
@@ -1102,6 +1119,7 @@ function buildReferenceLibraryFolders(
       title: folder.title,
       images: [],
       parentFolderId: folder.parentFolderId ?? null,
+      voiceUrl: folder.voiceUrl ?? null,
       latestActivityAt: folder.createdAt,
     });
   }
@@ -1115,6 +1133,7 @@ function buildReferenceLibraryFolders(
         title: reference.groupTitle?.trim() || reference.title,
         images: [],
         parentFolderId: reference.parentFolderId ?? null,
+        voiceUrl: null,
         latestActivityAt: reference.createdAt,
       });
     }
@@ -2019,6 +2038,12 @@ export function App() {
   const [sidebarRenameReferenceFolder, setSidebarRenameReferenceFolder] = useState<
     (ReferenceLibraryFolderSummary & { category: ReferenceLibraryRoute }) | null
   >(null);
+  const [sidebarVoiceReferenceFolder, setSidebarVoiceReferenceFolder] = useState<
+    (ReferenceLibraryFolderSummary & { category: 'characters' }) | null
+  >(null);
+  const [sidebarVoiceUrlDraft, setSidebarVoiceUrlDraft] = useState('');
+  const [sidebarVoiceUrlError, setSidebarVoiceUrlError] = useState<string | null>(null);
+  const [isSavingSidebarVoiceUrl, setIsSavingSidebarVoiceUrl] = useState(false);
   const [referenceNewFolderRequestId, setReferenceNewFolderRequestId] = useState(0);
   const [referenceFolderListHeight, setReferenceFolderListHeight] = useState<number | null>(null);
   const referenceFolderListFrameRef = useRef<number | null>(null);
@@ -3397,6 +3422,68 @@ export function App() {
       }
       return upsertReferenceFolderRecord(current, { ...existingFolder, title: newTitle });
     });
+  }, []);
+
+  const handleSetCharacterVoiceUrl = useCallback(async ({
+    folderId,
+    voiceUrl,
+  }: {
+    folderId: string;
+    voiceUrl: string | null;
+  }) => {
+    const { voiceUrl: savedVoiceUrl } = await setCharacterVoiceUrl({
+      collectionId: folderId,
+      voiceUrl,
+    });
+    setReferenceFolders((current) => {
+      const existingFolder = current.find((folder) => folder.id === folderId);
+      if (!existingFolder) {
+        return current;
+      }
+      return upsertReferenceFolderRecord(current, { ...existingFolder, voiceUrl: savedVoiceUrl });
+    });
+  }, []);
+
+  const openSidebarVoiceDialog = useCallback((folder: ReferenceLibraryFolderSummary & { category: 'characters' }) => {
+    setSidebarVoiceReferenceFolder(folder);
+    setSidebarVoiceUrlDraft(folder.voiceUrl?.trim() ?? '');
+    setSidebarVoiceUrlError(null);
+  }, []);
+
+  const handleSaveSidebarVoiceUrl = useCallback(async () => {
+    const target = sidebarVoiceReferenceFolder;
+    if (!target) return;
+
+    const nextVoiceUrl = sidebarVoiceUrlDraft.trim();
+    if (nextVoiceUrl && !/^https?:\/\//i.test(nextVoiceUrl)) {
+      setSidebarVoiceUrlError('Enter a valid URL starting with http(s)://');
+      return;
+    }
+
+    setSidebarVoiceUrlError(null);
+    setIsSavingSidebarVoiceUrl(true);
+    try {
+      await handleSetCharacterVoiceUrl({
+        folderId: target.id,
+        voiceUrl: nextVoiceUrl || null,
+      });
+      setSidebarVoiceReferenceFolder(null);
+      setSidebarVoiceUrlDraft('');
+      toast.success(nextVoiceUrl ? 'Voice URL saved' : 'Voice URL removed');
+    } catch (error) {
+      setSidebarVoiceUrlError(getErrorMessage(error, 'Failed to save voice URL.'));
+    } finally {
+      setIsSavingSidebarVoiceUrl(false);
+    }
+  }, [handleSetCharacterVoiceUrl, sidebarVoiceReferenceFolder, sidebarVoiceUrlDraft]);
+
+  const handleCopySidebarText = useCallback(async (value: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(`${label} copied`);
+    } catch (error) {
+      toast.error(getErrorMessage(error, `Failed to copy ${label.toLowerCase()}.`));
+    }
   }, []);
 
   const handleRenameSidebarReferenceFolder = useCallback(
@@ -6592,6 +6679,77 @@ export function App() {
         />
       ) : null}
 
+      {sidebarVoiceReferenceFolder ? (
+        <Dialog
+          open={sidebarVoiceReferenceFolder !== null}
+          onOpenChange={(open) => {
+            if (!open) {
+              setSidebarVoiceReferenceFolder(null);
+              setSidebarVoiceUrlDraft('');
+              setSidebarVoiceUrlError(null);
+            }
+          }}
+        >
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle>
+                {sidebarVoiceReferenceFolder.voiceUrl ? 'Edit voice URL' : 'Set voice URL'}
+              </DialogTitle>
+              <DialogDescription>
+                Save an ElevenLabs voice reference for {sidebarVoiceReferenceFolder.title}.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="mt-4 space-y-4">
+              <label className="block space-y-2">
+                <span className="text-[13px] font-medium text-[var(--foreground)]">Voice URL</span>
+                <Input
+                  type="url"
+                  inputMode="url"
+                  aria-label="Voice URL"
+                  value={sidebarVoiceUrlDraft}
+                  onChange={(event) => {
+                    setSidebarVoiceUrlDraft(event.target.value);
+                    setSidebarVoiceUrlError(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      void handleSaveSidebarVoiceUrl();
+                    }
+                  }}
+                  placeholder="https://elevenlabs.io/..."
+                  autoFocus
+                />
+              </label>
+              {sidebarVoiceUrlError ? (
+                <p className="text-[12px] leading-5 text-[rgb(245,178,178)]">{sidebarVoiceUrlError}</p>
+              ) : null}
+              <div className="flex items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="surface"
+                  className="border-transparent bg-[var(--surface2)] hover:bg-[var(--surface3)]"
+                  onClick={() => {
+                    setSidebarVoiceReferenceFolder(null);
+                    setSidebarVoiceUrlDraft('');
+                    setSidebarVoiceUrlError(null);
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => void handleSaveSidebarVoiceUrl()}
+                  disabled={isSavingSidebarVoiceUrl}
+                >
+                  {isSavingSidebarVoiceUrl ? 'Saving...' : 'Save voice URL'}
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+      ) : null}
+
       <div
         ref={workspaceScrollRef}
         className={[
@@ -6635,6 +6793,7 @@ export function App() {
                 onCreateFolder={handleCreateReferenceFolder}
                 onAddImages={handleAddImagesToFolder}
                 onRenameFolder={handleRenameFolder}
+                onSetVoiceUrl={handleSetCharacterVoiceUrl}
                 onRenameImage={handleRenameReferenceImage}
                 onGroupImages={handleGroupReferenceImages}
                 onMoveImages={handleMoveReferenceImages}
@@ -7426,6 +7585,9 @@ export function App() {
                     >
                       {referenceSidebarFolders.map((folder) => {
                         const isActive = activeStudioView === 'references' && activeReferenceFolderId === folder.id;
+                        const isCharacterFolder = activeReferenceLibraryRoute === 'characters';
+                        const folderVoiceUrl = folder.voiceUrl?.trim() ?? '';
+                        const folderVoiceId = getVoiceIdFromUrl(folderVoiceUrl);
 
                         return (
                           <ContextMenu key={folder.id}>
@@ -7458,6 +7620,46 @@ export function App() {
                               >
                                 Rename
                               </ContextMenuItem>
+                              {isCharacterFolder ? (
+                                <>
+                                  <ContextMenuItem
+                                    onClick={() =>
+                                      openSidebarVoiceDialog({
+                                        ...folder,
+                                        category: 'characters',
+                                      })
+                                    }
+                                  >
+                                    {folderVoiceUrl ? 'Edit voice URL' : 'Set voice URL'}
+                                  </ContextMenuItem>
+                                  <ContextMenuItem
+                                    disabled={!folderVoiceUrl}
+                                    onClick={() => {
+                                      if (!folderVoiceUrl) return;
+                                      void handleCopySidebarText(folderVoiceUrl, 'Voice URL');
+                                    }}
+                                  >
+                                    Copy voice URL
+                                  </ContextMenuItem>
+                                  <ContextMenuItem
+                                    disabled={!folderVoiceId}
+                                    onClick={() => {
+                                      if (!folderVoiceId) return;
+                                      void handleCopySidebarText(folderVoiceId, 'Voice ID');
+                                    }}
+                                  >
+                                    Copy voice ID
+                                  </ContextMenuItem>
+                                  <ContextMenuItem
+                                    onClick={() => {
+                                      void handleCopySidebarText(folder.id, 'Character ID');
+                                    }}
+                                  >
+                                    Copy character ID
+                                  </ContextMenuItem>
+                                  <ContextMenuSeparator />
+                                </>
+                              ) : null}
                               <ContextMenuItem
                                 onClick={() => {
                                   void handleExportReference(
@@ -8281,9 +8483,10 @@ export function App() {
         isExpanded={isExpanded}
         hasReferenceImages={hasReferenceImages}
         referenceImages={referenceImages}
-        referenceMentionOptions={referenceMentionOptions}
-        referenceMentionCandidates={referenceMentionCandidates}
-        activeReferenceMentionIndex={activeReferenceMentionIndex}
+                        referenceMentionOptions={referenceMentionOptions}
+                        referenceMentionCandidates={referenceMentionCandidates}
+                        showReferenceMentionGroups={showReferenceMentionGroups}
+                        activeReferenceMentionIndex={activeReferenceMentionIndex}
         popoverBottom={popoverBottom}
         isFocused={isFocused}
         isReferenceDragActive={isReferenceDragActive}
@@ -10150,6 +10353,7 @@ function DirectorComposerBar({
   referenceImages,
   referenceMentionOptions,
   referenceMentionCandidates,
+  showReferenceMentionGroups,
   activeReferenceMentionIndex,
   popoverBottom,
   isFocused,
@@ -10203,6 +10407,7 @@ function DirectorComposerBar({
   referenceImages: ComposerReferenceImage[];
   referenceMentionOptions: ReferenceSelectorOption[];
   referenceMentionCandidates: Array<{ id: string; title: string; previewUrl?: string }>;
+  showReferenceMentionGroups: boolean;
   activeReferenceMentionIndex: number;
   popoverBottom: number;
   isFocused: boolean;
@@ -13435,6 +13640,7 @@ function ReferencesWorkspace({
   onCreateFolder,
   onAddImages,
   onRenameFolder,
+  onSetVoiceUrl,
   onRenameImage,
   onGroupImages,
   onMoveImages,
@@ -13460,6 +13666,7 @@ function ReferencesWorkspace({
   ) => Promise<ReferenceFolderRecord>;
   onAddImages: (args: { folderId: string; category: ReferenceLibraryRoute; folderTitle: string; newFiles: File[]; existingImages: SavedReferenceImage[] }) => Promise<void>;
   onRenameFolder: (args: { folderId: string; category: ReferenceLibraryRoute; newTitle: string }) => Promise<void>;
+  onSetVoiceUrl: (args: { folderId: string; voiceUrl: string | null }) => Promise<void>;
   onRenameImage: (args: { imageId: string; folderId: string; category: ReferenceLibraryRoute; newTitle: string }) => Promise<void>;
   onGroupImages: (args: { imageIds: string[]; category: ReferenceLibraryRoute; newFolderTitle: string; sourceFolderId: string }) => Promise<void>;
   onMoveImages: (args: { imageIds: string[]; category: ReferenceLibraryRoute; sourceFolderId: string; targetFolderId: string; targetFolderTitle: string }) => Promise<void>;
@@ -13524,6 +13731,7 @@ function ReferencesWorkspace({
       images: SavedReferenceImage[];
       isSolo: boolean;
       parentFolderId: string | null;
+      voiceUrl: string | null;
       createdAt: string;
       latestActivityAt: string;
     }>();
@@ -13536,6 +13744,7 @@ function ReferencesWorkspace({
         images: [],
         isSolo: false,
         parentFolderId: folder.parentFolderId ?? null,
+        voiceUrl: folder.voiceUrl ?? null,
         createdAt: folder.createdAt,
         latestActivityAt: folder.createdAt,
       });
@@ -13553,6 +13762,7 @@ function ReferencesWorkspace({
           images: [],
           isSolo,
           parentFolderId: ref.parentFolderId ?? null,
+          voiceUrl: null,
           createdAt: ref.createdAt,
           latestActivityAt: ref.createdAt,
         });
@@ -13739,6 +13949,24 @@ function ReferencesWorkspace({
     return applyOrder(folderImages, getImageOrder(displayFolder.id), (img) => img.id, (img) => img.title || img.name);
   }, [folderImages, displayFolder, orderVersion]);
   const isSoloFolder = displayFolder?.isSolo ?? false;
+
+  const handleOpenVoiceUrl = useCallback(async (url: string) => {
+    try {
+      await openExternal(url);
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to open voice URL.'));
+    }
+  }, []);
+
+  const handleCopyVoiceUrl = useCallback(async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success('Voice URL copied');
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Failed to copy voice URL.'));
+    }
+  }, []);
+
   const representativeRef = folderImages[0];
   const selectedImages = folderImages.filter((img) => selectedImageIds.includes(img.id));
   const metadataFolder = metadataTarget
@@ -13939,6 +14167,8 @@ function ReferencesWorkspace({
           folderId={metadataFolder.id}
           initialDraft={metadataDraft}
           initialImageId={metadataTarget?.imageId ?? null}
+          voiceUrl={metadataFolder.voiceUrl}
+          canEditVoiceUrl={route === 'characters' && !metadataFolder.isSolo}
           onOpenChange={(open) => {
             if (!open) setMetadataTarget(null);
           }}
@@ -13949,6 +14179,14 @@ function ReferencesWorkspace({
               draft,
             })
           }
+          onSaveVoiceUrl={(voiceUrl) =>
+            onSetVoiceUrl({
+              folderId: metadataFolder.id,
+              voiceUrl,
+            })
+          }
+          onCopyVoiceUrl={handleCopyVoiceUrl}
+          onOpenVoiceUrl={handleOpenVoiceUrl}
           onDeleteImage={(imageId) => {
             if (!metadataFolder) return;
             void onDeleteImageFromFolder({

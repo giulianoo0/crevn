@@ -529,6 +529,7 @@ const characterReferenceCollectionsTable = sqliteTable('character_reference_coll
   title: text('title').notNull(),
   description: text('description'),
   parentFolderId: text('parent_folder_id'),
+  voiceUrl: text('voice_url'),
   createdAt: text('created_at').notNull(),
 });
 
@@ -795,6 +796,7 @@ const CREATE_CHARACTER_REFERENCE_COLLECTIONS_TABLE_SQL = `
     title TEXT NOT NULL,
     description TEXT,
     parent_folder_id TEXT,
+    voice_url TEXT,
     created_at TEXT NOT NULL
   )
 `;
@@ -1418,6 +1420,7 @@ async function createGenerationStore(userDataDir, options = {}) {
   await ensureReferenceAttachmentTitleColumns(db);
   await ensureEnvironmentAttachmentSectionColumn(db);
   await ensureReferenceFolderParentColumns(db);
+  await ensureCharacterVoiceUrlColumn(db);
   await ensureProjectSettingsColumns(db);
   await ensureGenerationJobsThreadColumn(db);
   await ensureGenerationJobMetadataColumns(db);
@@ -2347,6 +2350,7 @@ async function listReferenceFolders() {
         title: characterReferenceCollectionsTable.title,
         description: characterReferenceCollectionsTable.description,
         parentFolderId: characterReferenceCollectionsTable.parentFolderId,
+        voiceUrl: characterReferenceCollectionsTable.voiceUrl,
         createdAt: characterReferenceCollectionsTable.createdAt,
       })
       .from(characterReferenceCollectionsTable)
@@ -2416,6 +2420,19 @@ async function listReferenceFolders() {
       createdAt: timestamp,
     });
     return { id: collectionId, category, title, parentFolderId, createdAt: timestamp };
+  }
+
+  async function setCharacterVoiceUrl(payload) {
+    const collectionId = payload?.collectionId;
+    if (!collectionId) {
+      throw new Error('setCharacterVoiceUrl requires a collectionId.');
+    }
+    const voiceUrl = (payload?.voiceUrl ?? '').trim() || null;
+    await db
+      .update(characterReferenceCollectionsTable)
+      .set({ voiceUrl })
+      .where(eq(characterReferenceCollectionsTable.id, collectionId));
+    return { collectionId, voiceUrl };
   }
 
   async function createReferenceCollection(payload) {
@@ -4406,6 +4423,7 @@ async function listReferenceFolders() {
     listReferenceFolders,
     createReference,
     createReferenceFolder,
+    setCharacterVoiceUrl,
     createEnvironmentReference,
     createReferenceCollection,
     updateReference,
@@ -4849,6 +4867,14 @@ async function ensureReferenceFolderParentColumns(db) {
     if (!columnNames.has('parent_folder_id')) {
       await db.run(sql.raw(`ALTER TABLE ${tableName} ADD COLUMN parent_folder_id TEXT`));
     }
+  }
+}
+
+async function ensureCharacterVoiceUrlColumn(db) {
+  const tableInfo = await db.all(sql.raw("PRAGMA table_info('character_reference_collections')"));
+  const columnNames = new Set(tableInfo.map((column) => column.name));
+  if (!columnNames.has('voice_url')) {
+    await db.run(sql.raw('ALTER TABLE character_reference_collections ADD COLUMN voice_url TEXT'));
   }
 }
 
