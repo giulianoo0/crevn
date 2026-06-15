@@ -8,6 +8,17 @@
 - Do not introduce React Native, Expo, or Expo Router patterns into this codebase.
 - Prefer simple local state unless a clear shared-state requirement appears.
 
+## Release Flow
+
+- Do not create GitHub Releases manually with `gh release create`.
+- The release action lives in `.github/workflows/build.yml`.
+- Release tags must use the `vX.Y.Z` format, for example `v0.3.4`. The workflow only runs the release publishing job for tags matching `v*`.
+- Before tagging, bump `package.json` to the target version, commit the intended worktree, and push `main`.
+- Create the release by pushing the tag: `git tag vX.Y.Z` followed by `git push origin vX.Y.Z`.
+- The Build GitHub Action will build Linux, Windows, and macOS artifacts, then create or update the GitHub Release and upload assets.
+- Verify the action with `gh run list --workflow Build` or `gh run watch <run-id>`, then inspect the release with `gh release view vX.Y.Z`.
+- If a raw release or non-`v` tag was created by mistake, delete the incorrect release/tag and rerun the release by pushing the correct `vX.Y.Z` tag.
+
 ## Product Context
 
 - This product is a professional AI editing studio.
