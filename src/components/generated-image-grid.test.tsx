@@ -199,6 +199,36 @@ describe('GeneratedImageGrid', () => {
     expect(screen.getByRole('button', { name: 'Select 2.png' })).toHaveAttribute('data-selected', 'true');
   });
 
+  it('renders a varied mosaic layout with hero, band, and panoramic blocks', () => {
+    const mosaicImages = Array.from({ length: 8 }, (_, index) => ({
+      id: `m-${index + 1}`,
+      fileUrl: `file:///m-${index + 1}.png`,
+      fileName: `m-${index + 1}.png`,
+    }));
+
+    render(<GeneratedImageGrid images={mosaicImages} variant="mosaic" className="h-[1200px]" />);
+
+    // First block is the hero-left template (1 big tile + 2 stacked tiles).
+    const heroBlock = screen.getByTestId('generated-image-mosaic-block-0');
+    expect(heroBlock).toHaveAttribute('data-template', 'heroLeft');
+    // Second block is a full-width band of three tiles.
+    expect(screen.getByTestId('generated-image-mosaic-block-1')).toHaveAttribute(
+      'data-template',
+      'band',
+    );
+    // All eight images are accounted for across the mosaic blocks.
+    expect(screen.getAllByRole('img')).toHaveLength(8);
+  });
+
+  it('falls back to the uniform grid when mosaic is requested with a non-default column count', () => {
+    render(
+      <GeneratedImageGrid images={images} variant="mosaic" columnCount={2} className="h-[600px]" />,
+    );
+
+    expect(screen.getByTestId('generated-image-grid-row-0')).toBeInTheDocument();
+    expect(screen.queryByTestId('generated-image-mosaic-block-0')).not.toBeInTheDocument();
+  });
+
   it('shows a context menu with copy, copy prompt, download, and delete actions for images', () => {
     const handleCopy = vi.fn();
     const handleCopyPrompt = vi.fn();

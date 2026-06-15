@@ -6,6 +6,7 @@ import { App, getReferenceMentionReplacementRange } from './App';
 import { COMPOSER_SHELL_MOTION } from './lib/composer-motion';
 import * as electronApi from './lib/electron-api';
 import * as errors from './lib/errors';
+import { sounds } from './lib/sounds';
 import { toast } from 'sonner';
 
 const renderCounters = vi.hoisted(() => ({
@@ -906,6 +907,18 @@ vi.mock('sonner', () => ({
   },
 }));
 
+vi.mock('./lib/sounds', () => ({
+  sounds: {
+    copy: vi.fn(),
+    select: vi.fn(),
+    move: vi.fn(),
+    send: vi.fn(),
+    success: vi.fn(),
+    notification: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
 vi.mock('framer-motion', async () => {
   const React = await import('react');
   const componentCache = new Map<PropertyKey, React.ComponentType<Record<string, unknown>>>();
@@ -1190,6 +1203,14 @@ describe('App header thread title', () => {
         observe() {}
         disconnect() {}
         unobserve() {}
+      },
+      IntersectionObserver: class {
+        observe() {}
+        disconnect() {}
+        unobserve() {}
+        takeRecords() {
+          return [];
+        }
       },
     });
     Object.assign(navigator, {
@@ -3009,6 +3030,12 @@ describe('App header thread title', () => {
   });
 
   it('slides to the settings view when settings is clicked', async () => {
+    const scrollToMock = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollToMock,
+    });
+
     render(<App />);
 
     await act(async () => {
@@ -3017,12 +3044,14 @@ describe('App header thread title', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
 
-    expect(screen.getByText('References')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Characters' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Environment' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Objects' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Characters' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Props' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Character' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Back to projects' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to projects' }));
+    expect(scrollToMock).toHaveBeenCalledWith({ top: 0, left: 0 });
   });
 
   it('checks for updates from the settings view', async () => {
@@ -3035,7 +3064,7 @@ describe('App header thread title', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check' }));
 
     await act(async () => {
       await vi.runAllTimersAsync();
@@ -3063,7 +3092,7 @@ describe('App header thread title', () => {
     fireEvent.change(screen.getByLabelText('Gemini API key'), {
       target: { value: 'saved-gemini-key' },
     });
-    fireEvent.click(screen.getAllByRole('button', { name: 'Save provider keys' })[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Save keys' }));
 
     await act(async () => {
       await vi.runAllTimersAsync();
@@ -3138,8 +3167,27 @@ describe('App header thread title', () => {
         chatgptUserId: 'user-2',
         isFedrampAccount: false,
         lastRefresh: '2026-06-15T11:00:00.000Z',
-        limits: [],
-        limitsLastCheckedAt: null,
+        limits: [
+          {
+            limitId: 'codex',
+            limitName: null,
+            primary: {
+              usedPercent: 12,
+              windowMinutes: 300,
+              resetsAt: 1781519400,
+            },
+            secondary: {
+              usedPercent: 24,
+              windowMinutes: 7 * 24 * 60,
+              resetsAt: 1781910000,
+            },
+            credits: null,
+            individualLimit: null,
+            planType: 'plus',
+            rateLimitReachedType: null,
+          },
+        ],
+        limitsLastCheckedAt: '2026-06-15T11:30:00.000Z',
         limitsError: null,
         createdAt: '2026-06-15T11:00:00.000Z',
         updatedAt: '2026-06-15T11:00:00.000Z',
@@ -3187,18 +3235,11 @@ describe('App header thread title', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     fireEvent.click(screen.getByRole('button', { name: 'Image' }));
 
-    expect(screen.getByRole('heading', { name: 'Codex image auth' })).toBeInTheDocument();
-    expect(screen.getByText('first@example.com')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Collapse Codex image account first@example.com' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '5h Limit' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Weekly Limit' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Monthly Limit' })).toBeInTheDocument();
-    expect(screen.getByText('5 hour window')).toBeInTheDocument();
-    expect(screen.getByText('7 day window')).toBeInTheDocument();
-    expect(screen.getByText('30 day window')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Collapse Codex image account first@example.com' }));
-    expect(screen.queryByText('5 hour window')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Codex image accounts' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'first@example.com' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Active Codex image account first@example.com' })
+    ).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Use Codex image account second@example.com' }));
 
@@ -3207,6 +3248,58 @@ describe('App header thread title', () => {
     });
 
     expect(electronApi.selectCodexImageAccount).toHaveBeenCalledWith('codex-account-2');
+    expect(sounds.select).toHaveBeenCalled();
+    expect(toast.success).toHaveBeenCalledWith('Codex image account switched');
+  });
+
+  it('disables and dims Codex image accounts without limits', async () => {
+    vi.mocked(electronApi.getProviderSettings).mockResolvedValueOnce({
+      text: {
+        gemini: {
+          apiKey: '',
+        },
+        anthropic: {
+          apiKey: '',
+        },
+      },
+      image: {
+        codex: {
+          activeAccountId: null,
+          accounts: [
+            {
+              id: 'codex-account-no-limits',
+              accountId: 'chatgpt-account-no-limits',
+              email: 'empty@example.com',
+              planType: 'plus',
+              chatgptUserId: 'user-no-limits',
+              isFedrampAccount: false,
+              lastRefresh: '2026-06-15T11:00:00.000Z',
+              limits: [],
+              limitsLastCheckedAt: null,
+              limitsError: null,
+              createdAt: '2026-06-15T11:00:00.000Z',
+              updatedAt: '2026-06-15T11:00:00.000Z',
+            },
+          ],
+        },
+      },
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Image' }));
+
+    const accountButton = screen.getByRole('button', { name: 'Use Codex image account empty@example.com' });
+    expect(accountButton).toBeDisabled();
+    expect(screen.getByText('No limits')).toBeInTheDocument();
+    expect(accountButton.closest('article')?.className).toContain('opacity-[0.55]');
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument();
+    expect(screen.queryByText('Refresh')).not.toBeInTheDocument();
   });
 
   it('exports projects and threads from sidebar row actions', async () => {
@@ -3268,14 +3361,14 @@ describe('App header thread title', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Import reference' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import references' }));
 
     await act(async () => {
       await vi.runAllTimersAsync();
     });
 
     expect(electronApi.importReference).toHaveBeenCalled();
-    expect(screen.getByText('Imported Reference')).toBeInTheDocument();
+    expect(screen.getAllByText('Imported Reference').length).toBeGreaterThan(0);
   });
 
   it('exports only the clicked reference from the reference context menu', async () => {
@@ -4533,7 +4626,7 @@ describe('App header thread title', () => {
     expect(screen.getByAltText('scene-ref.png')).toBeInTheDocument();
   });
 
-  it('opens character references inside the newest folder with a right sidebar and breadcrumb header', async () => {
+  it('shows reference category tabs and folder contents in the settings sidebar', async () => {
     vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
       {
         id: 'character-folder-older',
@@ -4549,6 +4642,13 @@ describe('App header thread title', () => {
         parentFolderId: null,
         createdAt: '2026-05-26T13:00:00.000Z',
       },
+      {
+        id: 'prop-folder-newer',
+        category: 'objects',
+        title: 'Hero Sword',
+        parentFolderId: null,
+        createdAt: '2026-05-26T14:00:00.000Z',
+      },
     ]);
 
     render(<App />);
@@ -4563,96 +4663,51 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    const sidebar = screen.getByTestId('reference-sidebar-shell');
-    expect(sidebar.className).toContain('right-0');
-    expect(within(sidebar).getByRole('button', { name: 'Lumo' })).toBeInTheDocument();
-    expect(within(sidebar).getByRole('button', { name: 'Milo' })).toBeInTheDocument();
-    expect(within(sidebar).getByRole('button', { name: 'Import references' })).toBeInTheDocument();
-    expect(within(sidebar).getByRole('button', { name: 'Create reference folder' })).toBeInTheDocument();
-    expect(within(sidebar).getByRole('button', { name: 'Resize references sidebar' })).toBeInTheDocument();
+    const settingsSidebar = screen.getByTestId('settings-sidebar');
+    const tabs = within(settingsSidebar).getByTestId('reference-category-tabs');
+    expect(within(tabs).getByRole('button', { name: 'Characters' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(tabs).getByRole('button', { name: 'Environment' })).toBeInTheDocument();
+    expect(within(tabs).getByRole('button', { name: 'Props' })).toBeInTheDocument();
+    expect(within(settingsSidebar).getByRole('button', { name: 'Import references' })).toBeInTheDocument();
+    expect(within(settingsSidebar).getByRole('button', { name: 'Create reference folder' })).toBeInTheDocument();
+    expect(within(settingsSidebar).getByRole('button', { name: 'Lumo' })).toBeInTheDocument();
+    expect(within(settingsSidebar).getByRole('button', { name: 'Milo' })).toBeInTheDocument();
+    expect(within(settingsSidebar).queryByText('0')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('reference-sidebar-shell')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Resize references sidebar' })).not.toBeInTheDocument();
+
+    fireEvent.contextMenu(within(settingsSidebar).getByRole('button', { name: 'Lumo' }));
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Export reference...' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Export reference...' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    expect(electronApi.exportReference).toHaveBeenCalledWith({
+      id: 'character-folder-newer',
+      title: 'Lumo',
+      category: 'characters',
+      collectionId: 'character-folder-newer',
+      environmentId: null,
+    });
+    fireEvent.keyDown(document, { key: 'Escape' });
 
     expect(screen.getByRole('heading', { name: 'Character > Lumo' })).toBeInTheDocument();
-    expect(screen.queryByTestId('reference-grid')).not.toBeInTheDocument();
-    expect(
-      screen.queryByText('Save character visuals and identity notes for consistent people across generations.')
-    ).not.toBeInTheDocument();
     expect(screen.getByText('Pasta vazia')).toBeInTheDocument();
-  });
 
-  it('keeps the add-image tile visible when a reference folder only has subfolders', async () => {
-    vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
-      {
-        id: 'character-folder-parent',
-        category: 'characters',
-        title: 'Characters',
-        parentFolderId: null,
-        createdAt: '2026-05-26T13:00:00.000Z',
-      },
-      {
-        id: 'character-folder-child',
-        category: 'characters',
-        title: 'Lumo',
-        parentFolderId: 'character-folder-parent',
-        createdAt: '2026-05-26T12:00:00.000Z',
-      },
-    ]);
-
-    render(<App />);
-
+    fireEvent.click(within(tabs).getByRole('button', { name: 'Props' }));
     await act(async () => {
       await vi.runAllTimersAsync();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    expect(screen.getByTestId('reference-subfolder-grid')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Add images to folder' })).toBeInTheDocument();
-    expect(screen.queryByText('Pasta vazia')).not.toBeInTheDocument();
-  });
-
-  it('resizes the references sidebar when dragging the resize handle', async () => {
-    window.innerWidth = 1400;
-    vi.mocked(electronApi.listReferenceFolders).mockResolvedValue([
-      {
-        id: 'character-folder-newer',
-        category: 'characters',
-        title: 'Lumo',
-        parentFolderId: null,
-        createdAt: '2026-05-26T13:00:00.000Z',
-      },
-    ]);
-
-    render(<App />);
-
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-
-    const sidebarShell = screen.getByTestId('reference-sidebar-shell');
-    const resizeHandle = screen.getByRole('button', { name: 'Resize references sidebar' });
-
-    expect(sidebarShell).toHaveStyle({ width: '500px' });
-
-    await act(async () => {
-      fireEvent.pointerDown(resizeHandle, { pointerId: 1, clientX: 900, button: 0 });
-    });
-
-    await act(async () => {
-      fireEvent.pointerMove(document, { pointerId: 1, clientX: 760 });
-      fireEvent.pointerUp(document, { pointerId: 1, clientX: 760 });
-    });
-
-    expect(sidebarShell).toHaveStyle({ width: '640px' });
+    expect(within(tabs).getByRole('button', { name: 'Props' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(settingsSidebar).getByRole('button', { name: 'Hero Sword' })).toBeInTheDocument();
+    expect(within(settingsSidebar).queryByRole('button', { name: 'Lumo' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Item > Hero Sword' })).toBeInTheDocument();
   });
 
   it('opens reference folder metadata on folder double click', async () => {
@@ -4702,7 +4757,11 @@ describe('App header thread title', () => {
       await vi.runAllTimersAsync();
     });
 
-    fireEvent.doubleClick(screen.getByText('Lumo').closest('button')!);
+    const lumoFolderRow = screen
+      .getAllByRole('button', { name: 'Lumo' })
+      .find((element) => element.className.includes('group/card'));
+    expect(lumoFolderRow).toBeDefined();
+    fireEvent.doubleClick(lumoFolderRow!);
 
     expect(screen.getByRole('dialog', { name: 'Edit reference metadata' })).toBeInTheDocument();
     expect(screen.getByLabelText('Reference group name')).toHaveValue('Lumo');

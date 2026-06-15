@@ -288,6 +288,39 @@ textarea::-webkit-scrollbar {
   }
 }
 
+/* Prompt enhancement shimmer: same construction and tuning as the app's
+   `.t-shimmer` (muted grey base, 400% band, 2s linear sweep, position 100% -> 0%),
+   but the single highlight is replaced by a chromatic band. Targets the Lexical
+   text leaves so the gradient clips to the actual glyphs. When generation
+   finishes, the class is removed and the existing fade/blur swap takes over. */
+.prompt-enhancing [data-lexical-text="true"]:not([data-mention-id]) {
+  background-image: linear-gradient(
+    90deg,
+    var(--shimmer-base) 0%,
+    var(--shimmer-base) 40%,
+    #7c5cff 47%,
+    #38d9ff 50%,
+    #ff5ec7 53%,
+    var(--shimmer-base) 60%,
+    var(--shimmer-base) 100%
+  );
+  background-size: var(--shimmer-band) 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: t-shimmer var(--shimmer-dur) var(--shimmer-ease) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prompt-enhancing [data-lexical-text="true"]:not([data-mention-id]) {
+    animation: none !important;
+    -webkit-text-fill-color: var(--shimmer-base);
+    color: var(--shimmer-base);
+  }
+}
+
 @keyframes sd-blurIn {
   from {
     opacity: 0;

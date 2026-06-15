@@ -27,7 +27,7 @@ export const MODEL_PROVIDER_OPTIONS: ModelProviderOption[] = [
 export const MODEL_OPTIONS: ModelOption[] = [
   {
     id: 'codex-gpt-5-4-mini',
-    label: 'GPT-5.4 Mini',
+    label: 'GPT Image',
     providerId: 'codex',
     runtimeModel: 'gpt-5.4',
     capabilities: ['image'],
@@ -82,6 +82,12 @@ export const MODEL_OPTIONS: ModelOption[] = [
 export const DEFAULT_IMAGE_MODEL_ID = 'codex-gpt-5-4-mini';
 export const DEFAULT_TEXT_MODEL_ID = 'google-gemini-3-5-flash';
 export const DEFAULT_MODEL_ID = DEFAULT_IMAGE_MODEL_ID;
+
+/** Label used on generated-image tiles: model name plus its provider, e.g. "GPT Image (Codex)". */
+export function getModelBadgeLabel(model: Pick<ModelOption, 'label' | 'providerId'>) {
+  const provider = getProviderOptionById(model.providerId);
+  return provider ? `${model.label} (${provider.label})` : model.label;
+}
 
 export function getModelOptionById(modelId: string) {
   return MODEL_OPTIONS.find((option) => option.id === modelId) ?? null;

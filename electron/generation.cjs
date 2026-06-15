@@ -88,7 +88,7 @@ function logStartup(label, startedAt, fields = {}) {
 const IMAGE_MODEL_OPTIONS = [
   {
     id: 'codex-gpt-5-4-mini',
-    label: 'GPT-5.4 Mini',
+    label: 'GPT Image (Codex)',
     providerId: 'codex',
     runtimeModel: 'gpt-5.4',
   },
@@ -282,7 +282,7 @@ function buildSceneFramePrompt({
     `Generate only this target frame: ${targetOverride?.title || targetFrame.title}.`,
     'Use only the scene continuity brief, attached references, and this target frame prompt.',
     'This output is a static keyframe for later animation in Seedance.',
-    'The later direcao-de-cena stage will use this frame as a reference image, so make identity, environment, pose, lighting, and composition stable enough for Seedance-ready planning.',
+    'The later seedance-cartoon stage will use this frame as a reference image, so make identity, environment, pose, lighting, and composition stable enough for Seedance-ready planning.',
     'Reference discipline:',
     '- References are authoritative anchors, not loose inspiration.',
     '- If text conflicts with references, references win for identity, layout, materials, palette, and fixed prop placement.',

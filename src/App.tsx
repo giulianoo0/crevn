@@ -262,6 +262,7 @@ import {
 } from './lib/electron-api';
 import {
   getDefaultModelOption,
+  getModelBadgeLabel,
   getModelOptionById,
   getModelsForProvider,
   type GenerationProviderId,
@@ -1903,6 +1904,49 @@ type DirectorMessageStreamSnapshot = {
 
 type DirectorMessageStreamListener = (snapshot: DirectorMessageStreamSnapshot) => void;
 
+/**
+ * Press-and-hold auto-repeat for stepper buttons: fires the action once on
+ * pointer down, then repeats it on an interval (after a short delay) until the
+ * pointer is released or leaves the button.
+ */
+function useHoldRepeat() {
+  const timersRef = useRef<{ timeout?: number; interval?: number }>({});
+  // Set when a pointer press already fired the action, so the synthetic click
+  // that follows is swallowed instead of double-stepping. Keyboard / assistive
+  // activation has no preceding pointerdown, so it still runs through onClick.
+  const pointerFiredRef = useRef(false);
+
+  const stop = useCallback(() => {
+    if (timersRef.current.timeout !== undefined) window.clearTimeout(timersRef.current.timeout);
+    if (timersRef.current.interval !== undefined) window.clearInterval(timersRef.current.interval);
+    timersRef.current = {};
+  }, []);
+
+  const start = useCallback(
+    (action: () => void) => {
+      stop();
+      pointerFiredRef.current = true;
+      action();
+      timersRef.current.timeout = window.setTimeout(() => {
+        timersRef.current.interval = window.setInterval(action, 80);
+      }, 400);
+    },
+    [stop],
+  );
+
+  const handleClick = useCallback((action: () => void) => {
+    if (pointerFiredRef.current) {
+      pointerFiredRef.current = false;
+      return;
+    }
+    action();
+  }, []);
+
+  useEffect(() => stop, [stop]);
+
+  return { start, stop, handleClick };
+}
+
 export function App() {
   const inputId = useId();
   const [prompt, setPrompt] = useState('');
@@ -1936,6 +1980,8 @@ export function App() {
   const [isCreatingDirectorChat, setIsCreatingDirectorChat] = useState(false);
   const [selectedAspectRatio, setSelectedAspectRatio] = useState<(typeof aspectRatioOptions)[number]['value']>('16:9');
   const [shotCount, setShotCount] = useState(1);
+  const holdDecrementShotCount = useHoldRepeat();
+  const holdIncrementShotCount = useHoldRepeat();
   const [isModePickerOpen, setIsModePickerOpen] = useState(false);
   const [isAspectRatioOpen, setIsAspectRatioOpen] = useState(false);
   const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
@@ -1977,6 +2023,7 @@ export function App() {
   const [referenceFolderListHeight, setReferenceFolderListHeight] = useState<number | null>(null);
   const referenceFolderListFrameRef = useRef<number | null>(null);
   const referenceFolderListInnerRef = useRef<HTMLDivElement>(null);
+  const workspaceScrollRef = useRef<HTMLDivElement>(null);
   const [providerGeminiApiKey, setProviderGeminiApiKey] = useState('');
   const [providerGeminiApiKeyDraft, setProviderGeminiApiKeyDraft] = useState('');
   const [providerAnthropicApiKey, setProviderAnthropicApiKey] = useState('');
@@ -3049,7 +3096,10 @@ export function App() {
           origin: 'generated',
           provider: image.provider,
           modelId: image.modelId,
-          modelLabel: image.modelLabel ?? getModelOptionById(image.modelId ?? '')?.label ?? image.modelId,
+          modelLabel: (() => {
+            const option = getModelOptionById(image.modelId ?? '');
+            return image.modelLabel ?? (option ? getModelBadgeLabel(option) : image.modelId);
+          })(),
           prompt: image.prompt,
           references: image.references ?? [],
           durationMs: image.durationMs,
@@ -4017,7 +4067,7 @@ export function App() {
     const loadingEntries = createLoadingEntries(clientRunId, requestedCount, {
       provider: 'codex',
       modelId: 'codex-gpt-5-4-mini',
-      modelLabel: 'GPT-5.4 Mini',
+      modelLabel: 'GPT Image (Codex)',
       generationStartedAt,
     });
 
@@ -4031,7 +4081,7 @@ export function App() {
             mode: 'director' as const,
             provider: 'codex',
             modelId: 'codex-gpt-5-4-mini',
-            modelLabel: 'GPT-5.4 Mini',
+            modelLabel: 'GPT Image (Codex)',
             generationStartedAt,
             loadingEntries,
           },
@@ -4752,7 +4802,7 @@ export function App() {
         frameIds: sceneFrames.map((frame) => frame.id),
         provider: selectedProviderId,
         modelId: selectedModel.id,
-        modelLabel: selectedModel.label,
+        modelLabel: getModelBadgeLabel(selectedModel),
         generationStartedAt,
       },
     }));
@@ -4807,7 +4857,7 @@ export function App() {
           frameIds: [frameId],
           provider: selectedProviderId,
           modelId: selectedModel.id,
-          modelLabel: selectedModel.label,
+          modelLabel: getModelBadgeLabel(selectedModel),
           generationStartedAt,
         },
       }));
@@ -5243,7 +5293,7 @@ export function App() {
       count: currentShotCount,
       provider: selectedProviderId,
       modelId: selectedModel.id,
-      modelLabel: selectedModel.label,
+      modelLabel: getModelBadgeLabel(selectedModel),
     });
     clearComposerAfterSubmit();
     toast.message('Generation started');
@@ -5573,7 +5623,7 @@ export function App() {
       count: 1,
       provider: imageProviderId,
       modelId: imageModel.id,
-      modelLabel: imageModel.label,
+      modelLabel: getModelBadgeLabel(imageModel),
     });
     closePlayer();
     toast.message('Generation started');
@@ -5734,7 +5784,7 @@ export function App() {
       count: outputCount,
       provider: imageProviderId,
       modelId: imageModel.id,
-      modelLabel: imageModel.label,
+      modelLabel: getModelBadgeLabel(imageModel),
     });
     closePlayer();
     toast.message('Generation started');
@@ -6542,6 +6592,7 @@ export function App() {
       ) : null}
 
       <div
+        ref={workspaceScrollRef}
         className={[
           'absolute inset-0 z-0',
           isDirectorWorkspace ? 'overflow-hidden' : 'overflow-y-auto pt-[60px]',
@@ -6559,70 +6610,90 @@ export function App() {
         ].join(' ')}
         style={{ paddingRight: isScenesWorkspace || isDirectorWorkspace ? scenesSidebarWidth + 24 : 0 }}
       >
-        <AnimatePresence initial={false}>
+        <AnimatePresence mode="popLayout" initial={false}>
           {activeStudioView === 'references' ? (
-            <ReferencesWorkspace
-              key="references-workspace"
-              folders={referenceFolders}
-              references={savedReferences}
-              route={activeReferenceLibraryRoute}
-              selectedFolderId={activeReferenceFolderId}
-              onSelectedFolderChange={setActiveReferenceFolderId}
-              newFolderRequestId={referenceNewFolderRequestId}
-              isSidebarCollapsed={isSidebarCollapsed}
-              onExpandSidebar={() => setIsSidebarCollapsed(false)}
-              seedFiles={referenceSeedFiles}
-              onSeedFilesConsumed={() => setReferenceSeedFiles([])}
-              onCreateFolder={handleCreateReferenceFolder}
-              onAddImages={handleAddImagesToFolder}
-              onRenameFolder={handleRenameFolder}
-              onRenameImage={handleRenameReferenceImage}
-              onGroupImages={handleGroupReferenceImages}
-              onMoveImages={handleMoveReferenceImages}
-              onUpdateReferenceMetadata={handleUpdateReferenceMetadata}
-              onDeleteImageFromFolder={handleDeleteImageFromFolder}
-              onDeleteReference={(reference) =>
-                setDeletingReference({
-                  id: reference.id,
-                  category: reference.category,
-                  collectionId: reference.collectionId,
-                  environmentId: reference.environmentId,
-                  title: getSharedReferenceTitle(reference),
-                })
-              }
-              onExportReference={handleExportReference}
-            />
+            <motion.div
+              key="references-workspace-shell"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, position: 'absolute', inset: 0 }}
+              transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+              className="min-h-full w-full"
+            >
+              <ReferencesWorkspace
+                folders={referenceFolders}
+                references={savedReferences}
+                route={activeReferenceLibraryRoute}
+                selectedFolderId={activeReferenceFolderId}
+                onSelectedFolderChange={setActiveReferenceFolderId}
+                newFolderRequestId={referenceNewFolderRequestId}
+                isSidebarCollapsed={isSidebarCollapsed}
+                onExpandSidebar={() => setIsSidebarCollapsed(false)}
+                seedFiles={referenceSeedFiles}
+                onSeedFilesConsumed={() => setReferenceSeedFiles([])}
+                onCreateFolder={handleCreateReferenceFolder}
+                onAddImages={handleAddImagesToFolder}
+                onRenameFolder={handleRenameFolder}
+                onRenameImage={handleRenameReferenceImage}
+                onGroupImages={handleGroupReferenceImages}
+                onMoveImages={handleMoveReferenceImages}
+                onUpdateReferenceMetadata={handleUpdateReferenceMetadata}
+                onDeleteImageFromFolder={handleDeleteImageFromFolder}
+                onDeleteReference={(reference) =>
+                  setDeletingReference({
+                    id: reference.id,
+                    category: reference.category,
+                    collectionId: reference.collectionId,
+                    environmentId: reference.environmentId,
+                    title: getSharedReferenceTitle(reference),
+                  })
+                }
+                onExportReference={handleExportReference}
+              />
+            </motion.div>
           ) : activeStudioView === 'providers' ? (
-            <ProvidersWorkspace
-              key="providers-workspace"
-              geminiApiKey={providerGeminiApiKey}
-              geminiApiKeyDraft={providerGeminiApiKeyDraft}
-              anthropicApiKey={providerAnthropicApiKey}
-              anthropicApiKeyDraft={providerAnthropicApiKeyDraft}
-              codexImageAccounts={providerCodexImageAccounts}
-              activeCodexImageAccountId={activeProviderCodexImageAccountId}
-              activeProviderTab={activeProviderSettingsTab}
-              isKeyVisible={isProviderKeyVisible}
-              isAnthropicKeyVisible={isAnthropicProviderKeyVisible}
-              isSaving={isSavingProviderSettings}
-              isStartingCodexOAuth={isStartingCodexImageOAuth}
-              isRefreshingCodexLimits={isRefreshingCodexImageLimits}
-              codexImageAccountActionId={codexImageAccountActionId}
-              isSidebarCollapsed={isSidebarCollapsed}
-              onExpandSidebar={() => setIsSidebarCollapsed(false)}
-              onGeminiApiKeyChange={setProviderGeminiApiKeyDraft}
-              onAnthropicApiKeyChange={setProviderAnthropicApiKeyDraft}
-              onKeyVisibleChange={setIsProviderKeyVisible}
-              onAnthropicKeyVisibleChange={setIsAnthropicProviderKeyVisible}
-              onSave={() => void handleSaveProviderSettings()}
-              onStartCodexOAuth={() => void handleStartCodexImageOAuth()}
-              onSelectCodexImageAccount={(accountId) => void handleSelectCodexImageAccount(accountId)}
-              onRemoveCodexImageAccount={(accountId) => void handleRemoveCodexImageAccount(accountId)}
-              onRefreshCodexLimits={() => void handleRefreshCodexImageLimits()}
-            />
+            <motion.div
+              key="providers-workspace-shell"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, position: 'absolute', inset: 0 }}
+              transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+              className="min-h-full w-full"
+            >
+              <ProvidersWorkspace
+                geminiApiKey={providerGeminiApiKey}
+                geminiApiKeyDraft={providerGeminiApiKeyDraft}
+                anthropicApiKey={providerAnthropicApiKey}
+                anthropicApiKeyDraft={providerAnthropicApiKeyDraft}
+                codexImageAccounts={providerCodexImageAccounts}
+                activeCodexImageAccountId={activeProviderCodexImageAccountId}
+                activeProviderTab={activeProviderSettingsTab}
+                isKeyVisible={isProviderKeyVisible}
+                isAnthropicKeyVisible={isAnthropicProviderKeyVisible}
+                isSaving={isSavingProviderSettings}
+                isStartingCodexOAuth={isStartingCodexImageOAuth}
+                isRefreshingCodexLimits={isRefreshingCodexImageLimits}
+                codexImageAccountActionId={codexImageAccountActionId}
+                isSidebarCollapsed={isSidebarCollapsed}
+                onExpandSidebar={() => setIsSidebarCollapsed(false)}
+                onGeminiApiKeyChange={setProviderGeminiApiKeyDraft}
+                onAnthropicApiKeyChange={setProviderAnthropicApiKeyDraft}
+                onKeyVisibleChange={setIsProviderKeyVisible}
+                onAnthropicKeyVisibleChange={setIsAnthropicProviderKeyVisible}
+                onSave={() => void handleSaveProviderSettings()}
+                onStartCodexOAuth={() => void handleStartCodexImageOAuth()}
+                onSelectCodexImageAccount={(accountId) => void handleSelectCodexImageAccount(accountId)}
+                onRemoveCodexImageAccount={(accountId) => void handleRemoveCodexImageAccount(accountId)}
+                onRefreshCodexLimits={() => void handleRefreshCodexImageLimits()}
+              />
+            </motion.div>
           ) : (
-            <div
-              key="generation-workspace"
+            <motion.div
+              key="generation-workspace-shell"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, position: 'absolute', inset: 0 }}
+              transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
               className={isDirectorWorkspace ? 'relative h-full w-full' : 'relative min-h-full w-full'}
             >
               <AnimatePresence mode="wait" initial={false}>
@@ -6683,6 +6754,7 @@ export function App() {
                     <GeneratedImageGrid
                       images={generatedImages}
                       className="min-h-full w-full"
+                      variant="mosaic"
                       selectedImageIds={selectedGeneratedImageIds}
                       onImageSelect={(image) => {
                         void toggleGeneratedImageReference(image as GeneratedImageRecord).catch((error) => {
@@ -6778,7 +6850,7 @@ export function App() {
                   </motion.section>
                 ) : null}
               </AnimatePresence>
-            </div>
+            </motion.div>
           )}
         </AnimatePresence>
       </div>
@@ -7515,6 +7587,7 @@ export function App() {
                   setActiveReferenceFolderId(null);
                   setActiveStudioView('references');
                 } else {
+                  workspaceScrollRef.current?.scrollTo?.({ top: 0, left: 0 });
                   setActiveStudioView('generation');
                 }
                 return nextView;
@@ -7870,6 +7943,7 @@ export function App() {
                 className={[
                   'h-full transition-[opacity,filter] duration-200 ease-out',
                   promptTextVisible ? 'opacity-100 blur-0' : 'opacity-0 blur-[5px]',
+                  isEnhancingPrompt && promptTextVisible ? 'prompt-enhancing' : '',
                 ].join(' ')}
                 style={{ pointerEvents: isEnhancingPrompt ? 'none' : undefined }}
               >
@@ -8094,8 +8168,18 @@ export function App() {
                       onPointerDown={(event) => {
                         event.preventDefault();
                         holdComposerOpen();
+                        holdDecrementShotCount.start(() =>
+                          setShotCount((current) => Math.max(1, current - 1)),
+                        );
                       }}
-                      onClick={() => setShotCount((current) => Math.max(1, current - 1))}
+                      onPointerUp={holdDecrementShotCount.stop}
+                      onPointerLeave={holdDecrementShotCount.stop}
+                      onPointerCancel={holdDecrementShotCount.stop}
+                      onClick={() =>
+                        holdDecrementShotCount.handleClick(() =>
+                          setShotCount((current) => Math.max(1, current - 1)),
+                        )
+                      }
                       disabled={shotCount <= 1}
                       className="inline-flex h-9 w-7 items-center justify-center rounded-l-full text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] disabled:opacity-35"
                       aria-label="Decrease image count"
@@ -8120,8 +8204,18 @@ export function App() {
                       onPointerDown={(event) => {
                         event.preventDefault();
                         holdComposerOpen();
+                        holdIncrementShotCount.start(() =>
+                          setShotCount((current) => Math.min(25, current + 1)),
+                        );
                       }}
-                      onClick={() => setShotCount((current) => Math.min(25, current + 1))}
+                      onPointerUp={holdIncrementShotCount.stop}
+                      onPointerLeave={holdIncrementShotCount.stop}
+                      onPointerCancel={holdIncrementShotCount.stop}
+                      onClick={() =>
+                        holdIncrementShotCount.handleClick(() =>
+                          setShotCount((current) => Math.min(25, current + 1)),
+                        )
+                      }
                       disabled={shotCount >= 25}
                       className="inline-flex h-9 w-7 items-center justify-center rounded-r-full text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] disabled:opacity-35"
                       aria-label="Increase image count"
@@ -9152,7 +9246,7 @@ function DirectorActionCard({
           {
             provider: 'codex',
             modelId: 'codex-gpt-5-4-mini',
-            modelLabel: 'GPT-5.4 Mini',
+            modelLabel: 'GPT Image (Codex)',
             generationStartedAt,
           }
         )
@@ -13344,7 +13438,6 @@ function ReferencesWorkspace({
   const [isGroupDialogOpen, setIsGroupDialogOpen] = useState(false);
   const [isMovePopoverOpen, setIsMovePopoverOpen] = useState(false);
   const [imageEditTarget, setImageEditTarget] = useState<{ imageId: string; folderId: string; title: string; description: string } | null>(null);
-  const [animatedTitleText, setAnimatedTitleText] = useState(referenceRouteHeaderLabels[route]);
   const [refViewMode, setRefViewMode] = useState<'grid' | 'list'>('list');
   const [refGridZoom, setRefGridZoom] = useState(50);
   const [orderVersion, setOrderVersion] = useState(0);
@@ -13355,6 +13448,8 @@ function ReferencesWorkspace({
   const hasInitializedRouteRef = useRef(false);
   const dragDepthRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const referenceHeaderMeasureRef = useRef<HTMLDivElement>(null);
+  const [referenceHeaderChromeWidth, setReferenceHeaderChromeWidth] = useState<number | null>(null);
 
   const selectOpenFolder = useCallback(
     (folderId: string | null) => {
@@ -13459,6 +13554,7 @@ function ReferencesWorkspace({
     return chain;
   }, [displayFolder, folders]);
   const parentFolder = openFolderPath.length > 1 ? openFolderPath[openFolderPath.length - 2] ?? null : null;
+  const referenceHeaderTitleText = displayFolder?.title ?? referenceRouteHeaderLabels[route];
   const breadcrumbAriaLabel = useMemo(() => {
     const parts = [referenceRouteHeaderLabels[route], ...openFolderPath.map((folder) => folder.title)];
     return parts.join(' > ');
@@ -13507,23 +13603,29 @@ function ReferencesWorkspace({
     setRenameFolderTarget(null);
     setIsGroupDialogOpen(false);
     setIsMovePopoverOpen(false);
-    setAnimatedTitleText(referenceRouteHeaderLabels[route]);
     setRefViewMode('list');
     onSelectedFolderChange(null);
   }, [onSelectedFolderChange, route]);
 
-  useEffect(() => {
-    if (!displayFolder) {
-      setAnimatedTitleText(referenceRouteHeaderLabels[route]);
-      return;
+  useLayoutEffect(() => {
+    const measure = () => {
+      const width = referenceHeaderMeasureRef.current?.offsetWidth;
+      if (typeof width === 'number' && width > 0) {
+        setReferenceHeaderChromeWidth(Math.ceil(width));
+      }
+    };
+
+    measure();
+
+    if (typeof ResizeObserver === 'undefined' || !referenceHeaderMeasureRef.current) {
+      window.addEventListener('resize', measure);
+      return () => window.removeEventListener('resize', measure);
     }
 
-    setAnimatedTitleText('');
-    const frameId = window.requestAnimationFrame(() => {
-      setAnimatedTitleText(displayFolder.title);
-    });
-    return () => window.cancelAnimationFrame(frameId);
-  }, [displayFolder, route]);
+    const observer = new ResizeObserver(measure);
+    observer.observe(referenceHeaderMeasureRef.current);
+    return () => observer.disconnect();
+  }, [isSidebarCollapsed, openFolderPath, parentFolder, referenceHeaderTitleText, route]);
 
   async function handleCreateFolder(title: string) {
     setIsSaving(true);
@@ -13820,109 +13922,157 @@ function ReferencesWorkspace({
 
       <header
         className={[
-          'fixed top-[8px] z-40 flex items-center gap-2',
+          'fixed top-[8px] z-40',
           'transition-[left] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
           isSidebarCollapsed ? 'left-3' : 'left-[332px]',
         ].join(' ')}
       >
-        <AnimatePresence mode="wait" initial={false}>
-          <motion.div
-            key={`reference-header-${route}-${displayFolder?.id ?? 'empty'}`}
-            initial={{ opacity: 0, filter: 'blur(6px)', y: 4 }}
-            animate={{ opacity: 1, filter: 'blur(0px)', y: 0 }}
-            exit={{ opacity: 0, filter: 'blur(6px)', y: -3 }}
-            transition={{ duration: 0.24, ease: [0.23, 1, 0.32, 1] }}
-            data-testid="reference-header-chrome"
-            className="flex h-9 items-center gap-1.5 overflow-hidden rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] px-2.5 shadow-[0_10px_30px_rgba(0,0,0,0.3)] backdrop-blur-2xl"
+        <div className="relative flex items-center gap-2">
+          <div
+            ref={referenceHeaderMeasureRef}
+            aria-hidden="true"
+            className="pointer-events-none absolute left-0 top-0 flex h-9 items-center gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 opacity-0"
           >
-            {isSidebarCollapsed ? (
-              <button
-                type="button"
-                aria-label="Expand sidebar"
-                onClick={onExpandSidebar}
-                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-transparent hover:text-[var(--foreground)]"
-              >
-                <PanelLeftOpen className="size-3.5" />
-              </button>
-            ) : null}
-            {parentFolder ? (
-              <button
-                type="button"
-                aria-label={`Voltar para ${parentFolder.title}`}
-                onClick={() => {
-                  selectOpenFolder(parentFolder.id);
-                }}
-                className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
-              >
-                <ChevronLeft className="size-4" />
-              </button>
-            ) : null}
-            <h1
-              aria-label={breadcrumbAriaLabel}
-              className="min-w-0 text-[16px] font-medium leading-none tracking-[0] text-[var(--foreground)]"
-            >
-              {displayFolder ? (
-                <span className="inline-flex min-w-0 max-w-full items-center">
-                  {openFolderPath.length > 1 ? (
-                    <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--muted-foreground)]">
-                      {openFolderPath.slice(0, -1).map((folder) => (
-                        <Fragment key={`reference-breadcrumb-parent-${folder.id}`}>
-                          <span className="max-w-[160px] truncate text-[13px] text-[var(--muted-foreground)]">
-                            {folder.title}
-                          </span>
-                          <ChevronRight className="size-3.5 text-[var(--muted-foreground)]/70" />
-                        </Fragment>
-                      ))}
-                    </span>
-                  ) : null}
-                  <span className="min-w-0 max-w-[320px]">
-                    <SlotText text={animatedTitleText} className="truncate text-[16px] text-[var(--foreground)]" />
-                  </span>
-                </span>
-              ) : (
-                <SlotText text={animatedTitleText} className="truncate" />
-              )}
-            </h1>
-          </motion.div>
-        </AnimatePresence>
-        <div className="flex items-center gap-2">
-          <div className="relative inline-grid h-8 grid-cols-2 items-center rounded-full bg-[rgba(15,16,16,0.88)] p-1 shadow-[0_4px_16px_rgba(0,0,0,0.3)] backdrop-blur-2xl">
-            <motion.span
-              aria-hidden="true"
-              initial={false}
-              animate={{ x: refViewMode === 'grid' ? '0%' : '100%' }}
-              transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
-              className="absolute bottom-1 left-1 top-1 w-[calc((100%_-_8px)/2)] rounded-full bg-[var(--border-soft)]"
-            />
-            {(['grid', 'list'] as const).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                aria-pressed={refViewMode === mode}
-                onClick={() => setRefViewMode(mode)}
-                className={[
-                  'relative z-10 inline-flex h-6 min-w-[48px] items-center justify-center rounded-full px-3 text-[12px] font-medium transition-colors duration-200 capitalize',
-                  refViewMode === mode ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
-                ].join(' ')}
-              >
-                {mode === 'grid' ? 'Grid' : 'List'}
-              </button>
-            ))}
+            {isSidebarCollapsed ? <span className="h-7 w-7 shrink-0" /> : null}
+            {parentFolder ? <span className="h-7 w-7 shrink-0" /> : null}
+            <span className="min-w-0 whitespace-nowrap text-[16px] font-medium leading-none tracking-[0]">
+              {openFolderPath.length > 1 ? (
+                <>
+                  {openFolderPath.slice(0, -1).map((folder) => (
+                    <Fragment key={`reference-breadcrumb-measure-${folder.id}`}>
+                      <span className="inline-block max-w-[160px] truncate text-[13px]">
+                        {folder.title}
+                      </span>
+                      <span className="mx-1.5 inline-block w-3.5" />
+                    </Fragment>
+                  ))}
+                </>
+              ) : null}
+              <span className="inline-block max-w-[320px] truncate">{referenceHeaderTitleText}</span>
+            </span>
           </div>
-          {refViewMode === 'grid' ? (
-            <div className="flex items-center gap-2 rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.88)] px-3 h-8 shadow-[0_4px_16px_rgba(0,0,0,0.3)] backdrop-blur-2xl">
-              <span className="text-[10px] text-[var(--muted-foreground)]">{refGridZoom}%</span>
-              <input
-                type="range"
-                min={20}
-                max={100}
-                value={refGridZoom}
-                onChange={(e) => setRefGridZoom(Number(e.target.value))}
-                className="w-20 h-1 cursor-pointer accent-[var(--accent)]"
-                aria-label="Image size"
-              />
+
+          <motion.div
+            animate={{ width: referenceHeaderChromeWidth ?? 'auto' }}
+            transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+            className="min-w-0 overflow-hidden"
+          >
+            <div
+              data-testid="reference-header-chrome"
+              className="flex h-9 w-full items-center gap-1.5 overflow-hidden rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)] px-2.5 shadow-[0_10px_30px_rgba(0,0,0,0.3)] backdrop-blur-2xl"
+            >
+              {isSidebarCollapsed ? (
+                <button
+                  type="button"
+                  aria-label="Expand sidebar"
+                  onClick={onExpandSidebar}
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-transparent hover:text-[var(--foreground)]"
+                >
+                  <PanelLeftOpen className="size-3.5" />
+                </button>
+              ) : null}
+              {parentFolder ? (
+                <button
+                  type="button"
+                  aria-label={`Voltar para ${parentFolder.title}`}
+                  onClick={() => {
+                    selectOpenFolder(parentFolder.id);
+                  }}
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
+                >
+                  <ChevronLeft className="size-4" />
+                </button>
+              ) : null}
+              <h1
+                aria-label={breadcrumbAriaLabel}
+                className="flex min-w-0 flex-1 text-[16px] font-medium leading-none tracking-[0] text-[var(--foreground)]"
+              >
+                {displayFolder ? (
+                  <span className="inline-flex min-w-0 max-w-full items-center">
+                    {openFolderPath.length > 1 ? (
+                      <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--muted-foreground)]">
+                        {openFolderPath.slice(0, -1).map((folder) => (
+                          <Fragment key={`reference-breadcrumb-parent-${folder.id}`}>
+                            <span className="max-w-[160px] truncate text-[13px] text-[var(--muted-foreground)]">
+                              {folder.title}
+                            </span>
+                            <ChevronRight className="size-3.5 text-[var(--muted-foreground)]/70" />
+                          </Fragment>
+                        ))}
+                      </span>
+                    ) : null}
+                    <span className="min-w-0 max-w-[320px]">
+                      <AnimatePresence mode="wait" initial={false}>
+                        <motion.span
+                          key={referenceHeaderTitleText}
+                          initial={{ opacity: 0, y: 4, filter: 'blur(6px)' }}
+                          animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+                          exit={{ opacity: 0, y: -3, filter: 'blur(6px)' }}
+                          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                          className="block min-w-0 truncate"
+                        >
+                          <SlotText text={referenceHeaderTitleText} className="truncate text-[16px] text-[var(--foreground)]" />
+                        </motion.span>
+                      </AnimatePresence>
+                    </span>
+                  </span>
+                ) : (
+                  <AnimatePresence mode="wait" initial={false}>
+                    <motion.span
+                      key={referenceHeaderTitleText}
+                      initial={{ opacity: 0, y: 4, filter: 'blur(6px)' }}
+                      animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+                      exit={{ opacity: 0, y: -3, filter: 'blur(6px)' }}
+                      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                      className="block min-w-0 truncate"
+                    >
+                      <SlotText text={referenceHeaderTitleText} className="truncate" />
+                    </motion.span>
+                  </AnimatePresence>
+                )}
+              </h1>
             </div>
-          ) : null}
+          </motion.div>
+
+          <div className="flex items-center gap-2">
+            <div className="relative inline-grid h-8 grid-cols-2 items-center rounded-full bg-[rgba(15,16,16,0.88)] p-1 shadow-[0_4px_16px_rgba(0,0,0,0.3)] backdrop-blur-2xl">
+              <motion.span
+                aria-hidden="true"
+                initial={false}
+                animate={{ x: refViewMode === 'grid' ? '0%' : '100%' }}
+                transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+                className="absolute bottom-1 left-1 top-1 w-[calc((100%_-_8px)/2)] rounded-full bg-[var(--border-soft)]"
+              />
+              {(['grid', 'list'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={refViewMode === mode}
+                  onClick={() => setRefViewMode(mode)}
+                  className={[
+                    'relative z-10 inline-flex h-6 min-w-[48px] items-center justify-center rounded-full px-3 text-[12px] font-medium transition-colors duration-200 capitalize',
+                    refViewMode === mode ? 'text-[var(--foreground)]' : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
+                  ].join(' ')}
+                >
+                  {mode === 'grid' ? 'Grid' : 'List'}
+                </button>
+              ))}
+            </div>
+            {refViewMode === 'grid' ? (
+              <div className="flex h-8 items-center gap-2 rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.88)] px-3 shadow-[0_4px_16px_rgba(0,0,0,0.3)] backdrop-blur-2xl">
+                <span className="text-[10px] text-[var(--muted-foreground)]">{refGridZoom}%</span>
+                <input
+                  type="range"
+                  min={20}
+                  max={100}
+                  value={refGridZoom}
+                  onChange={(e) => setRefGridZoom(Number(e.target.value))}
+                  className="w-20 h-1 cursor-pointer accent-[var(--accent)]"
+                  aria-label="Image size"
+                />
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
