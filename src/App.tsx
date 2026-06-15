@@ -1836,6 +1836,7 @@ export function App() {
   const [directorMessagesByChatId, setDirectorMessagesByChatId] = useState<Record<string, DirectorMessageRecord[]>>({});
   const [selectedDirectorChatIdByThreadId, setSelectedDirectorChatIdByThreadId] = useState<Record<string, string | null>>({});
   const [activeDirectorRunsByChatId, setActiveDirectorRunsByChatId] = useState<Record<string, DirectorActiveRun>>({});
+  const [directorChatRenameTarget, setDirectorChatRenameTarget] = useState<DirectorChatUi | null>(null);
   const directorMessagesByChatIdRef = useRef<Record<string, DirectorMessageRecord[]>>({});
   const directorMessagesCacheRef = useRef<Record<string, DirectorMessageRecord[]>>({});
   const directorMessagesCacheOrderRef = useRef<string[]>([]);
@@ -3977,7 +3978,7 @@ export function App() {
           threadId: activeThreadId,
           prompt: promptText,
           modelId: selectedModel.id,
-          reasoningEffort: directorReasoningEffort,
+          reasoningEffort: selectedModel.supportsReasoningEffort === false ? undefined : directorReasoningEffort,
           referenceImages: referencePayload,
         }),
     });
@@ -3992,6 +3993,7 @@ export function App() {
     savedReferences,
     selectedModel.id,
     selectedModel.label,
+    selectedModel.supportsReasoningEffort,
     directorReasoningEffort,
     selectedPromptReferenceIds,
     selectedProjectId,
@@ -6221,6 +6223,29 @@ export function App() {
           }
         />
       ) : null}
+      {directorChatRenameTarget ? (
+        <EntityNameDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setDirectorChatRenameTarget(null);
+          }}
+          title="Rename Director thread"
+          description="Update the Director thread name shown in the chat sidebar."
+          label="Director thread name"
+          initialValue={directorChatRenameTarget.title}
+          submitLabel="Save Director thread"
+          onSubmit={async (value) => {
+            const target = directorChatRenameTarget;
+            if (!target) return;
+            try {
+              await handleRenameDirectorChat(target.id, value);
+            } catch (error) {
+              console.error('Failed to rename Director chat', error);
+              toast.error(getErrorMessage(error, 'Failed to rename Director chat.'));
+            }
+          }}
+        />
+      ) : null}
       {sidebarEntityAction?.mode === 'delete' ? (
         <ConfirmDeleteDialog
           open={isSidebarEntityDialogOpen}
@@ -7315,12 +7340,7 @@ export function App() {
                   });
                 }}
                 onSelectChat={handleSelectDirectorChat}
-                onRenameChat={(chatId, title) => {
-                  void handleRenameDirectorChat(chatId, title).catch((error) => {
-                    console.error('Failed to rename Director chat', error);
-                    toast.error(getErrorMessage(error, 'Failed to rename Director chat.'));
-                  });
-                }}
+                onRenameChat={setDirectorChatRenameTarget}
                 onDeleteChat={(chatId) => {
                   void handleDeleteDirectorChat(chatId).catch((error) => {
                     console.error('Failed to delete Director chat', error);
@@ -7787,6 +7807,7 @@ export function App() {
         selectedProviderId={selectedProviderId}
         effectiveFastMode={effectiveFastMode}
         reasoningEffort={directorReasoningEffort}
+        supportsReasoningEffort={selectedModel.supportsReasoningEffort !== false}
         onCycleReasoningEffort={cycleDirectorReasoningEffort}
         isStreaming={Boolean(activeDirectorRun)}
         composerRef={directorComposerRef}
@@ -8530,7 +8551,7 @@ function DirectorChatsSidebar({
   isCreatingChat: boolean;
   onCreateChat: () => void;
   onSelectChat: (chatId: string) => void;
-  onRenameChat: (chatId: string, title: string) => void;
+  onRenameChat: (chat: DirectorChatUi) => void;
   onDeleteChat: (chatId: string) => void;
 }) {
   return (
@@ -8590,14 +8611,11 @@ function DirectorChatThreadRow({
   chat: DirectorChatUi;
   isSelected: boolean;
   onClick: (chatId: string) => void;
-  onRename: (chatId: string, title: string) => void;
+  onRename: (chat: DirectorChatUi) => void;
   onDelete: (chatId: string) => void;
 }) {
   const handleRename = () => {
-    const nextTitle = window.prompt('Rename chat', chat.title);
-    if (nextTitle && nextTitle.trim()) {
-      onRename(chat.id, nextTitle);
-    }
+    onRename(chat);
   };
 
   return (
@@ -9631,6 +9649,7 @@ function DirectorComposerBar({
   selectedProviderId,
   effectiveFastMode,
   reasoningEffort,
+  supportsReasoningEffort,
   onCycleReasoningEffort,
   isStreaming,
   composerRef,
@@ -9683,6 +9702,7 @@ function DirectorComposerBar({
   selectedProviderId: GenerationProviderId;
   effectiveFastMode: boolean;
   reasoningEffort: ReasoningEffort;
+  supportsReasoningEffort: boolean;
   onCycleReasoningEffort: () => void;
   isStreaming: boolean;
   composerRef: RefObject<PromptComposerHandle | null>;
@@ -9960,21 +9980,23 @@ function DirectorComposerBar({
                   onKeepOpen={onKeepOpen}
                 />
 
-                <button
-                  type="button"
-                  tabIndex={isExpanded ? 0 : -1}
-                  aria-label={`Reasoning effort: ${reasoningEffort}`}
-                  title="Cycle reasoning effort"
-                  onPointerDown={(event) => {
-                    event.preventDefault();
-                    onKeepOpen(event);
-                  }}
-                  onClick={onCycleReasoningEffort}
-                  className="pointer-events-auto inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-3 text-[13px] font-medium text-[var(--muted-foreground)] backdrop-blur-xl transition-[background-color,border-color,color] duration-200 hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)] hover:text-[var(--foreground)]"
-                >
-                  <Gauge className="size-3.5 shrink-0" />
-                  <span className="capitalize">{reasoningEffort}</span>
-                </button>
+                {supportsReasoningEffort ? (
+                  <button
+                    type="button"
+                    tabIndex={isExpanded ? 0 : -1}
+                    aria-label={`Reasoning effort: ${reasoningEffort}`}
+                    title="Cycle reasoning effort"
+                    onPointerDown={(event) => {
+                      event.preventDefault();
+                      onKeepOpen(event);
+                    }}
+                    onClick={onCycleReasoningEffort}
+                    className="pointer-events-auto inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] px-3 text-[13px] font-medium text-[var(--muted-foreground)] backdrop-blur-xl transition-[background-color,border-color,color] duration-200 hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)] hover:text-[var(--foreground)]"
+                  >
+                    <Gauge className="size-3.5 shrink-0" />
+                    <span className="capitalize">{reasoningEffort}</span>
+                  </button>
+                ) : null}
 
                 <button
                   type="button"

@@ -250,6 +250,8 @@ function summarizeDirectorChunkForLog(chunk) {
 // buildReasoningProviderOptions below.
 const REASONING_EFFORTS = ['low', 'medium', 'high'];
 const DEFAULT_REASONING_EFFORT = 'medium';
+const DIRECTOR_TITLE_ANTHROPIC_MODEL_ID = 'claude-haiku-4-5';
+const DIRECTOR_TITLE_GOOGLE_MODEL_ID = 'gemini-3.1-flash-lite';
 
 function normalizeReasoningEffort(effort) {
   return REASONING_EFFORTS.includes(effort) ? effort : DEFAULT_REASONING_EFFORT;
@@ -258,9 +260,12 @@ function normalizeReasoningEffort(effort) {
 // Translate a provider-agnostic reasoning effort into the per-provider knob.
 // Anthropic exposes a first-class `effort`; Gemini uses thinkingConfig (we keep
 // thoughts visible and reserve a future budget mapping).
-function buildReasoningProviderOptions(providerId, effort) {
+function buildReasoningProviderOptions(providerId, effort, supportsReasoningEffort = true) {
   const reasoningEffort = normalizeReasoningEffort(effort);
   if (providerId === 'anthropic') {
+    if (supportsReasoningEffort === false) {
+      return undefined;
+    }
     return { anthropic: { effort: reasoningEffort } };
   }
   return {
@@ -275,6 +280,7 @@ function buildReasoningProviderOptions(providerId, effort) {
 function buildDirectorStreamOptions({
   providerId = 'google',
   reasoningEffort,
+  supportsReasoningEffort = true,
   model,
   messages,
   abortSignal,
@@ -289,6 +295,7 @@ function buildDirectorStreamOptions({
     .filter(Boolean)
     .join('\n\n');
   const modelMessages = (Array.isArray(messages) ? messages : []).filter((message) => message?.role !== 'system');
+  const providerOptions = buildReasoningProviderOptions(providerId, reasoningEffort, supportsReasoningEffort);
 
   return {
     model,
@@ -299,7 +306,7 @@ function buildDirectorStreamOptions({
     // Allow the model to call loadSkill, read the result, and keep reasoning in
     // the same turn. generateImages still halts the stream via needsApproval.
     ...(typeof stepCountIs === 'function' ? { stopWhen: stepCountIs(8) } : null),
-    providerOptions: buildReasoningProviderOptions(providerId, reasoningEffort),
+    ...(providerOptions ? { providerOptions } : null),
     tools: {
       findSkills: tool({
         description:
@@ -348,6 +355,34 @@ function buildDirectorStreamOptions({
   };
 }
 
+function sanitizeDirectorChatTitle(value, maxLength = 56) {
+  const normalized = String(value ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  if (!normalized) {
+    return null;
+  }
+
+  const cleaned = normalized
+    .replace(/^["'`“”‘’]+|["'`“”‘’]+$/g, '')
+    .replace(/[#*_~]/g, '')
+    .replace(/[/:\\]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned) {
+    return null;
+  }
+
+  if (cleaned.length <= maxLength) {
+    return cleaned;
+  }
+
+  return `${cleaned.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
+}
+
 async function resolveDirectorLanguageModel(providerId, modelId) {
   if (providerId === 'anthropic') {
     if (!process.env.ANTHROPIC_API_KEY) {
@@ -382,6 +417,7 @@ async function resolveDirectorLanguageModel(providerId, modelId) {
 async function* createAiSdkDirectorPartStream({
   providerId = 'google',
   reasoningEffort,
+  supportsReasoningEffort = true,
   modelId,
   messages,
   abortController,
@@ -393,6 +429,7 @@ async function* createAiSdkDirectorPartStream({
     providerId,
     modelId,
     reasoningEffort: normalizeReasoningEffort(reasoningEffort),
+    supportsReasoningEffort,
     label,
     ...keyState,
     messages: summarizeDirectorMessagesForLog(messages),
@@ -400,6 +437,7 @@ async function* createAiSdkDirectorPartStream({
   const result = streamText(buildDirectorStreamOptions({
     providerId,
     reasoningEffort,
+    supportsReasoningEffort,
     model,
     messages,
     abortSignal: abortController.signal,
@@ -488,15 +526,69 @@ async function* createAiSdkDirectorPartStream({
   }
 }
 
+async function resolveDirectorTitleLanguageModel() {
+  if (process.env.ANTHROPIC_API_KEY) {
+    const { createAnthropic } = await import('@ai-sdk/anthropic');
+    const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    return {
+      model: anthropic(DIRECTOR_TITLE_ANTHROPIC_MODEL_ID),
+      providerId: 'anthropic',
+      modelId: DIRECTOR_TITLE_ANTHROPIC_MODEL_ID,
+    };
+  }
+
+  const googleApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!googleApiKey) {
+    return null;
+  }
+
+  const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
+  const google = createGoogleGenerativeAI({ apiKey: googleApiKey });
+  return {
+    model: google(DIRECTOR_TITLE_GOOGLE_MODEL_ID),
+    providerId: 'google',
+    modelId: DIRECTOR_TITLE_GOOGLE_MODEL_ID,
+  };
+}
+
+async function createAiSdkDirectorChatTitle({ prompt, abortSignal }) {
+  const titleModel = await resolveDirectorTitleLanguageModel();
+  if (!titleModel) {
+    return null;
+  }
+
+  const { generateText } = await import('ai');
+  const result = await generateText({
+    model: titleModel.model,
+    system:
+      'Generate a very short sidebar title for this Director conversation. Return only the title. No quotes, markdown, punctuation-heavy labels, or explanation.',
+    prompt: `Conversation request:\n${String(prompt ?? '').trim()}`,
+    maxOutputTokens: 24,
+    temperature: 0.2,
+    abortSignal,
+  });
+  const title = sanitizeDirectorChatTitle(result.text);
+
+  console.info('[crenv:director-ai] Director title generated', {
+    providerId: titleModel.providerId,
+    modelId: titleModel.modelId,
+    title,
+  });
+
+  return title;
+}
+
 module.exports = {
   REASONING_EFFORTS,
   DEFAULT_REASONING_EFFORT,
   normalizeReasoningEffort,
   buildReasoningProviderOptions,
   buildDirectorStreamOptions,
+  createAiSdkDirectorChatTitle,
   createAiSdkDirectorPartStream,
   createDirectorPartAccumulator,
   getTextFromParts,
+  sanitizeDirectorChatTitle,
   summarizeDirectorChunkForLog,
   summarizeDirectorMessagesForLog,
   toDirectorModelMessages,

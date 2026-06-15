@@ -7561,6 +7561,39 @@ describe('App header thread title', () => {
     expect(screen.getByText('New chat')).toBeInTheDocument();
   });
 
+  it('renames a Director chat through the shared name dialog', async () => {
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('Prompt rename');
+    const renameDirectorChatMock = vi.mocked(electronApi.renameDirectorChat);
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename Coverage pass' }));
+
+    expect(promptSpy).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: 'Rename Director thread' })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: 'Revised coverage pass' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Director thread' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(renameDirectorChatMock).toHaveBeenCalledWith('director-chat-1', 'Revised coverage pass');
+    promptSpy.mockRestore();
+  });
+
   it('auto-creates the first Director chat when sending on an empty thread', async () => {
     render(<App />);
 

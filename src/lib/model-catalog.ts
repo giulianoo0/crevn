@@ -14,6 +14,7 @@ export type ModelOption = {
   providerId: GenerationProviderId;
   tanstackModel?: string;
   runtimeModel?: string;
+  supportsReasoningEffort?: boolean;
   capabilities: GenerationCapability[];
 };
 
@@ -57,6 +58,7 @@ export const MODEL_OPTIONS: ModelOption[] = [
     label: 'Claude Opus 4.8',
     providerId: 'anthropic',
     runtimeModel: 'claude-opus-4-8',
+    supportsReasoningEffort: true,
     capabilities: ['text'],
   },
   {
@@ -64,6 +66,7 @@ export const MODEL_OPTIONS: ModelOption[] = [
     label: 'Claude Sonnet 4.6',
     providerId: 'anthropic',
     runtimeModel: 'claude-sonnet-4-6',
+    supportsReasoningEffort: true,
     capabilities: ['text'],
   },
   {
@@ -71,6 +74,7 @@ export const MODEL_OPTIONS: ModelOption[] = [
     label: 'Claude Haiku 4.5',
     providerId: 'anthropic',
     runtimeModel: 'claude-haiku-4-5',
+    supportsReasoningEffort: false,
     capabilities: ['text'],
   },
 ];

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 const {
   buildDirectorStreamOptions,
   createDirectorPartAccumulator,
+  sanitizeDirectorChatTitle,
   summarizeDirectorChunkForLog,
   summarizeDirectorMessagesForLog,
   toDirectorModelMessages,
@@ -199,6 +200,7 @@ describe('Director AI SDK stream options', () => {
     const options = buildDirectorStreamOptions({
       providerId: 'anthropic',
       reasoningEffort: 'high',
+      supportsReasoningEffort: true,
       model: 'claude-model',
       messages: [{ role: 'user', content: 'Plan a shot.' }],
       abortSignal: undefined,
@@ -215,6 +217,22 @@ describe('Director AI SDK stream options', () => {
     expect(options.tools.loadSkill.inputSchema.properties.section).toBeTruthy();
   });
 
+  it('omits Anthropic effort for models that do not support it', () => {
+    const options = buildDirectorStreamOptions({
+      providerId: 'anthropic',
+      reasoningEffort: 'high',
+      supportsReasoningEffort: false,
+      model: 'claude-haiku-model',
+      messages: [{ role: 'user', content: 'Plan a shot.' }],
+      abortSignal: undefined,
+      smoothStream: () => undefined,
+      tool: (definition: unknown) => definition,
+      jsonSchema: (schema: unknown) => schema,
+    });
+
+    expect(options.providerOptions).toBeUndefined();
+  });
+
   it('defaults to Google thinking config when no provider is given', () => {
     const options = buildDirectorStreamOptions({
       model: 'gemini-model',
@@ -226,6 +244,14 @@ describe('Director AI SDK stream options', () => {
     });
 
     expect(options.providerOptions.google.thinkingConfig.includeThoughts).toBe(true);
+  });
+});
+
+describe('Director AI SDK title helpers', () => {
+  it('sanitizes short generated titles for the chat sidebar', () => {
+    expect(sanitizeDirectorChatTitle('"Reverse angle / garage setup"\nExtra detail')).toBe('Reverse angle garage setup');
+    expect(sanitizeDirectorChatTitle('A'.repeat(80))).toBe(`${'A'.repeat(53)}...`);
+    expect(sanitizeDirectorChatTitle('')).toBeNull();
   });
 });
 

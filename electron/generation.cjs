@@ -13,6 +13,7 @@ const yazl = require('yazl');
 const yauzl = require('yauzl');
 const { runImageGenerationBatch } = require('./features/generation/codexOutput.cjs');
 const {
+  createAiSdkDirectorChatTitle,
   createAiSdkDirectorPartStream,
   getTextFromParts,
   toDirectorModelMessages,
@@ -48,18 +49,21 @@ const DIRECTOR_MODEL_OPTIONS = [
     label: 'Claude Opus 4.8',
     providerId: 'anthropic',
     runtimeModel: 'claude-opus-4-8',
+    supportsReasoningEffort: true,
   },
   {
     id: 'anthropic-claude-sonnet-4-6',
     label: 'Claude Sonnet 4.6',
     providerId: 'anthropic',
     runtimeModel: 'claude-sonnet-4-6',
+    supportsReasoningEffort: true,
   },
   {
     id: 'anthropic-claude-haiku-4-5',
     label: 'Claude Haiku 4.5',
     providerId: 'anthropic',
     runtimeModel: 'claude-haiku-4-5',
+    supportsReasoningEffort: false,
   },
 ];
 const DEFAULT_DIRECTOR_MODEL_ID = 'google-gemini-3-5-flash';
@@ -1365,6 +1369,7 @@ async function createGenerationStore(userDataDir, options = {}) {
   const activeSceneGroupCancellations = new Map();
   const activeDirectorChatCancellations = new Map();
   const createDirectorPartStream = options.createDirectorPartStream ?? createAiSdkDirectorPartStream;
+  const generateDirectorChatTitle = options.generateDirectorChatTitle ?? createAiSdkDirectorChatTitle;
   const executeImageGenerationBatch = options.runImageGenerationBatch ?? runImageGenerationBatch;
   const getActiveCodexImageAuth = options.getActiveCodexImageAuth ?? (async () => null);
   const refreshAllCodexImageAccountLimits = options.refreshAllCodexImageAccountLimits ?? (async () => undefined);
@@ -3049,6 +3054,30 @@ async function listReferenceFolders() {
           createdAt: timestamp,
           updatedAt: timestamp,
         };
+    const abortController = new AbortController();
+    const cancelableRun = {
+      cancel(reason) {
+        if (!abortController.signal.aborted) {
+          abortController.abort(reason);
+        }
+        return true;
+      },
+    };
+    const shouldGenerateTitle = !isRegeneration && chat.title === 'New chat';
+    const fallbackChatTitle = shouldGenerateTitle ? truncateDirectorChatTitle(prompt) : chat.title;
+    const generatedTitlePromise = shouldGenerateTitle
+      ? Promise.resolve()
+          .then(() => generateDirectorChatTitle({ prompt, abortSignal: abortController.signal }))
+          .then((title) => (typeof title === 'string' && title.trim() ? title.trim() : fallbackChatTitle))
+          .catch((error) => {
+            if (!abortController.signal.aborted) {
+              console.warn('[crenv:director] Director chat title generation failed', {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+            return fallbackChatTitle;
+          })
+      : Promise.resolve(fallbackChatTitle);
 
     if (isRegeneration) {
       await db
@@ -3072,7 +3101,7 @@ async function listReferenceFolders() {
     await db
       .update(directorChatsTable)
       .set({
-        title: chat.title === 'New chat' ? truncateDirectorChatTitle(prompt) : chat.title,
+        title: fallbackChatTitle,
         updatedAt: timestamp,
       })
       .where(eq(directorChatsTable.id, chatId));
@@ -3086,15 +3115,6 @@ async function listReferenceFolders() {
       assistantMessage: rendererAssistantMessage,
     });
 
-    const abortController = new AbortController();
-    const cancelableRun = {
-      cancel(reason) {
-        if (!abortController.signal.aborted) {
-          abortController.abort(reason);
-        }
-        return true;
-      },
-    };
     activeDirectorChatCancellations.set(chatId, cancelableRun);
 
     let parts = [];
@@ -3109,6 +3129,7 @@ async function listReferenceFolders() {
       for await (const nextParts of createDirectorPartStream({
         providerId: selectedModel.providerId,
         reasoningEffort,
+        supportsReasoningEffort: selectedModel.supportsReasoningEffort !== false,
         modelId: selectedModel.runtimeModel,
         messages,
         abortController,
@@ -3193,6 +3214,19 @@ async function listReferenceFolders() {
     } finally {
       if (activeDirectorChatCancellations.get(chatId) === cancelableRun) {
         activeDirectorChatCancellations.delete(chatId);
+      }
+    }
+
+    if (shouldGenerateTitle && !abortController.signal.aborted) {
+      const generatedTitle = await generatedTitlePromise;
+      if (generatedTitle && generatedTitle !== fallbackChatTitle) {
+        await db
+          .update(directorChatsTable)
+          .set({
+            title: generatedTitle,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(eq(directorChatsTable.id, chatId));
       }
     }
 

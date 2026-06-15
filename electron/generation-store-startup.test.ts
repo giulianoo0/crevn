@@ -95,6 +95,50 @@ describe('generation store startup', () => {
     store.close();
   });
 
+  it('generates and persists a short Director chat title in parallel with the first response', async () => {
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crenv-generation-startup-'));
+    tempDirs.push(userDataDir);
+    const calls: string[] = [];
+    const capturedStreamInputs: unknown[] = [];
+
+    const store = await createGenerationStore(userDataDir, {
+      createDirectorPartStream: async function* (input: unknown) {
+        calls.push('stream-start');
+        capturedStreamInputs.push(input);
+        yield [{ type: 'text', text: 'Use a compact reverse angle.' }];
+      },
+      generateDirectorChatTitle: async ({ prompt }: { prompt: string }) => {
+        calls.push('title-start');
+        expect(prompt).toBe('Plan a compact reverse angle for the garage scene.');
+        return 'Garage reverse angle';
+      },
+    });
+
+    const workspace = await store.ensureProjectThreadWorkspace();
+    const chat = await store.createDirectorChat(workspace.thread.id);
+
+    const result = await store.sendDirectorMessage({
+      chatId: chat.id,
+      threadId: workspace.thread.id,
+      prompt: 'Plan a compact reverse angle for the garage scene.',
+      modelId: 'anthropic-claude-haiku-4-5',
+      referenceImages: [],
+    });
+
+    expect(calls).toEqual(['title-start', 'stream-start']);
+    expect(capturedStreamInputs[0]).toEqual(expect.objectContaining({ supportsReasoningEffort: false }));
+    expect(result.chat).toEqual(expect.objectContaining({ title: 'Garage reverse angle' }));
+
+    store.close();
+
+    const reloadedStore = await createGenerationStore(userDataDir);
+    const reloadedChats = await reloadedStore.listDirectorChats(workspace.thread.id);
+    expect(reloadedChats.find((item: { id: string }) => item.id === chat.id)).toEqual(
+      expect.objectContaining({ title: 'Garage reverse angle' })
+    );
+    reloadedStore.close();
+  });
+
   it('normalizes Director provider errors into a user-facing failed message', async () => {
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crenv-generation-startup-'));
     tempDirs.push(userDataDir);

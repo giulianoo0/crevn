@@ -48,6 +48,11 @@ describe('model catalog', () => {
       'claude-sonnet-4-6',
       'claude-haiku-4-5',
     ]);
+    expect(getModelsForProvider('anthropic').map((model) => model.supportsReasoningEffort ?? true)).toEqual([
+      true,
+      true,
+      false,
+    ]);
     expect(getModelsForProvider('anthropic').every((model) => model.capabilities.includes('text'))).toBe(true);
   });
 });
