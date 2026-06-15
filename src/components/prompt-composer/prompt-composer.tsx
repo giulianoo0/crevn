@@ -103,6 +103,7 @@ type PromptComposerProps = {
   onMentionIdsChange: (ids: string[]) => void;
   onCursorIndexChange?: (index: number) => void;
   onScrollTopChange?: (scrollTop: number) => void;
+  onContentHeightChange?: (height: number) => void;
   onMentionNavigationKey?: (key: MentionNavigationKey) => boolean;
   onEnterWithMention?: () => void;
   onSubmitRequested?: () => void;
@@ -322,6 +323,7 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
       onMentionIdsChange,
       onCursorIndexChange,
       onScrollTopChange,
+      onContentHeightChange,
       onMentionNavigationKey,
       onEnterWithMention,
       onSubmitRequested,
@@ -385,6 +387,47 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
         });
       });
     }, [editor, onCursorIndexChange]);
+
+    // Measure the natural content height (sum of the rendered block children)
+    // so the parent can grow the composer card as the text gets bigger. We sum
+    // children offsetHeight rather than reading scrollHeight because the editor
+    // itself is `h-full` in expanded mode, which would always report the full
+    // available height instead of the actual content height.
+    useEffect(() => {
+      if (!onContentHeightChange) return;
+
+      const report = () => {
+        const element = editor.getRootElement();
+        if (!element) return;
+        let height = 0;
+        for (const child of Array.from(element.children)) {
+          height += (child as HTMLElement).offsetHeight;
+        }
+        onContentHeightChange(height);
+      };
+
+      const observer =
+        typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(report);
+      let observed: HTMLElement | null = null;
+      const attach = (element: HTMLElement | null) => {
+        if (observed) observer?.unobserve(observed);
+        observed = element;
+        if (element) observer?.observe(element);
+        report();
+      };
+
+      attach(editor.getRootElement());
+      const unregisterRoot = editor.registerRootListener((nextRootElement) => {
+        attach(nextRootElement);
+      });
+      const unregisterUpdate = editor.registerUpdateListener(() => report());
+
+      return () => {
+        observer?.disconnect();
+        unregisterRoot();
+        unregisterUpdate();
+      };
+    }, [editor, onContentHeightChange]);
 
     // Define getter/setter for testing compatibility and sync attributes
     useLayoutEffect(() => {

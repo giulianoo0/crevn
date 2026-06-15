@@ -1350,7 +1350,7 @@ describe('App header thread title', () => {
     });
 
     const classicComposerShell = screen.getByTestId('classic-composer-shell');
-    expect(classicComposerShell.className).toContain('h-[60px]');
+    expect(classicComposerShell.style.height).toBe('60px');
     expect(classicComposerShell.className).toContain('rounded-full');
     expect(classicComposerShell.className).not.toContain('rounded-[24px]');
     expect(within(classicComposerShell).getByRole('button', { name: 'Adicionar' }).className).not.toContain(

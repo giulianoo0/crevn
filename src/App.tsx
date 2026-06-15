@@ -2064,6 +2064,7 @@ export function App() {
   const [activeReferenceMentionIndex, setActiveReferenceMentionIndex] = useState(0);
   const classicComposerRef = useRef<PromptComposerHandle>(null);
   const directorComposerRef = useRef<PromptComposerHandle>(null);
+  const [classicComposerContentHeight, setClassicComposerContentHeight] = useState(0);
   const classicReferenceInputRef = useRef<HTMLInputElement>(null);
   const directorReferenceInputRef = useRef<HTMLInputElement>(null);
   const referenceImagesRef = useRef<ComposerReferenceImage[]>([]);
@@ -7873,13 +7874,19 @@ export function App() {
               'prompt-composer-card relative overflow-hidden border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)]',
               'shadow-[0_24px_72px_rgba(0,0,0,0.45)] backdrop-blur-2xl',
               'transition-[height,padding] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
-              isExpanded
-                ? hasReferenceImages
-                  ? 'h-[268px] rounded-[24px] px-5 pb-5 pt-5'
-                  : 'h-[228px] rounded-[24px] px-5 pb-5 pt-5'
-                : 'h-[60px] rounded-full px-3.5 py-2.5',
+              isExpanded ? 'rounded-[24px] px-5 pb-5 pt-5' : 'rounded-full px-3.5 py-2.5',
             ].join(' ')}
-            style={COMPOSER_GLASS_STYLE}
+            style={{
+              ...COMPOSER_GLASS_STYLE,
+              height: computeComposerCardHeight(
+                isExpanded,
+                hasReferenceImages,
+                classicComposerContentHeight,
+                60,
+                228,
+                268,
+              ),
+            }}
             onPointerDown={focusComposerFromEvent}
             onClick={focusComposerFromEvent}
             onDragEnter={(event) => {
@@ -7958,6 +7965,7 @@ export function App() {
                 onMentionIdsChange={setSelectedPromptReferenceIds}
                 onCursorIndexChange={setCursorIndex}
                 onScrollTopChange={handleScrollTop}
+                onContentHeightChange={setClassicComposerContentHeight}
                 onMentionNavigationKey={handleReferenceMentionNavigation}
                 onFocus={() => setIsFocused(true)}
                 onBlur={() => {
@@ -8430,6 +8438,31 @@ const COMPOSER_GLASS_STYLE = {
   backdropFilter: 'blur(28px)',
   WebkitBackdropFilter: 'blur(28px)',
 } as const;
+
+// The composer card grows with its text content. The editor sits between a top
+// inset (attachments row / breathing room) and a bottom inset (the controls
+// row), so the natural card height is those insets plus the measured content
+// height, clamped between the resting height and a sensible maximum (past which
+// the editor scrolls internally).
+const COMPOSER_TOP_INSET = 56;
+const COMPOSER_TOP_INSET_WITH_REFS = 112;
+const COMPOSER_BOTTOM_INSET = 76;
+const COMPOSER_MAX_HEIGHT = 440;
+
+function computeComposerCardHeight(
+  isExpanded: boolean,
+  hasReferenceImages: boolean,
+  contentHeight: number,
+  collapsedHeight: number,
+  restingHeight: number,
+  restingHeightWithRefs: number,
+): number {
+  if (!isExpanded) return collapsedHeight;
+  const topInset = hasReferenceImages ? COMPOSER_TOP_INSET_WITH_REFS : COMPOSER_TOP_INSET;
+  const resting = hasReferenceImages ? restingHeightWithRefs : restingHeight;
+  const natural = topInset + contentHeight + COMPOSER_BOTTOM_INSET;
+  return Math.min(Math.max(natural, resting), COMPOSER_MAX_HEIGHT);
+}
 
 function SceneGenerateButton({
   onClick,
@@ -10217,6 +10250,7 @@ function DirectorComposerBar({
   optionRefs: RefObject<Array<HTMLButtonElement | null>>;
 }) {
   const pointerMentionSelectionRef = useRef(false);
+  const [composerContentHeight, setComposerContentHeight] = useState(0);
 
   return (
     <motion.div
@@ -10318,13 +10352,19 @@ function DirectorComposerBar({
               'prompt-composer-card relative overflow-hidden border border-[var(--border-soft)] bg-[rgba(15,16,16,0.72)]',
               'shadow-[0_24px_72px_rgba(0,0,0,0.45)] backdrop-blur-2xl',
               'transition-[height,padding] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
-              isExpanded
-                ? hasReferenceImages
-                  ? 'h-[248px] rounded-[24px] px-5 pb-5 pt-5'
-                  : 'h-[208px] rounded-[24px] px-5 pb-5 pt-5'
-                : 'h-[60px] rounded-full px-3.5 py-2.5',
+              isExpanded ? 'rounded-[24px] px-5 pb-5 pt-5' : 'rounded-full px-3.5 py-2.5',
             ].join(' ')}
-            style={COMPOSER_GLASS_STYLE}
+            style={{
+              ...COMPOSER_GLASS_STYLE,
+              height: computeComposerCardHeight(
+                isExpanded,
+                hasReferenceImages,
+                composerContentHeight,
+                60,
+                208,
+                248,
+              ),
+            }}
             onPointerDown={onSurfaceInteract}
             onClick={onSurfaceInteract}
             onDragEnter={onReferenceDragEnter}
@@ -10364,6 +10404,7 @@ function DirectorComposerBar({
               onMentionIdsChange={onMentionIdsChange}
               onCursorIndexChange={onCursorIndexChange}
               onScrollTopChange={onScrollTopChange}
+              onContentHeightChange={setComposerContentHeight}
               onMentionNavigationKey={onMentionNavigationKey}
               onFocus={onComposerFocus}
               onBlur={onComposerBlur}
