@@ -818,6 +818,43 @@ app.whenReady().then(async () => {
     return autoUpdateManager.installNow();
   });
 
+  ipcMain.handle('app:enhancePrompt', async (_event, payload) => {
+    const prompt = String(payload?.prompt ?? '').trim();
+    const referenceNames = Array.isArray(payload?.referenceNames) ? payload.referenceNames : [];
+    const systemPrompt = referenceNames.length > 0
+      ? `You are a creative prompt enhancer for an AI image generation tool. Enhance the user's prompt to be more vivid, cinematic, and detailed. Preserve any @ReferenceName mentions exactly as-is. Available references: ${referenceNames.join(', ')}. Output only the enhanced prompt text, nothing else.`
+      : "You are a creative prompt enhancer for an AI image generation tool. Enhance the user's prompt to be more vivid, cinematic, and detailed. Output only the enhanced prompt text, nothing else.";
+
+    if (process.env.ANTHROPIC_API_KEY) {
+      const { createAnthropic } = await import('@ai-sdk/anthropic');
+      const { generateText } = await import('ai');
+      const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+      const { text } = await generateText({
+        model: anthropic('claude-haiku-4-5'),
+        system: systemPrompt,
+        prompt,
+        maxOutputTokens: 500,
+      });
+      return { text: text.trim() };
+    }
+
+    const googleApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+    if (!googleApiKey) {
+      throw new Error('Set an Anthropic or Gemini API key in Settings to use prompt enhancement.');
+    }
+
+    const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
+    const { generateText } = await import('ai');
+    const google = createGoogleGenerativeAI({ apiKey: googleApiKey });
+    const { text } = await generateText({
+      model: google('gemini-3.1-flash-lite-preview'),
+      system: systemPrompt,
+      prompt,
+      maxOutputTokens: 500,
+    });
+    return { text: text.trim() };
+  });
+
   createWindow();
   console.info('[crenv:app] main window created');
   autoUpdateManager.start();

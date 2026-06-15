@@ -232,6 +232,7 @@ import {
   refreshCodexImageAccountLimits,
   removeCodexImageAccount,
   checkForUpdates,
+  enhancePrompt,
   selectCodexImageAccount,
   startCodexImageOAuth,
   subscribeToImageReady,
@@ -1066,17 +1067,96 @@ type ReferenceTreeNode = {
 
 type ReferenceLibraryRoute = 'characters' | 'environment' | 'objects';
 
-const referenceRouteLabels: Record<ReferenceLibraryRoute, string> = {
-  characters: 'Characters',
-  environment: 'Environment',
-  objects: 'Objects',
-};
-
 const referenceRouteHeaderLabels: Record<ReferenceLibraryRoute, string> = {
   characters: 'Character',
   environment: 'Environment',
   objects: 'Item',
 };
+
+const referenceCategoryTabs: Array<{ value: ReferenceLibraryRoute; label: string; ariaLabel: string }> = [
+  { value: 'characters', label: 'Chars', ariaLabel: 'Characters' },
+  { value: 'environment', label: 'Env', ariaLabel: 'Environment' },
+  { value: 'objects', label: 'Props', ariaLabel: 'Props' },
+];
+
+type ReferenceLibraryFolderSummary = {
+  id: string;
+  title: string;
+  images: SavedReferenceImage[];
+  parentFolderId: string | null;
+  latestActivityAt: string;
+};
+
+function buildReferenceLibraryFolders(
+  route: ReferenceLibraryRoute,
+  references: SavedReferenceImage[],
+  referenceFolders: ReferenceFolderRecord[],
+): ReferenceLibraryFolderSummary[] {
+  const map = new Map<string, ReferenceLibraryFolderSummary>();
+
+  for (const folder of referenceFolders) {
+    if (folder.category !== route) continue;
+    map.set(folder.id, {
+      id: folder.id,
+      title: folder.title,
+      images: [],
+      parentFolderId: folder.parentFolderId ?? null,
+      latestActivityAt: folder.createdAt,
+    });
+  }
+
+  for (const reference of references) {
+    if (reference.category !== route) continue;
+    const folderId = reference.collectionId ?? reference.environmentId ?? reference.id;
+    if (!map.has(folderId)) {
+      map.set(folderId, {
+        id: folderId,
+        title: reference.groupTitle?.trim() || reference.title,
+        images: [],
+        parentFolderId: reference.parentFolderId ?? null,
+        latestActivityAt: reference.createdAt,
+      });
+    }
+
+    const folder = map.get(folderId)!;
+    folder.title = reference.groupTitle?.trim() || folder.title;
+    folder.parentFolderId = reference.parentFolderId ?? folder.parentFolderId;
+    if (reference.createdAt > folder.latestActivityAt) {
+      folder.latestActivityAt = reference.createdAt;
+    }
+    folder.images.push(reference);
+  }
+
+  return [...map.values()].sort((a, b) => b.latestActivityAt.localeCompare(a.latestActivityAt));
+}
+
+function toReferenceFolderActionTarget(
+  folder: ReferenceLibraryFolderSummary,
+  category: ReferenceLibraryRoute,
+): SavedReferenceImage {
+  const cover = folder.images[0];
+  if (cover) {
+    return cover;
+  }
+
+  return {
+    id: folder.id,
+    name: folder.title,
+    title: folder.title,
+    description: '',
+    groupTitle: folder.title,
+    groupDescription: '',
+    mimeType: 'image/png',
+    bytesBase64: '',
+    previewUrl: '',
+    size: 0,
+    createdAt: folder.latestActivityAt,
+    category,
+    collectionId: category === 'environment' ? undefined : folder.id,
+    environmentId: category === 'environment' ? folder.id : undefined,
+    parentFolderId: folder.parentFolderId ?? undefined,
+  };
+}
 
 function getSavedReferenceMentionGroupId(reference: SavedReferenceImage) {
   return reference.collectionId ?? reference.environmentId ?? reference.id;
@@ -1889,10 +1969,20 @@ export function App() {
   const [activeStudioView, setActiveStudioView] = useState<'generation' | 'references' | 'providers'>('generation');
   const [activeProviderSettingsTab, setActiveProviderSettingsTab] = useState<ProvidersSettingsTab>('text');
   const [activeReferenceLibraryRoute, setActiveReferenceLibraryRoute] = useState<ReferenceLibraryRoute>('characters');
+  const [activeReferenceFolderId, setActiveReferenceFolderId] = useState<string | null>(null);
+  const [sidebarRenameReferenceFolder, setSidebarRenameReferenceFolder] = useState<
+    (ReferenceLibraryFolderSummary & { category: ReferenceLibraryRoute }) | null
+  >(null);
+  const [referenceNewFolderRequestId, setReferenceNewFolderRequestId] = useState(0);
+  const [referenceFolderListHeight, setReferenceFolderListHeight] = useState<number | null>(null);
+  const referenceFolderListFrameRef = useRef<number | null>(null);
+  const referenceFolderListInnerRef = useRef<HTMLDivElement>(null);
   const [providerGeminiApiKey, setProviderGeminiApiKey] = useState('');
   const [providerGeminiApiKeyDraft, setProviderGeminiApiKeyDraft] = useState('');
   const [providerAnthropicApiKey, setProviderAnthropicApiKey] = useState('');
   const [providerAnthropicApiKeyDraft, setProviderAnthropicApiKeyDraft] = useState('');
+  const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
+  const [promptTextVisible, setPromptTextVisible] = useState(true);
   const [isProviderKeyVisible, setIsProviderKeyVisible] = useState(false);
   const [isAnthropicProviderKeyVisible, setIsAnthropicProviderKeyVisible] = useState(false);
   const [isSavingProviderSettings, setIsSavingProviderSettings] = useState(false);
@@ -2284,6 +2374,55 @@ export function App() {
   const isClassicWorkspace = activeStudioView === 'generation' && generationWorkspaceMode === 'classic';
   const isScenesWorkspace = activeStudioView === 'generation' && generationWorkspaceMode === 'scenes';
   const isDirectorWorkspace = activeStudioView === 'generation' && generationWorkspaceMode === 'director';
+  const expandedSidebarWidthClass = sidebarView === 'settings' ? 'w-[320px]' : 'w-[260px]';
+  const expandedContentPaddingClass = sidebarView === 'settings' ? 'pl-[320px]' : 'pl-[260px]';
+  const expandedHeaderLeftClass = sidebarView === 'settings' ? 'left-[332px]' : 'left-[272px]';
+  const referenceSidebarFolders = useMemo(
+    () =>
+      buildReferenceLibraryFolders(
+        activeReferenceLibraryRoute,
+        savedReferences,
+        referenceFolders,
+      ).filter((folder) => folder.parentFolderId === null),
+    [activeReferenceLibraryRoute, referenceFolders, savedReferences]
+  );
+  const captureReferenceFolderListHeight = useCallback(() => {
+    const currentHeight = referenceFolderListInnerRef.current?.offsetHeight;
+    if (typeof currentHeight === 'number') {
+      setReferenceFolderListHeight(currentHeight);
+    }
+  }, []);
+  useLayoutEffect(() => {
+    const nextHeight = referenceFolderListInnerRef.current?.offsetHeight;
+    if (typeof nextHeight !== 'number') {
+      return;
+    }
+
+    if (referenceFolderListHeight === null) {
+      setReferenceFolderListHeight(nextHeight);
+      return;
+    }
+
+    if (Math.abs(referenceFolderListHeight - nextHeight) < 1) {
+      return;
+    }
+
+    if (referenceFolderListFrameRef.current !== null) {
+      window.cancelAnimationFrame(referenceFolderListFrameRef.current);
+    }
+
+    referenceFolderListFrameRef.current = window.requestAnimationFrame(() => {
+      referenceFolderListFrameRef.current = null;
+      setReferenceFolderListHeight(nextHeight);
+    });
+
+    return () => {
+      if (referenceFolderListFrameRef.current !== null) {
+        window.cancelAnimationFrame(referenceFolderListFrameRef.current);
+        referenceFolderListFrameRef.current = null;
+      }
+    };
+  }, [activeReferenceLibraryRoute, referenceFolderListHeight, referenceSidebarFolders]);
   const activeComposerRef = isDirectorWorkspace ? directorComposerRef : classicComposerRef;
   const activeReferenceInputRef = isDirectorWorkspace ? directorReferenceInputRef : classicReferenceInputRef;
   const activeDirectorChats = selectedThreadId ? directorChatsByThreadId[selectedThreadId] ?? [] : [];
@@ -2397,6 +2536,8 @@ export function App() {
       try {
         const settings = await selectCodexImageAccount(accountId);
         syncProviderSettingsState(settings);
+        sounds.select();
+        toast.success('Codex image account switched');
       } catch (error) {
         toast.error(getErrorMessage(error, 'Failed to switch Codex image account.'));
       } finally {
@@ -2647,6 +2788,38 @@ export function App() {
 
     setIsFocused(true);
   }, []);
+
+  const handleEnhancePrompt = useCallback(async () => {
+    if (!prompt.trim() || isEnhancingPrompt) return;
+
+    // Unfocus the editor without collapsing the card
+    holdComposerOpen();
+    (document.activeElement as HTMLElement | null)?.blur();
+
+    setIsEnhancingPrompt(true);
+
+    try {
+      const referenceNames = referenceMentionCandidates.map((c) => c.title);
+      // Use getText() to get @-prefixed mentions instead of bare titles from plain text
+      const promptWithMentions = classicComposerRef.current?.getText() ?? prompt;
+      const { text: enhancedText } = await enhancePrompt({ prompt: promptWithMentions, referenceNames });
+
+      // Fade out current text, then swap, then fade back in
+      setPromptTextVisible(false);
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 220));
+      classicComposerRef.current?.setText(enhancedText, referenceMentionCandidates);
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 32));
+      setPromptTextVisible(true);
+      sounds.success();
+    } catch (error) {
+      setPromptTextVisible(true);
+      toast.error('Prompt enhancement failed: ' + getErrorMessage(error));
+    } finally {
+      setIsEnhancingPrompt(false);
+      // Re-focus the composer
+      window.setTimeout(() => classicComposerRef.current?.focus(), 50);
+    }
+  }, [prompt, isEnhancingPrompt, providerAnthropicApiKey, providerGeminiApiKey, referenceMentionCandidates, holdComposerOpen]);
 
   const insertReferenceMention = useCallback((option: ReferenceSelectorOption) => {
     const range = getReferenceMentionReplacementRange(referenceMentionMatch, cursorIndex);
@@ -3174,6 +3347,35 @@ export function App() {
       return upsertReferenceFolderRecord(current, { ...existingFolder, title: newTitle });
     });
   }, []);
+
+  const handleRenameSidebarReferenceFolder = useCallback(
+    async (
+      target: ReferenceLibraryFolderSummary & { category: ReferenceLibraryRoute },
+      newTitle: string,
+    ) => {
+      const soloReference = target.images[0];
+      if (soloReference && !soloReference.collectionId && !soloReference.environmentId) {
+        const updatedReference = await updateReference({
+          id: soloReference.id,
+          category: target.category,
+          title: newTitle,
+          description: soloReference.description ?? '',
+        });
+        const savedReference = toSavedReferenceImage(updatedReference);
+        setSavedReferences((current) =>
+          current.map((reference) => (reference.id === savedReference.id ? savedReference : reference)),
+        );
+        return;
+      }
+
+      await handleRenameFolder({
+        folderId: target.id,
+        category: target.category,
+        newTitle,
+      });
+    },
+    [handleRenameFolder],
+  );
 
   const handleDeleteImageFromFolder = useCallback(async ({
     imageId,
@@ -6317,6 +6519,28 @@ export function App() {
         />
       ) : null}
 
+      {sidebarRenameReferenceFolder ? (
+        <EntityNameDialog
+          open={sidebarRenameReferenceFolder !== null}
+          onOpenChange={(open) => {
+            if (!open) {
+              setSidebarRenameReferenceFolder(null);
+            }
+          }}
+          title="Rename folder"
+          description="Give this reference folder a new name."
+          label="Folder name"
+          initialValue={sidebarRenameReferenceFolder.title}
+          submitLabel="Save"
+          onSubmit={async (name) => {
+            const target = sidebarRenameReferenceFolder;
+            setSidebarRenameReferenceFolder(null);
+            if (!target) return;
+            await handleRenameSidebarReferenceFolder(target, name);
+          }}
+        />
+      ) : null}
+
       <div
         className={[
           'absolute inset-0 z-0',
@@ -6331,9 +6555,9 @@ export function App() {
                   : 'pb-[180px]'
                 : 'pb-10'
               : 'pb-10',
-          isSidebarCollapsed ? 'pl-0' : 'pl-[260px]',
+          isSidebarCollapsed ? 'pl-0' : expandedContentPaddingClass,
         ].join(' ')}
-        style={{ paddingRight: isScenesWorkspace || isDirectorWorkspace ? scenesSidebarWidth + 24 : activeStudioView === 'references' ? scenesSidebarWidth : 0 }}
+        style={{ paddingRight: isScenesWorkspace || isDirectorWorkspace ? scenesSidebarWidth + 24 : 0 }}
       >
         <AnimatePresence initial={false}>
           {activeStudioView === 'references' ? (
@@ -6342,11 +6566,11 @@ export function App() {
               folders={referenceFolders}
               references={savedReferences}
               route={activeReferenceLibraryRoute}
-              sidebarWidth={scenesSidebarWidth}
+              selectedFolderId={activeReferenceFolderId}
+              onSelectedFolderChange={setActiveReferenceFolderId}
+              newFolderRequestId={referenceNewFolderRequestId}
               isSidebarCollapsed={isSidebarCollapsed}
               onExpandSidebar={() => setIsSidebarCollapsed(false)}
-              isSidebarResizing={isScenesSidebarResizing}
-              onStartSidebarResize={startScenesSidebarResize}
               seedFiles={referenceSeedFiles}
               onSeedFilesConsumed={() => setReferenceSeedFiles([])}
               onCreateFolder={handleCreateReferenceFolder}
@@ -6367,7 +6591,6 @@ export function App() {
                 })
               }
               onExportReference={handleExportReference}
-              onImportReference={() => void handleImportReference()}
             />
           ) : activeStudioView === 'providers' ? (
             <ProvidersWorkspace
@@ -6616,7 +6839,7 @@ export function App() {
         className={[
           'fixed top-[8px] z-40',
           'transition-[left] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
-          isSidebarCollapsed ? 'left-3' : 'left-[272px]',
+          isSidebarCollapsed ? 'left-3' : expandedHeaderLeftClass,
         ].join(' ')}
       >
         <div className="flex items-center gap-3">
@@ -6885,10 +7108,10 @@ export function App() {
         className={[
           'fixed bottom-0 left-0 top-0 z-30 border-r border-[var(--border-soft)] bg-[var(--surface)]',
           'overflow-hidden transition-[width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
-          isSidebarCollapsed ? 'w-0' : 'w-[260px]',
+          isSidebarCollapsed ? 'w-0' : expandedSidebarWidthClass,
         ].join(' ')}
       >
-        <div className="flex h-full w-[260px] flex-col">
+        <div className={['flex h-full flex-col', sidebarView === 'settings' ? 'w-[320px]' : 'w-[260px]'].join(' ')}>
         <div
           role="button"
           tabIndex={0}
@@ -7042,31 +7265,160 @@ export function App() {
               transition={{ duration: 0.18, ease: 'easeInOut' }}
               className="h-full w-full"
             >
-            <div className="min-h-0 w-full overflow-y-auto px-2 pb-3 pt-3">
-              <div className="space-y-2 px-2">
-                <div className="px-3 text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
-                  References
-                </div>
-                {(['characters', 'environment', 'objects'] as const).map((route) => (
-                  <button
-                    key={route}
-                    type="button"
-                    onClick={() => {
-                      setActiveReferenceLibraryRoute(route);
-                      setActiveStudioView('references');
+            <div data-testid="settings-sidebar" className="min-h-0 w-full overflow-y-auto px-2 pb-3 pt-3">
+              <div className="border-b border-[var(--border-soft)] px-2 pb-4">
+                <div
+                  data-testid="reference-category-tabs"
+                  className="relative grid h-10 grid-cols-3 items-center rounded-full border border-[var(--border-soft)] bg-[rgba(15,16,16,0.88)] p-1 shadow-[0_8px_24px_rgba(0,0,0,0.24)]"
+                >
+                  <motion.span
+                    aria-hidden="true"
+                    initial={false}
+                    animate={{
+                      x: `${Math.max(
+                        0,
+                        referenceCategoryTabs.findIndex((tab) => tab.value === activeReferenceLibraryRoute)
+                      ) * 100}%`,
                     }}
-                    className={[
-                      'flex h-10 w-full items-center rounded-[12px] px-3 text-left text-[14px] capitalize transition-colors',
-                      activeStudioView === 'references' && activeReferenceLibraryRoute === route
-                        ? 'bg-[var(--surface2)] text-[var(--foreground)]'
-                        : 'text-[var(--foreground)] hover:bg-[var(--surface2)]',
-                    ].join(' ')}
+                    transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+                    className="absolute bottom-1 left-1 top-1 w-[calc((100%_-_8px)/3)] rounded-full bg-[var(--surface2)]"
+                  />
+                  {referenceCategoryTabs.map((tab) => {
+                    const isSelected = activeStudioView === 'references' && activeReferenceLibraryRoute === tab.value;
+
+                    return (
+                      <button
+                        key={tab.value}
+                        type="button"
+                        aria-label={tab.ariaLabel}
+                        aria-pressed={isSelected}
+                        onClick={() => {
+                          captureReferenceFolderListHeight();
+                          setActiveReferenceLibraryRoute(tab.value);
+                          setActiveReferenceFolderId(null);
+                          setActiveStudioView('references');
+                        }}
+                        className={[
+                          'relative z-10 inline-flex h-8 min-w-0 items-center justify-center rounded-full px-3 text-[12px] font-medium tracking-[0] transition-colors duration-200',
+                          isSelected
+                            ? 'text-[var(--foreground)]'
+                            : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]',
+                        ].join(' ')}
+                      >
+                        {tab.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    aria-label="Import references"
+                    onClick={() => void handleImportReference()}
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-[10px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.52)] px-3 text-[12px] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
                   >
-                    {route.charAt(0).toUpperCase() + route.slice(1)}
+                    <Upload className="size-3.5" />
+                    Import
                   </button>
-                ))}
+                  <button
+                    type="button"
+                    aria-label="Create reference folder"
+                    onClick={() => {
+                      setActiveStudioView('references');
+                      setReferenceNewFolderRequestId((current) => current + 1);
+                    }}
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-[10px] border border-[color-mix(in_srgb,var(--accent)_45%,transparent)] bg-[color-mix(in_srgb,var(--accent)_12%,rgba(32,32,33,0.62))] px-3 text-[12px] font-medium text-[rgb(170,203,255)] transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_20%,rgba(32,32,33,0.72))]"
+                  >
+                    <FolderPlus className="size-3.5" />
+                    New
+                  </button>
+                </div>
               </div>
-              <div className="mt-6 space-y-2 px-2">
+              <div className="border-b border-[var(--border-soft)] px-2 py-3">
+                <motion.div
+                  animate={referenceFolderListHeight === null ? undefined : { height: referenceFolderListHeight }}
+                  transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+                  className="overflow-hidden"
+                >
+                  <AnimatePresence mode="popLayout" initial={false}>
+                    <motion.div
+                      ref={referenceFolderListInnerRef}
+                      key={`settings-reference-folders-${activeReferenceLibraryRoute}`}
+                      layout
+                      initial={{ opacity: 0, filter: 'blur(8px)', y: 6 }}
+                      animate={{ opacity: 1, filter: 'blur(0px)', y: 0 }}
+                      exit={{ opacity: 0, filter: 'blur(8px)', y: -4 }}
+                      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                      className="space-y-1"
+                    >
+                      {referenceSidebarFolders.map((folder) => {
+                        const isActive = activeStudioView === 'references' && activeReferenceFolderId === folder.id;
+
+                        return (
+                          <ContextMenu key={folder.id}>
+                            <ContextMenuTrigger asChild>
+                              <button
+                                type="button"
+                                aria-label={folder.title}
+                                onClick={() => {
+                                  setActiveReferenceFolderId(folder.id);
+                                  setActiveStudioView('references');
+                                }}
+                                className={[
+                                  'flex min-h-9 w-full items-center rounded-[10px] px-3 text-left transition-colors',
+                                  isActive
+                                    ? 'bg-[var(--surface2)] text-[var(--foreground)]'
+                                    : 'text-[var(--muted-foreground)] hover:bg-white/6 hover:text-[var(--foreground)]',
+                                ].join(' ')}
+                              >
+                                <span className="min-w-0 truncate text-[13px] font-medium">{folder.title}</span>
+                              </button>
+                            </ContextMenuTrigger>
+                            <ContextMenuContent className="min-w-[156px]">
+                              <ContextMenuItem
+                                onClick={() =>
+                                  setSidebarRenameReferenceFolder({
+                                    ...folder,
+                                    category: activeReferenceLibraryRoute,
+                                  })
+                                }
+                              >
+                                Rename
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                onClick={() => {
+                                  void handleExportReference(
+                                    toReferenceFolderActionTarget(folder, activeReferenceLibraryRoute),
+                                  );
+                                }}
+                              >
+                                Export reference...
+                              </ContextMenuItem>
+                              <ContextMenuSeparator />
+                              <ContextMenuItem
+                                className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
+                                onClick={() => {
+                                  setDeletingReference(
+                                    toReferenceFolderActionTarget(folder, activeReferenceLibraryRoute),
+                                  );
+                                }}
+                              >
+                                Delete
+                              </ContextMenuItem>
+                            </ContextMenuContent>
+                          </ContextMenu>
+                        );
+                      })}
+                      {referenceSidebarFolders.length === 0 ? (
+                        <p className="px-3 py-2 text-[13px] leading-5 text-[var(--muted-foreground)]">
+                          No reference folders yet.
+                        </p>
+                      ) : null}
+                    </motion.div>
+                  </AnimatePresence>
+                </motion.div>
+              </div>
+              <div className="mt-4 space-y-2 px-2">
                 <div className="px-3 text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
                   Providers
                 </div>
@@ -7089,72 +7441,69 @@ export function App() {
                   </button>
                 ))}
               </div>
-              <div className="mt-6 space-y-3 px-2">
-                <div className="px-3 text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
-                  Updates
-                </div>
-                <div className="space-y-3 rounded-[18px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.42)] p-3">
-                  <div className="min-h-9">
-                    <p className="text-[13px] leading-5 tracking-[0] text-[var(--foreground)]">
-                      {updateStatus?.message ?? 'Updates have not been checked yet.'}
-                    </p>
-                    {updateStatus?.errorMessage ? (
-                      <p className="mt-1 text-[12px] leading-4 text-[rgb(245,178,178)]">
-                        {updateStatus.errorMessage}
-                      </p>
-                    ) : updateStatus?.version ? (
-                      <p className="mt-1 text-[12px] leading-4 text-[var(--muted-foreground)]">
-                        Version {updateStatus.version}
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      type="button"
-                      variant="surface"
-                      onClick={() => void handleCheckForUpdates()}
-                      disabled={isUpdateBusy}
-                      className="h-9 flex-1 rounded-full px-3 text-[13px]"
-                    >
-                      {isUpdateBusy ? (
-                        <LoaderCircle className="size-4 animate-spin" />
-                      ) : (
-                        <Search className="size-4" />
-                      )}
-                      {isUpdateBusy ? 'Checking' : 'Check for updates'}
-                    </Button>
-                    {canInstallUpdate ? (
-                      <Button
-                        type="button"
-                        onClick={() => void handleInstallUpdate()}
-                        disabled={isInstallingUpdate}
-                        className="h-9 rounded-full px-3 text-[13px]"
-                      >
-                        {isInstallingUpdate ? (
-                          <LoaderCircle className="size-4 animate-spin" />
-                        ) : (
-                          <Download className="size-4" />
-                        )}
-                        Install
-                      </Button>
-                    ) : null}
-                  </div>
-                  {updateStatus?.percent !== null && updateStatus?.percent !== undefined ? (
-                    <div className="h-1.5 overflow-hidden rounded-full bg-[var(--surface)]">
-                      <div
-                        className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-200"
-                        style={{ width: `${updateStatus.percent}%` }}
-                      />
-                    </div>
-                  ) : null}
-                </div>
-              </div>
             </div>
             </motion.div>
             )}
           </AnimatePresence>
         </div>
-        <div className="p-3">
+        <div className="space-y-2 p-3">
+          {sidebarView === 'settings' ? (
+            <div className="rounded-[18px] border border-[var(--border-soft)] bg-[rgba(15,16,16,0.54)] p-2.5">
+              <div className="flex items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="line-clamp-2 text-[12px] leading-4 tracking-[0] text-[var(--foreground)]/88">
+                    {updateStatus?.message ?? 'Updates have not been checked yet.'}
+                  </p>
+                  {updateStatus?.errorMessage ? (
+                    <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-[rgb(245,178,178)]">
+                      {updateStatus.errorMessage}
+                    </p>
+                  ) : updateStatus?.version ? (
+                    <p className="mt-1 text-[11px] leading-4 text-[var(--muted-foreground)]">
+                      v{updateStatus.version}
+                    </p>
+                  ) : null}
+                </div>
+                <Button
+                  type="button"
+                  variant="surface"
+                  onClick={() => void handleCheckForUpdates()}
+                  disabled={isUpdateBusy}
+                  className="h-8 shrink-0 rounded-full px-3 text-[12px]"
+                >
+                  {isUpdateBusy ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : (
+                    <Search className="size-3.5" />
+                  )}
+                  {isUpdateBusy ? 'Checking' : 'Check'}
+                </Button>
+              </div>
+              {canInstallUpdate ? (
+                <Button
+                  type="button"
+                  onClick={() => void handleInstallUpdate()}
+                  disabled={isInstallingUpdate}
+                  className="mt-2 h-8 w-full rounded-full px-3 text-[12px]"
+                >
+                  {isInstallingUpdate ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : (
+                    <Download className="size-3.5" />
+                  )}
+                  Install update
+                </Button>
+              ) : null}
+              {updateStatus?.percent !== null && updateStatus?.percent !== undefined ? (
+                <div className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--surface2)]">
+                  <div
+                    className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-200"
+                    style={{ width: `${updateStatus.percent}%` }}
+                  />
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <button
             type="button"
             aria-label={sidebarView === 'settings' ? 'Back to projects' : 'Settings'}
@@ -7163,6 +7512,7 @@ export function App() {
                 const nextView = current === 'projects' ? 'settings' : 'projects';
                 if (nextView === 'settings') {
                   setActiveReferenceLibraryRoute('characters');
+                  setActiveReferenceFolderId(null);
                   setActiveStudioView('references');
                 } else {
                   setActiveStudioView('generation');
@@ -7435,6 +7785,15 @@ export function App() {
             ) : null}
           </AnimatePresence>
 
+          <BorderBeam
+            active={isEnhancingPrompt}
+            borderRadius={isExpanded ? 24 : 999}
+            className="w-full"
+            colorVariant="colorful"
+            size="md"
+            strength={1}
+            theme="dark"
+          >
           <div
             data-testid="classic-composer-shell"
             className={[
@@ -7507,6 +7866,13 @@ export function App() {
                   : 'relative',
               ].join(' ')}
             >
+              <div
+                className={[
+                  'h-full transition-[opacity,filter] duration-200 ease-out',
+                  promptTextVisible ? 'opacity-100 blur-0' : 'opacity-0 blur-[5px]',
+                ].join(' ')}
+                style={{ pointerEvents: isEnhancingPrompt ? 'none' : undefined }}
+              >
               <PromptComposer
                 ref={classicComposerRef}
                 placeholder="Type anything"
@@ -7552,6 +7918,7 @@ export function App() {
                     : undefined
                 }
               />
+              </div>
             </div>
 
             {isExpanded ? (
@@ -7587,9 +7954,11 @@ export function App() {
             <div
               className={[
                 'pointer-events-none absolute inset-x-0 bottom-0 z-20 flex items-center justify-between',
-                'transition-[left,right,bottom] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
+                'transition-[left,right,bottom,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
                 isExpanded ? 'left-5 right-5 bottom-4' : 'left-4 right-4 bottom-2.5',
+                isEnhancingPrompt ? 'opacity-40' : 'opacity-100',
               ].join(' ')}
+              style={isEnhancingPrompt ? { pointerEvents: 'none' } : undefined}
             >
               <div className="flex min-w-0 flex-1 items-center">
                 <div
@@ -7769,9 +8138,22 @@ export function App() {
                   type="button"
                   tabIndex={isExpanded ? 0 : -1}
                   aria-hidden={!isExpanded}
+                  aria-label="Enhance prompt"
+                  disabled={isEnhancingPrompt || !prompt.trim()}
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    holdComposerOpen();
+                  }}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    void handleEnhancePrompt();
+                  }}
                   className={[
                     'pointer-events-auto inline-flex h-10 items-center justify-center overflow-hidden rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] text-[var(--foreground)] backdrop-blur-xl',
                     'transition-[width,opacity,transform,margin] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] hover:border-[var(--border-strong)] hover:bg-[rgba(39,39,40,0.78)]',
+                    'disabled:opacity-50 disabled:cursor-not-allowed',
                     isExpanded ? 'w-10 opacity-100 translate-y-0' : 'w-0 border-transparent opacity-0 translate-y-1',
                   ].join(' ')}
                 >
@@ -7781,11 +8163,12 @@ export function App() {
                 <SendButton
                   hostRef={sendFxRef}
                   onClick={() => void handleGenerate()}
-                  disabled={!hasPrompt}
+                  disabled={!hasPrompt || isEnhancingPrompt}
                 />
               </div>
             </div>
           </div>
+          </BorderBeam>
         </div>
       </motion.div>
       ) : null}
@@ -11731,55 +12114,113 @@ function getCodexProviderLimitSlots(account: CodexImageAccount) {
   return slots;
 }
 
-function CodexProviderLimitChip({
+// Each Codex limit window gets a distinct, consistent hue so usage reads by
+// color at a glance. Active-account blue stays reserved for selection state.
+const CODEX_LIMIT_COLORS: Record<CodexProviderLimitKind, { text: string; bar: string }> = {
+  'five-hour': { text: 'rgb(232,179,90)', bar: 'rgb(232,179,90)' },
+  weekly: { text: 'rgb(176,150,250)', bar: 'rgb(176,150,250)' },
+  monthly: { text: 'rgb(86,206,160)', bar: 'rgb(86,206,160)' },
+  other: { text: 'var(--muted-foreground)', bar: 'var(--muted-foreground)' },
+};
+
+function CodexProviderLimitMeter({
   label,
+  kind,
   limit,
 }: {
   label: string;
+  kind: CodexProviderLimitKind;
   limit: CodexProviderDisplayLimit | null;
 }) {
+  const color = CODEX_LIMIT_COLORS[kind];
+  // Number = usage; bar fills with what is still available (full bar = 0% used).
+  const used = limit ? limit.usedPercent : null;
+  const available = limit ? limit.remainingPercent : 0;
   return (
-    <span className="inline-flex h-8 items-center gap-2 rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] px-3 text-[11px] leading-none text-[var(--muted-foreground)]">
-      <span className="font-medium text-[var(--foreground)]">{label}</span>
-      <span className="font-mono">{limit ? `${limit.remainingPercent}% left` : 'No data'}</span>
-    </span>
+    <div className="min-w-0">
+      <div className="flex items-baseline justify-between gap-2">
+        <span
+          className="text-[10px] font-semibold uppercase tracking-[0.06em]"
+          style={{ color: color.text }}
+        >
+          {label}
+        </span>
+        <span className="font-mono text-[11px] tabular-nums text-[var(--foreground)]">
+          {used === null ? '--' : `${used}%`}
+        </span>
+      </div>
+      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-[var(--surface2)]">
+        <div
+          className="h-full rounded-full transition-[width] duration-300 ease-out"
+          style={{ width: `${available}%`, background: color.bar }}
+        />
+      </div>
+    </div>
   );
 }
 
-function CodexProviderLimitPanel({
-  title,
-  limit,
-}: {
-  title: string;
-  limit: CodexProviderDisplayLimit | null;
-}) {
-  const usedPercent = limit?.usedPercent ?? 0;
+function isCodexFreePlan(planType: string | null) {
+  return (planType || '').toLowerCase().includes('free');
+}
+
+// An account is unusable when its short-window (5h) or weekly allowance is fully
+// spent. We surface the soonest reset of the exhausted windows for the countdown.
+function getCodexAccountAvailability(account: CodexImageAccount) {
+  const slots = getCodexProviderLimitSlots(account);
+  const hasLimits = getCodexProviderDisplayLimits(account).length > 0;
+  const blocking = [slots.fiveHour, slots.weekly].filter(
+    (limit): limit is CodexProviderDisplayLimit =>
+      Boolean(limit) && (limit as CodexProviderDisplayLimit).remainingPercent <= 0
+  );
+  const isExhausted = blocking.length > 0;
+  const resetsAt = blocking
+    .map((limit) => Number(limit.resetsAt))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .sort((a, b) => a - b)[0];
+  return {
+    slots,
+    isFree: isCodexFreePlan(account.planType),
+    hasLimits,
+    isUnavailable: !hasLimits || Boolean(account.limitsError),
+    isExhausted,
+    resetsAt: Number.isFinite(resetsAt) ? resetsAt : null,
+  };
+}
+
+const CODEX_COUNTDOWN_TIMING = {
+  transformTiming: { duration: 320, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' },
+  spinTiming: { duration: 360, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' },
+  opacityTiming: { duration: 220, easing: 'ease-out' },
+} as const;
+
+function CodexResetCountdown({ resetsAt }: { resetsAt: number | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  if (!resetsAt) {
+    return <span className="text-[12px] font-medium text-[rgb(232,128,128)]">Limit reached</span>;
+  }
+
+  const totalSeconds = Math.max(0, Math.round((resetsAt * 1000 - now) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const numberFormat = { minimumIntegerDigits: 2 } as const;
+
   return (
-    <div className="rounded-[18px] border border-[var(--border-soft)] bg-[rgba(32,32,33,0.46)] p-3.5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h4 className="text-[13px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
-            {title}
-          </h4>
-          <p className="mt-0.5 text-[11px] leading-4 text-[var(--muted-foreground)]">
-            {limit ? formatCodexProviderWindow(limit.windowMinutes) : 'Window not reported'}
-          </p>
-        </div>
-        <span className="shrink-0 font-mono text-[13px] leading-5 text-[var(--foreground)]">
-          {limit ? `${limit.remainingPercent}%` : '--'}
-        </span>
-      </div>
-      <div className="mt-3 h-2 overflow-hidden rounded-full bg-[var(--surface)]">
-        <div
-          className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300 ease-out"
-          style={{ width: `${usedPercent}%` }}
-        />
-      </div>
-      <div className="mt-2 flex items-center justify-between gap-3 text-[11px] leading-4 text-[var(--muted-foreground)]">
-        <span>{limit ? `${limit.usedPercent}% used` : 'No usage data'}</span>
-        <span>{limit ? `Resets ${formatCodexProviderReset(limit.resetsAt)}` : 'No reset'}</span>
-      </div>
-    </div>
+    <span
+      className="inline-flex items-baseline gap-0.5 font-mono text-[13px] tabular-nums text-[rgb(232,128,128)]"
+      aria-label={`Resets in ${hours} hours ${minutes} minutes ${seconds} seconds`}
+    >
+      <NumberFlow value={hours} format={numberFormat} {...CODEX_COUNTDOWN_TIMING} className="inline-block" />
+      <span>:</span>
+      <NumberFlow value={minutes} format={numberFormat} {...CODEX_COUNTDOWN_TIMING} className="inline-block" />
+      <span>:</span>
+      <NumberFlow value={seconds} format={numberFormat} {...CODEX_COUNTDOWN_TIMING} className="inline-block" />
+    </span>
   );
 }
 
@@ -11842,28 +12283,23 @@ function ProvidersWorkspace({
   const hasCodexAccounts = codexImageAccounts.length > 0;
   const activeCodexAccount =
     codexImageAccounts.find((account) => account.id === activeCodexImageAccountId) ?? null;
-  const codexImageAccountIdsKey = codexImageAccounts.map((account) => account.id).join('|');
-  const [expandedCodexAccountId, setExpandedCodexAccountId] = useState<string | null>(
-    activeCodexImageAccountId
-  );
+  const orderedCodexAccounts = codexImageAccounts
+    .map((account, index) => ({
+      account,
+      index,
+      availability: getCodexAccountAvailability(account),
+    }))
+    .sort((a, b) => {
+      const aBlocked = a.availability.isUnavailable || a.availability.isExhausted ? 1 : 0;
+      const bBlocked = b.availability.isUnavailable || b.availability.isExhausted ? 1 : 0;
+      if (aBlocked !== bBlocked) {
+        return aBlocked - bBlocked;
+      }
+      return a.index - b.index;
+    });
   const providerContentTransition = prefersReducedMotion
     ? { duration: 0 }
     : { duration: 0.18, ease: 'easeInOut' };
-  const codexAccountDetailsTransition = prefersReducedMotion
-    ? { duration: 0 }
-    : { duration: 0.22, ease: [0.22, 1, 0.36, 1] };
-
-  useEffect(() => {
-    setExpandedCodexAccountId((current) => {
-      if (!codexImageAccounts.length) {
-        return null;
-      }
-      if (current && codexImageAccounts.some((account) => account.id === current)) {
-        return current;
-      }
-      return activeCodexImageAccountId || codexImageAccounts[0]?.id || null;
-    });
-  }, [activeCodexImageAccountId, codexImageAccountIdsKey]);
 
   return (
     <motion.section
@@ -11907,145 +12343,127 @@ function ProvidersWorkspace({
               transition={providerContentTransition}
               className="grid gap-4"
             >
-              <div className="flex flex-wrap items-center justify-between gap-3 px-1">
-                <div className="flex items-center gap-3">
-                  <div className="inline-flex size-11 items-center justify-center rounded-[16px] bg-[var(--surface2)]">
-                    <KeyRound className="size-5 text-[var(--muted-foreground)]" />
-                  </div>
-                  <div>
-                    <h2 className="text-[16px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
-                      Text provider
-                    </h2>
-                    <p className="mt-1 text-[13px] leading-5 text-[var(--muted-foreground)]">
-                      Gemini and Claude credentials for text workflows.
-                    </p>
-                  </div>
-                </div>
-                <span
-                  className={[
-                    'inline-flex h-8 items-center rounded-full border px-3 text-[12px] font-medium',
-                    hasSavedGeminiKey || hasSavedAnthropicKey
-                      ? 'border-[rgba(84,190,120,0.28)] bg-[rgba(84,190,120,0.12)] text-[rgb(147,220,169)]'
-                      : 'border-[var(--border-soft)] bg-[var(--surface2)] text-[var(--muted-foreground)]',
-                  ].join(' ')}
-                >
-                  {hasSavedGeminiKey || hasSavedAnthropicKey ? 'Configured' : 'Missing key'}
+              <div className="flex items-baseline justify-between gap-3 px-1">
+                <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-[var(--muted-foreground)]">
+                  Text providers
+                </h2>
+                <span className="text-[12px] text-[var(--muted-foreground)]">
+                  {[hasSavedGeminiKey, hasSavedAnthropicKey].filter(Boolean).length}/2 connected
                 </span>
               </div>
 
-              <article className="rounded-[24px] border border-[var(--border-soft)] bg-[var(--surface)] p-5">
-                <div className="flex items-center gap-3">
-                  <div className="inline-flex size-10 items-center justify-center rounded-[14px] bg-[var(--surface2)]">
-                    <img src={geminiIcon} alt="" aria-hidden="true" className="size-6 object-contain" />
-                  </div>
-                  <div>
-                    <h3 className="text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
-                      Gemini
-                    </h3>
-                    <p className="text-[12px] leading-4 text-[var(--muted-foreground)]">
-                      Used by the Google model picker and Director text responses.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="mt-5 grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
-                  <label className="grid gap-2">
-                    <span className="text-[12px] font-medium leading-4 tracking-[0] text-[var(--muted-foreground)]">
-                      Gemini API key
-                    </span>
-                    <div className="flex h-11 items-center rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] px-3">
-                      <Input
-                        aria-label="Gemini API key"
-                        type={isKeyVisible ? 'text' : 'password'}
-                        value={geminiApiKeyDraft}
-                        onChange={(event) => onGeminiApiKeyChange(event.target.value)}
-                        placeholder="GEMINI_API_KEY"
-                        className="h-9 min-w-0 flex-1 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
-                      />
-                      <button
-                        type="button"
-                        aria-label={isKeyVisible ? 'Hide Gemini API key' : 'Show Gemini API key'}
-                        onClick={() => onKeyVisibleChange(!isKeyVisible)}
-                        className="ml-2 inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
-                      >
-                        {isKeyVisible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                      </button>
+              <article className="rounded-[20px] border border-[var(--border-soft)] bg-[var(--surface)] p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <span
+                      className="size-2 shrink-0 rounded-full"
+                      style={{ background: hasSavedGeminiKey ? 'rgb(86,206,160)' : 'var(--border-soft)' }}
+                    />
+                    <div>
+                      <h3 className="text-[14px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                        Gemini
+                      </h3>
+                      <p className="text-[12px] leading-4 text-[var(--muted-foreground)]">
+                        Google model picker and Director text responses.
+                      </p>
                     </div>
-                  </label>
-
-                  <Button
-                    type="button"
-                    onClick={onSave}
-                    disabled={isSaving || !hasDraftChanged}
-                    className="h-11 rounded-full px-4"
-                  >
-                    {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : <Check className="size-4" />}
-                    Save provider keys
-                  </Button>
-                </div>
-              </article>
-
-              <article className="rounded-[24px] border border-[var(--border-soft)] bg-[var(--surface)] p-5">
-                <div className="flex items-center gap-3">
-                  <div className="inline-flex size-10 items-center justify-center rounded-[14px] bg-[var(--surface2)]">
-                    <img src={claudeIcon} alt="" aria-hidden="true" className="size-6 object-contain" />
-                  </div>
-                  <div>
-                    <h3 className="text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
-                      Claude
-                    </h3>
-                    <p className="text-[12px] leading-4 text-[var(--muted-foreground)]">
-                      Used by the Claude model picker and Director text responses.
-                    </p>
                   </div>
                   <span
-                    className={[
-                      'ml-auto inline-flex h-7 items-center rounded-full border px-2.5 text-[11px] font-medium',
-                      hasSavedAnthropicKey
-                        ? 'border-[rgba(84,190,120,0.28)] bg-[rgba(84,190,120,0.12)] text-[rgb(147,220,169)]'
-                        : 'border-[var(--border-soft)] bg-[var(--surface2)] text-[var(--muted-foreground)]',
-                    ].join(' ')}
+                    className="text-[11px] font-medium"
+                    style={{ color: hasSavedGeminiKey ? 'rgb(135,210,165)' : 'var(--muted-foreground)' }}
                   >
-                    {hasSavedAnthropicKey ? 'Configured' : 'Missing key'}
+                    {hasSavedGeminiKey ? 'Connected' : 'Not set'}
                   </span>
                 </div>
 
-                <div className="mt-5 grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
-                  <label className="grid gap-2">
-                    <span className="text-[12px] font-medium leading-4 tracking-[0] text-[var(--muted-foreground)]">
-                      Anthropic API key
-                    </span>
-                    <div className="flex h-11 items-center rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] px-3">
-                      <Input
-                        aria-label="Anthropic API key"
-                        type={isAnthropicKeyVisible ? 'text' : 'password'}
-                        value={anthropicApiKeyDraft}
-                        onChange={(event) => onAnthropicApiKeyChange(event.target.value)}
-                        placeholder="ANTHROPIC_API_KEY"
-                        className="h-9 min-w-0 flex-1 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
-                      />
-                      <button
-                        type="button"
-                        aria-label={isAnthropicKeyVisible ? 'Hide Anthropic API key' : 'Show Anthropic API key'}
-                        onClick={() => onAnthropicKeyVisibleChange(!isAnthropicKeyVisible)}
-                        className="ml-2 inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
-                      >
-                        {isAnthropicKeyVisible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                      </button>
-                    </div>
-                  </label>
-
-                  <Button
-                    type="button"
-                    onClick={onSave}
-                    disabled={isSaving || !hasDraftChanged}
-                    className="h-11 rounded-full px-4"
-                  >
-                    {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : <Check className="size-4" />}
-                    Save provider keys
-                  </Button>
-                </div>
+                <label className="mt-4 grid gap-2">
+                  <span className="text-[11px] font-medium uppercase tracking-[0.04em] text-[var(--muted-foreground)]">
+                    API key
+                  </span>
+                  <div className="flex h-11 items-center rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] px-3">
+                    <Input
+                      aria-label="Gemini API key"
+                      type={isKeyVisible ? 'text' : 'password'}
+                      value={geminiApiKeyDraft}
+                      onChange={(event) => onGeminiApiKeyChange(event.target.value)}
+                      placeholder="GEMINI_API_KEY"
+                      className="h-9 min-w-0 flex-1 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
+                    />
+                    <button
+                      type="button"
+                      aria-label={isKeyVisible ? 'Hide Gemini API key' : 'Show Gemini API key'}
+                      onClick={() => onKeyVisibleChange(!isKeyVisible)}
+                      className="ml-2 inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
+                    >
+                      {isKeyVisible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                    </button>
+                  </div>
+                </label>
               </article>
+
+              <article className="rounded-[20px] border border-[var(--border-soft)] bg-[var(--surface)] p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <span
+                      className="size-2 shrink-0 rounded-full"
+                      style={{ background: hasSavedAnthropicKey ? 'rgb(86,206,160)' : 'var(--border-soft)' }}
+                    />
+                    <div>
+                      <h3 className="text-[14px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                        Claude
+                      </h3>
+                      <p className="text-[12px] leading-4 text-[var(--muted-foreground)]">
+                        Claude model picker and Director text responses.
+                      </p>
+                    </div>
+                  </div>
+                  <span
+                    className="text-[11px] font-medium"
+                    style={{ color: hasSavedAnthropicKey ? 'rgb(135,210,165)' : 'var(--muted-foreground)' }}
+                  >
+                    {hasSavedAnthropicKey ? 'Connected' : 'Not set'}
+                  </span>
+                </div>
+
+                <label className="mt-4 grid gap-2">
+                  <span className="text-[11px] font-medium uppercase tracking-[0.04em] text-[var(--muted-foreground)]">
+                    API key
+                  </span>
+                  <div className="flex h-11 items-center rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] px-3">
+                    <Input
+                      aria-label="Anthropic API key"
+                      type={isAnthropicKeyVisible ? 'text' : 'password'}
+                      value={anthropicApiKeyDraft}
+                      onChange={(event) => onAnthropicApiKeyChange(event.target.value)}
+                      placeholder="ANTHROPIC_API_KEY"
+                      className="h-9 min-w-0 flex-1 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
+                    />
+                    <button
+                      type="button"
+                      aria-label={isAnthropicKeyVisible ? 'Hide Anthropic API key' : 'Show Anthropic API key'}
+                      onClick={() => onAnthropicKeyVisibleChange(!isAnthropicKeyVisible)}
+                      className="ml-2 inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
+                    >
+                      {isAnthropicKeyVisible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                    </button>
+                  </div>
+                </label>
+              </article>
+
+              <div className="flex items-center justify-end gap-3 px-1">
+                {hasDraftChanged ? (
+                  <span className="text-[12px] text-[var(--muted-foreground)]">Unsaved changes</span>
+                ) : null}
+                <Button
+                  type="button"
+                  onClick={onSave}
+                  disabled={isSaving || !hasDraftChanged}
+                  className="h-10 rounded-full px-4"
+                >
+                  {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : <Check className="size-4" />}
+                  Save keys
+                </Button>
+              </div>
             </motion.section>
           ) : (
             <motion.section
@@ -12056,36 +12474,41 @@ function ProvidersWorkspace({
               transition={providerContentTransition}
               className="grid gap-4"
             >
-              <div className="flex flex-wrap items-center justify-between gap-4 px-1">
-                <div className="flex items-center gap-3">
-                  <div className="inline-flex size-11 items-center justify-center rounded-[16px] bg-[var(--surface2)]">
-                    <ImagePlus className="size-5 text-[var(--muted-foreground)]" />
-                  </div>
-                  <div>
-                    <h2 className="text-[16px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
-                      Codex image auth
-                    </h2>
-                    <p className="mt-1 text-[13px] leading-5 text-[var(--muted-foreground)]">
-                      {activeCodexAccount
-                        ? `Active account: ${activeCodexAccount.email || activeCodexAccount.accountId}`
-                        : 'No active Codex image account.'}
-                    </p>
-                  </div>
+              <div className="flex flex-wrap items-end justify-between gap-3 px-1">
+                <div>
+                  <h2 className="text-[13px] font-semibold uppercase tracking-[0.06em] text-[var(--muted-foreground)]">
+                    Codex image accounts
+                  </h2>
+                  <p className="mt-1.5 text-[13px] leading-5 text-[var(--foreground)]">
+                    {activeCodexAccount ? (
+                      <>
+                        <span className="text-[var(--muted-foreground)]">Active · </span>
+                        {activeCodexAccount.email || activeCodexAccount.accountId}
+                      </>
+                    ) : (
+                      <span className="text-[var(--muted-foreground)]">No active account selected.</span>
+                    )}
+                  </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    type="button"
-                    onClick={onRefreshCodexLimits}
-                    disabled={!hasCodexAccounts || isRefreshingCodexLimits}
-                    className="h-10 rounded-full px-3"
-                  >
-                    {isRefreshingCodexLimits ? (
-                      <LoaderCircle className="size-4 animate-spin" />
-                    ) : (
-                      <RotateCcw className="size-4" />
-                    )}
-                    Refresh limits
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        aria-label="Refresh"
+                        onClick={onRefreshCodexLimits}
+                        disabled={!hasCodexAccounts || isRefreshingCodexLimits}
+                        className="inline-flex size-10 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-40"
+                      >
+                        {isRefreshingCodexLimits ? (
+                          <LoaderCircle className="size-4 animate-spin" />
+                        ) : (
+                          <RotateCcw className="size-4" />
+                        )}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Refresh</TooltipContent>
+                  </Tooltip>
                   <Button
                     type="button"
                     onClick={onStartCodexOAuth}
@@ -12104,171 +12527,128 @@ function ProvidersWorkspace({
 
               {hasCodexAccounts ? (
                 <div className="grid gap-3">
-                  {codexImageAccounts.map((account) => {
+                  {orderedCodexAccounts.map(({ account, availability }) => {
                     const isActive = account.id === activeCodexImageAccountId;
-                    const isExpanded = expandedCodexAccountId === account.id;
                     const isAccountBusy = codexImageAccountActionId === account.id;
-                    const limits = getCodexProviderLimitSlots(account);
+                    const { slots, isFree, hasLimits, isUnavailable, isExhausted, resetsAt } = availability;
                     const accountLabel = account.email || account.accountId;
-                    const detailsId = `codex-account-details-${account.id}`;
+                    const isBlocked = isUnavailable || isExhausted;
+                    const isSelectable = !isActive && !isBlocked && !isAccountBusy;
+                    const statusColor = account.limitsError
+                      ? 'rgb(232,128,128)'
+                      : isUnavailable
+                        ? 'var(--border-soft)'
+                      : isExhausted
+                        ? 'rgb(232,179,90)'
+                        : isActive
+                          ? 'var(--accent)'
+                          : 'rgb(86,206,160)';
                     return (
                       <article
                         key={account.id}
+                        title={account.limitsError || undefined}
                         className={[
-                          'overflow-hidden rounded-[24px] border bg-[var(--surface)] transition-colors',
-                          isActive ? 'border-[rgba(65,130,230,0.7)]' : 'border-[var(--border-soft)]',
+                          'flex items-center gap-3 rounded-[20px] border px-4 py-3.5 transition-[border-color,background-color,opacity,filter] duration-200',
+                          isBlocked ? 'bg-[rgba(15,16,16,0.36)] opacity-[0.55] saturate-[0.55]' : '',
+                          isActive
+                            ? 'border-[rgba(65,130,230,0.55)]'
+                            : isSelectable
+                              ? 'border-[var(--border-soft)] hover:border-[rgba(65,130,230,0.4)]'
+                              : 'border-[var(--border-soft)]',
                         ].join(' ')}
                       >
-                        <div className="grid gap-3 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
-                          <button
-                            type="button"
-                            aria-expanded={isExpanded}
-                            aria-controls={detailsId}
-                            aria-label={`${isExpanded ? 'Collapse' : 'Expand'} Codex image account ${accountLabel}`}
-                            onClick={() =>
-                              setExpandedCodexAccountId((current) => (current === account.id ? null : account.id))
-                            }
-                            className="min-w-0 rounded-[18px] text-left outline-none transition-colors hover:bg-white/5 focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-                          >
-                            <div className="flex min-w-0 items-center gap-3 px-3 py-2">
-                              <div className="inline-flex size-10 shrink-0 items-center justify-center rounded-[14px] bg-[var(--surface2)]">
-                                {isAccountBusy ? (
-                                  <LoaderCircle className="size-4 animate-spin text-[var(--muted-foreground)]" />
-                                ) : isActive ? (
-                                  <Check className="size-4 text-[rgb(147,220,169)]" />
-                                ) : (
-                                  <KeyRound className="size-4 text-[var(--muted-foreground)]" />
-                                )}
-                              </div>
-                              <div className="min-w-0 flex-1">
-                                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                                  <h3 className="max-w-full truncate text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
-                                    {accountLabel}
-                                  </h3>
-                                  {isActive ? (
-                                    <span className="inline-flex h-6 shrink-0 items-center rounded-full border border-[rgba(65,130,230,0.42)] bg-[rgba(65,130,230,0.14)] px-2 text-[11px] font-medium text-[rgb(145,184,244)]">
-                                      Active
-                                    </span>
-                                  ) : null}
-                                </div>
-                                <div className="mt-2 flex flex-wrap gap-2">
-                                  <CodexProviderLimitChip label="5h" limit={limits.fiveHour} />
-                                  <CodexProviderLimitChip label="Weekly" limit={limits.weekly} />
-                                  <CodexProviderLimitChip label="Monthly" limit={limits.monthly} />
-                                </div>
-                              </div>
-                              <ChevronDown
-                                className={[
-                                  'size-4 shrink-0 text-[var(--muted-foreground)] transition-transform duration-200',
-                                  isExpanded ? 'rotate-180' : 'rotate-0',
-                                ].join(' ')}
-                              />
+                        <button
+                          type="button"
+                          aria-label={
+                            isActive
+                              ? `Active Codex image account ${accountLabel}`
+                              : `Use Codex image account ${accountLabel}`
+                          }
+                          aria-pressed={isActive}
+                          disabled={!isSelectable}
+                          onClick={() => onSelectCodexImageAccount(account.id)}
+                          className="flex min-w-0 flex-1 items-center gap-3 rounded-[14px] text-left outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] disabled:cursor-default"
+                        >
+                          {isAccountBusy ? (
+                            <LoaderCircle className="size-3 shrink-0 animate-spin text-[var(--muted-foreground)]" />
+                          ) : (
+                            <span
+                              className="size-2 shrink-0 rounded-full"
+                              style={{ background: statusColor }}
+                            />
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <h3 className="truncate text-[14px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                                {accountLabel}
+                              </h3>
+                              {isActive ? (
+                                <span className="shrink-0 text-[11px] font-medium text-[rgb(145,184,244)]">
+                                  Active
+                                </span>
+                              ) : null}
+                              {isUnavailable ? (
+                                <span className="shrink-0 text-[11px] font-medium text-[var(--muted-foreground)]">
+                                  {hasLimits ? 'Unavailable' : 'No limits'}
+                                </span>
+                              ) : null}
                             </div>
-                          </button>
-
-                          <div className="flex flex-wrap items-center justify-end gap-2">
-                            {isActive ? (
-                              <span className="inline-flex h-9 items-center rounded-full border border-[rgba(84,190,120,0.28)] bg-[rgba(84,190,120,0.12)] px-3 text-[12px] font-medium text-[rgb(147,220,169)]">
-                                In use
-                              </span>
-                            ) : (
-                              <button
-                                type="button"
-                                aria-label={`Use Codex image account ${accountLabel}`}
-                                onClick={() => onSelectCodexImageAccount(account.id)}
-                                disabled={isAccountBusy}
-                                className="inline-flex h-9 items-center gap-2 rounded-full border border-[rgba(65,130,230,0.48)] bg-[rgba(65,130,230,0.14)] px-3 text-[12px] font-medium text-[rgb(170,203,255)] transition-colors hover:bg-[rgba(65,130,230,0.2)] disabled:opacity-60"
-                              >
-                                {isAccountBusy ? <LoaderCircle className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
-                                Use account
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              aria-label={`Remove Codex image account ${accountLabel}`}
-                              onClick={() => onRemoveCodexImageAccount(account.id)}
-                              disabled={isAccountBusy}
-                              className="inline-flex size-9 shrink-0 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[var(--surface2)] text-[var(--muted-foreground)] transition-colors hover:border-[rgba(190,58,58,0.45)] hover:bg-[rgba(190,58,58,0.12)] hover:text-[rgb(255,154,154)] disabled:opacity-60"
+                            <div
+                              className={[
+                                'mt-2.5 grid gap-x-5',
+                                isFree ? 'grid-cols-3' : 'grid-cols-2',
+                              ].join(' ')}
                             >
-                              {isAccountBusy ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                            </button>
+                              <CodexProviderLimitMeter label="5h" kind="five-hour" limit={slots.fiveHour} />
+                              <CodexProviderLimitMeter label="Weekly" kind="weekly" limit={slots.weekly} />
+                              {isFree ? (
+                                <CodexProviderLimitMeter label="Monthly" kind="monthly" limit={slots.monthly} />
+                              ) : null}
+                            </div>
                           </div>
-                        </div>
-
-                        <AnimatePresence initial={false}>
-                          {isExpanded ? (
-                            <motion.div
-                              id={detailsId}
-                              initial={{ height: 0, opacity: 0, filter: 'blur(6px)' }}
-                              animate={{ height: 'auto', opacity: 1, filter: 'blur(0px)' }}
-                              exit={{ height: 0, opacity: 0, filter: 'blur(6px)' }}
-                              transition={codexAccountDetailsTransition}
-                              className="overflow-hidden border-t border-[var(--border-soft)]"
-                            >
-                              <div className="grid gap-4 p-4 pt-3">
-                                {account.limitsError ? (
-                                  <div className="flex items-start gap-2 rounded-[16px] border border-[rgba(190,58,58,0.24)] bg-[rgba(190,58,58,0.1)] px-3 py-2 text-[12px] leading-5 text-[rgb(255,174,174)]">
-                                    <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-                                    <span>{account.limitsError}</span>
-                                  </div>
-                                ) : null}
-
-                                <div className="grid gap-2 text-[12px] leading-4 text-[var(--muted-foreground)] sm:grid-cols-2 lg:grid-cols-4">
-                                  <span className="rounded-full bg-[var(--surface2)] px-3 py-2">
-                                    Plan: {account.planType || 'Unknown'}
-                                  </span>
-                                  <span className="rounded-full bg-[var(--surface2)] px-3 py-2">
-                                    Account: {account.accountId}
-                                  </span>
-                                  <span className="rounded-full bg-[var(--surface2)] px-3 py-2">
-                                    Limits: {formatCodexProviderTimestamp(account.limitsLastCheckedAt)}
-                                  </span>
-                                  <span className="rounded-full bg-[var(--surface2)] px-3 py-2">
-                                    Token: {formatCodexProviderTimestamp(account.lastRefresh)}
-                                  </span>
-                                </div>
-
-                                <div className="grid gap-3 lg:grid-cols-3">
-                                  <CodexProviderLimitPanel title="5h Limit" limit={limits.fiveHour} />
-                                  <CodexProviderLimitPanel title="Weekly Limit" limit={limits.weekly} />
-                                  <CodexProviderLimitPanel title="Monthly Limit" limit={limits.monthly} />
-                                </div>
-
-                                {limits.other.length > 0 ? (
-                                  <div className="grid gap-2">
-                                    <h4 className="text-[12px] font-medium leading-4 text-[var(--muted-foreground)]">
-                                      Other Codex buckets
-                                    </h4>
-                                    <div className="grid gap-3 lg:grid-cols-2">
-                                      {limits.other.map((limit) => (
-                                        <CodexProviderLimitPanel
-                                          key={limit.id}
-                                          title={limit.title || limit.sourceLabel}
-                                          limit={limit}
-                                        />
-                                      ))}
-                                    </div>
-                                  </div>
-                                ) : null}
-                              </div>
-                            </motion.div>
+                          {isExhausted ? (
+                            <div className="flex shrink-0 flex-col items-end gap-0.5">
+                              <span className="text-[10px] font-semibold uppercase tracking-[0.06em] text-[var(--muted-foreground)]">
+                                Resets in
+                              </span>
+                              <CodexResetCountdown resetsAt={resetsAt} />
+                            </div>
                           ) : null}
-                        </AnimatePresence>
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Remove Codex image account ${accountLabel}`}
+                          onClick={() => onRemoveCodexImageAccount(account.id)}
+                          disabled={isAccountBusy}
+                          className="inline-flex size-9 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:text-[rgb(255,154,154)] disabled:opacity-60"
+                        >
+                          {isAccountBusy ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                        </button>
                       </article>
                     );
                   })}
                 </div>
               ) : (
-                <div className="flex min-h-[220px] flex-col items-center justify-center rounded-[24px] border border-dashed border-[var(--border-soft)] bg-[var(--surface)] px-6 text-center">
-                  <div className="inline-flex size-12 items-center justify-center rounded-[18px] bg-[var(--surface2)]">
-                    <Gauge className="size-5 text-[var(--muted-foreground)]" />
-                  </div>
-                  <h3 className="mt-4 text-[15px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
+                <div className="flex min-h-[200px] flex-col items-center justify-center rounded-[20px] border border-dashed border-[var(--border-soft)] px-6 text-center">
+                  <h3 className="text-[14px] font-medium leading-5 tracking-[0] text-[var(--foreground)]">
                     No Codex image accounts
                   </h3>
-                  <p className="mt-2 max-w-[420px] text-[13px] leading-5 text-[var(--muted-foreground)]">
-                    Connect a ChatGPT account with the Codex OAuth flow to generate images and monitor account limits.
+                  <p className="mt-2 max-w-[400px] text-[13px] leading-5 text-[var(--muted-foreground)]">
+                    Connect a ChatGPT account to generate images and track usage limits.
                   </p>
+                  <Button
+                    type="button"
+                    onClick={onStartCodexOAuth}
+                    disabled={isStartingCodexOAuth}
+                    className="mt-5 h-10 rounded-full px-4"
+                  >
+                    {isStartingCodexOAuth ? (
+                      <LoaderCircle className="size-4 animate-spin" />
+                    ) : (
+                      <Plus className="size-4" />
+                    )}
+                    Add account
+                  </Button>
                 </div>
               )}
             </motion.section>
@@ -12342,12 +12722,14 @@ function SortableRefFolderGridCard({
 
 function SortableRefFolderListRow({
   folder,
+  onDoubleClick,
   onEdit,
   onDeleteImage,
   onReorderImages,
   contextMenu,
 }: {
   folder: { id: string; title: string; images: SavedReferenceImage[] };
+  onDoubleClick: () => void;
   onEdit: (imageId: string) => void;
   onDeleteImage: (imageId: string) => void;
   onReorderImages: (newIds: string[]) => void;
@@ -12368,7 +12750,20 @@ function SortableRefFolderListRow({
     >
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <div className="group/card relative grid" style={{ gridTemplateColumns: '360px 1fr', gap: '16px', height: '276px' }}>
+          <div
+            role="button"
+            tabIndex={0}
+            aria-label={folder.title}
+            onDoubleClick={onDoubleClick}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                onDoubleClick();
+              }
+            }}
+            className="group/card relative grid"
+            style={{ gridTemplateColumns: '360px 1fr', gap: '16px', height: '276px' }}
+          >
             <div className="relative flex h-full items-center justify-center overflow-hidden rounded-2xl bg-[var(--surface2)] border border-[var(--border-soft)]">
               {cover ? (
                 <img src={cover.previewUrl} alt={folder.title} className="max-h-full max-w-full object-contain transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover/card:scale-[1.03]" draggable={false} />
@@ -12530,10 +12925,20 @@ function SortableRefImageListRow({
       <ContextMenu>
         <ContextMenuTrigger asChild>
           <div
+            role="button"
+            tabIndex={0}
+            aria-label={image.title || deriveReferenceAttachmentTitle(image.name)}
+            data-selected={isSelected ? 'true' : 'false'}
             className="group/card relative grid cursor-pointer"
             style={{ gridTemplateColumns: '360px 1fr', gap: '16px' }}
             onClick={onClick}
             onDoubleClick={onDoubleClick}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                onClick();
+              }
+            }}
           >
             <div className={[
               'relative overflow-hidden rounded-2xl bg-[var(--surface2)] border transition-colors',
@@ -12885,11 +13290,11 @@ function ReferencesWorkspace({
   folders: referenceFolders,
   references,
   route,
-  sidebarWidth,
+  selectedFolderId,
+  onSelectedFolderChange,
+  newFolderRequestId,
   isSidebarCollapsed,
   onExpandSidebar,
-  isSidebarResizing,
-  onStartSidebarResize,
   seedFiles,
   onSeedFilesConsumed,
   onCreateFolder,
@@ -12902,16 +13307,15 @@ function ReferencesWorkspace({
   onDeleteImageFromFolder,
   onDeleteReference,
   onExportReference,
-  onImportReference,
 }: {
   folders: ReferenceFolderRecord[];
   references: SavedReferenceImage[];
   route: ReferenceLibraryRoute;
-  sidebarWidth: number;
+  selectedFolderId: string | null;
+  onSelectedFolderChange: (folderId: string | null) => void;
+  newFolderRequestId: number;
   isSidebarCollapsed: boolean;
   onExpandSidebar: () => void;
-  isSidebarResizing: boolean;
-  onStartSidebarResize: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   seedFiles: File[];
   onSeedFilesConsumed: () => void;
   onCreateFolder: (
@@ -12928,7 +13332,6 @@ function ReferencesWorkspace({
   onDeleteImageFromFolder: (args: { imageId: string; folderId: string; category: ReferenceLibraryRoute; folderTitle: string }) => Promise<void>;
   onDeleteReference: (reference: SavedReferenceImage) => void;
   onExportReference: (reference: SavedReferenceImage) => void;
-  onImportReference: () => void;
 }) {
   const [openFolderId, setOpenFolderId] = useState<string | null>(null);
   const [isNewFolderDialogOpen, setIsNewFolderDialogOpen] = useState(false);
@@ -12942,7 +13345,7 @@ function ReferencesWorkspace({
   const [isMovePopoverOpen, setIsMovePopoverOpen] = useState(false);
   const [imageEditTarget, setImageEditTarget] = useState<{ imageId: string; folderId: string; title: string; description: string } | null>(null);
   const [animatedTitleText, setAnimatedTitleText] = useState(referenceRouteHeaderLabels[route]);
-  const [refViewMode, setRefViewMode] = useState<'grid' | 'list'>('grid');
+  const [refViewMode, setRefViewMode] = useState<'grid' | 'list'>('list');
   const [refGridZoom, setRefGridZoom] = useState(50);
   const [orderVersion, setOrderVersion] = useState(0);
   const refDndSensors = useSensors(
@@ -12952,6 +13355,14 @@ function ReferencesWorkspace({
   const hasInitializedRouteRef = useRef(false);
   const dragDepthRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const selectOpenFolder = useCallback(
+    (folderId: string | null) => {
+      setOpenFolderId(folderId);
+      onSelectedFolderChange(folderId);
+    },
+    [onSelectedFolderChange]
+  );
 
   const toggleImageSelection = useCallback((imageId: string) => {
     setSelectedImageIds((current) =>
@@ -13031,18 +13442,6 @@ function ReferencesWorkspace({
   );
   const displayFolder = openFolder ?? topLevelFolders[0] ?? null;
   const activeFolderId = openFolderId ?? displayFolder?.id ?? null;
-  const activeSidebarFolderId = useMemo(() => {
-    if (!activeFolderId) {
-      return topLevelFolders[0]?.id ?? null;
-    }
-
-    let currentFolder = folders.find((folder) => folder.id === activeFolderId) ?? null;
-    while (currentFolder?.parentFolderId) {
-      currentFolder = folders.find((folder) => folder.id === currentFolder?.parentFolderId) ?? null;
-    }
-
-    return currentFolder?.id ?? activeFolderId;
-  }, [activeFolderId, folders, topLevelFolders]);
   const openFolderPath = useMemo(() => {
     if (!displayFolder) {
       return [] as typeof folders;
@@ -13070,17 +13469,29 @@ function ReferencesWorkspace({
     setSelectedImageIds([]);
   }, [openFolderId]);
 
+  useEffect(() => {
+    if (selectedFolderId !== openFolderId) {
+      setOpenFolderId(selectedFolderId);
+    }
+  }, [openFolderId, selectedFolderId]);
+
   useLayoutEffect(() => {
     if (!openFolder && topLevelFolders.length > 0) {
-      setOpenFolderId(topLevelFolders[0].id);
+      selectOpenFolder(topLevelFolders[0].id);
     }
-  }, [openFolder, topLevelFolders]);
+  }, [openFolder, selectOpenFolder, topLevelFolders]);
 
   useEffect(() => {
     if (seedFiles.length > 0) {
       setIsNewFolderDialogOpen(true);
     }
   }, [seedFiles]);
+
+  useEffect(() => {
+    if (newFolderRequestId > 0) {
+      setIsNewFolderDialogOpen(true);
+    }
+  }, [newFolderRequestId]);
 
   useEffect(() => {
     if (!hasInitializedRouteRef.current) {
@@ -13097,8 +13508,9 @@ function ReferencesWorkspace({
     setIsGroupDialogOpen(false);
     setIsMovePopoverOpen(false);
     setAnimatedTitleText(referenceRouteHeaderLabels[route]);
-    setRefViewMode('grid');
-  }, [route]);
+    setRefViewMode('list');
+    onSelectedFolderChange(null);
+  }, [onSelectedFolderChange, route]);
 
   useEffect(() => {
     if (!displayFolder) {
@@ -13117,7 +13529,7 @@ function ReferencesWorkspace({
     setIsSaving(true);
     try {
       const folder = await onCreateFolder(title, route);
-      setOpenFolderId(folder.id);
+      selectOpenFolder(folder.id);
       if (seedFiles.length > 0) {
         const folderImages = references.filter(
           (r) => (r.collectionId ?? r.environmentId) === folder.id
@@ -13410,7 +13822,7 @@ function ReferencesWorkspace({
         className={[
           'fixed top-[8px] z-40 flex items-center gap-2',
           'transition-[left] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]',
-          isSidebarCollapsed ? 'left-3' : 'left-[272px]',
+          isSidebarCollapsed ? 'left-3' : 'left-[332px]',
         ].join(' ')}
       >
         <AnimatePresence mode="wait" initial={false}>
@@ -13438,7 +13850,7 @@ function ReferencesWorkspace({
                 type="button"
                 aria-label={`Voltar para ${parentFolder.title}`}
                 onClick={() => {
-                  setOpenFolderId(parentFolder.id);
+                  selectOpenFolder(parentFolder.id);
                 }}
                 className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
               >
@@ -13513,110 +13925,6 @@ function ReferencesWorkspace({
           ) : null}
         </div>
       </header>
-
-      <AnimatePresence initial={false}>
-        <motion.div
-          key={`reference-sidebar-${route}`}
-          data-testid="reference-sidebar-shell"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-          className={[
-            'fixed bottom-0 right-0 top-0 z-20 overflow-hidden border-l border-[var(--border-soft)] bg-[var(--surface)] will-change-[width]',
-            isSidebarResizing ? '' : 'transition-[width] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]',
-          ].join(' ')}
-          style={{ width: sidebarWidth, minWidth: MIN_SCENES_SIDEBAR_WIDTH }}
-        >
-          <button
-            type="button"
-            aria-label="Resize references sidebar"
-            onPointerDown={onStartSidebarResize}
-            className="absolute bottom-0 left-0 top-0 z-30 w-4 -translate-x-1/2 cursor-col-resize touch-none bg-transparent"
-          />
-          <div data-testid="reference-sidebar" className="flex h-full w-full flex-col overflow-hidden bg-[var(--surface)]">
-            <div className="border-b border-[var(--border-soft)] p-4">
-              <div className="flex items-center justify-end gap-2">
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      aria-label="Import references"
-                      onClick={onImportReference}
-                      className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border-soft)] bg-[rgba(32,32,33,0.72)] text-[var(--muted-foreground)] transition-colors hover:bg-white/6 hover:text-[var(--foreground)]"
-                    >
-                      <Upload className="size-4" />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Import references</TooltipContent>
-                </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      aria-label="Create reference folder"
-                      onClick={() => setIsNewFolderDialogOpen(true)}
-                      className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color-mix(in_srgb,var(--accent)_58%,transparent)] bg-[color-mix(in_srgb,var(--accent)_18%,rgba(32,32,33,0.82))] text-white transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_28%,rgba(32,32,33,0.88))]"
-                    >
-                      <FolderPlus className="size-4" />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Create reference folder</TooltipContent>
-                </Tooltip>
-              </div>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto px-2 py-3">
-              <div className="px-3 text-[11px] font-medium uppercase tracking-[0] text-[var(--muted-foreground)]">
-                {referenceRouteLabels[route]}
-              </div>
-              <div className="mt-2 space-y-1">
-                {topLevelFolders.map((topLevelFolder) => {
-                  const isActive = topLevelFolder.id === activeSidebarFolderId;
-                  const cover = topLevelFolder.images[0];
-                  return (
-                    <ContextMenu key={topLevelFolder.id}>
-                      <ContextMenuTrigger asChild>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setOpenFolderId(topLevelFolder.id);
-                          }}
-                          className={[
-                            'flex min-h-10 w-full items-center rounded-[12px] px-3 text-left text-[13px] transition-colors',
-                            isActive
-                              ? 'bg-[var(--surface2)] text-[var(--foreground)]'
-                              : 'text-[var(--muted-foreground)] hover:bg-white/6 hover:text-[var(--foreground)]',
-                          ].join(' ')}
-                        >
-                          <span className="truncate">{topLevelFolder.title}</span>
-                        </button>
-                      </ContextMenuTrigger>
-                      <ContextMenuContent>
-                        <ContextMenuItem onClick={() => setRenameFolderTarget({ id: topLevelFolder.id, title: topLevelFolder.title })}>Renomear...</ContextMenuItem>
-                        {cover ? <ContextMenuItem onClick={() => onExportReference(cover)}>Duplicar...</ContextMenuItem> : null}
-                        {cover ? <ContextMenuSeparator /> : null}
-                        {cover ? (
-                          <ContextMenuItem
-                            className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
-                            onClick={() => onDeleteReference(cover)}
-                          >
-                            Excluir pasta
-                          </ContextMenuItem>
-                        ) : null}
-                      </ContextMenuContent>
-                    </ContextMenu>
-                  );
-                })}
-                {topLevelFolders.length === 0 ? (
-                  <p className="px-3 pt-2 text-[13px] leading-5 text-[var(--muted-foreground)]">
-                    Crie uma pasta para organizar suas referências visuais.
-                  </p>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        </motion.div>
-      </AnimatePresence>
 
       <motion.section
         initial={{ opacity: 0, y: 6, filter: 'blur(6px)' }}
@@ -13732,6 +14040,7 @@ function ReferencesWorkspace({
                                 <SortableRefFolderListRow
                                   key={childFolder.id}
                                   folder={{ ...childFolder, images: orderedImages }}
+                                  onDoubleClick={() => openMetadataDialog(childFolder.id)}
                                   onEdit={(imageId) => {
                                     const img = childFolder.images.find((i) => i.id === imageId);
                                     if (img) setImageEditTarget({ imageId, folderId: childFolder.id, title: img.title, description: img.description ?? '' });
@@ -14016,7 +14325,7 @@ function ReferencesWorkspace({
                         <ContextMenuItem
                           className="text-[rgb(229,112,112)] data-[highlighted]:bg-[rgba(190,58,58,0.18)] data-[highlighted]:text-[rgb(245,178,178)]"
                           onClick={() => {
-                            setOpenFolderId(parentFolder?.id ?? null);
+                            selectOpenFolder(parentFolder?.id ?? null);
                             onDeleteReference(representativeRef);
                           }}
                         >

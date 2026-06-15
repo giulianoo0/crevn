@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateProviderSettings: (payload: unknown) => ipcRenderer.invoke('app:updateProviderSettings', payload),
   checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
   installUpdate: () => ipcRenderer.invoke('app:installUpdate'),
+  enhancePrompt: (payload: unknown) => ipcRenderer.invoke('app:enhancePrompt', payload),
   listGeneratedImages: (threadId: string) => ipcRenderer.invoke('generation:listGeneratedImages', threadId),
   listProjectsWithThreads: () => ipcRenderer.invoke('generation:listProjectsWithThreads'),
   listReferences: () => ipcRenderer.invoke('generation:listReferences'),

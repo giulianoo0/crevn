@@ -38,7 +38,7 @@ import {
   COMMAND_PRIORITY_CRITICAL,
   KEY_ENTER_COMMAND,
 } from 'lexical';
-import { MentionNode, $createMentionNode } from './mention-node';
+import { MentionNode, $createMentionNode, $isMentionNode } from './mention-node';
 import { MentionPlugin } from './mention-plugin';
 
 // ---------------------------------------------------------------------------
@@ -80,6 +80,7 @@ function splitMentionSelectorToken(token: string) {
 export type PromptComposerHandle = {
   focus: () => void;
   clear: () => void;
+  getText: () => string;
   setText: (text: string, mentionCandidates?: MentionCandidate[]) => void;
   insertMention: (
     id: string,
@@ -350,6 +351,16 @@ const ComposerInner = forwardRef<PromptComposerHandle, PromptComposerProps>(
           editor.update(() => {
             const root = $getRoot();
             root.clear();
+          });
+        },
+        getText: () => {
+          return editor.getEditorState().read(() => {
+            const root = $getRoot();
+            let text = '';
+            for (const node of root.getAllTextNodes()) {
+              text += $isMentionNode(node) ? `@${node.getMentionTitle()}` : node.getTextContent();
+            }
+            return text;
           });
         },
         setText: (text: string, nextMentionCandidates = mentionCandidates) => {

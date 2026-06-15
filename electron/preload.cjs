@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   refreshCodexImageAccountLimits: () => ipcRenderer.invoke('app:refreshCodexImageAccountLimits'),
   checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
   installUpdate: () => ipcRenderer.invoke('app:installUpdate'),
+  enhancePrompt: (payload) => ipcRenderer.invoke('app:enhancePrompt', payload),
   listGeneratedImages: (threadId) => ipcRenderer.invoke('generation:listGeneratedImages', threadId),
   listProjectsWithThreads: () => ipcRenderer.invoke('generation:listProjectsWithThreads'),
   listReferences: () => ipcRenderer.invoke('generation:listReferences'),

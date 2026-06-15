@@ -633,6 +633,9 @@ function getElectronApi() {
       }),
       checkForUpdates: async () => fallbackUpdateStatus,
       installUpdate: async () => fallbackUpdateStatus,
+      enhancePrompt: async () => {
+        throw new Error('Electron API bridge is unavailable.');
+      },
       listGeneratedImages: async () => [],
       listProjectsWithThreads: async () => [],
       listReferences: async () => [],
@@ -831,6 +834,10 @@ export function checkForUpdates() {
 
 export function installUpdate() {
   return getElectronApi().installUpdate() as Promise<UpdateStatus>;
+}
+
+export function enhancePrompt(payload: { prompt: string; referenceNames?: string[] }) {
+  return getElectronApi().enhancePrompt(payload) as Promise<{ text: string }>;
 }
 
 export function subscribeToUpdateStatus(listener: (event: UpdateStatus) => void) {
