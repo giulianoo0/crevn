@@ -20,6 +20,7 @@ describe('MessageResponse', () => {
     expect(streamdownRender).toHaveBeenCalledWith(
       expect.objectContaining({
         isAnimating: true,
+        className: expect.stringContaining('min-w-0'),
       })
     );
     expect(streamdownRender.mock.calls.at(-1)?.[0]).not.toHaveProperty('animated');

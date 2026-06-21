@@ -10014,6 +10014,7 @@ function DirectorMessageList({
   const isPinnedToBottomRef = useRef(true);
   const pendingStreamSnapshotsRef = useRef(new Map<string, DirectorMessageStreamSnapshot>());
   const streamSnapshotFrameRef = useRef<number | null>(null);
+  const prevChatIdRef = useRef<string | null | undefined>(undefined);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [displayMessages, setDisplayMessages] = useState(messages);
   const rowHeight = useDynamicRowHeight({
@@ -10035,8 +10036,11 @@ function DirectorMessageList({
   );
 
   useEffect(() => {
-    isPinnedToBottomRef.current = true;
-    setIsAtBottom(true);
+    if (prevChatIdRef.current !== chatId) {
+      prevChatIdRef.current = chatId;
+      isPinnedToBottomRef.current = true;
+      setIsAtBottom(true);
+    }
 
     if (!chatId) {
       setDisplayMessages(messages);
@@ -10181,7 +10185,7 @@ function DirectorMessageList({
         rowProps={rowProps}
         overscanCount={4}
         defaultHeight={720}
-        className="h-full overscroll-contain"
+        className="h-full overscroll-contain show-scrollbar"
         style={{ height: '100%' }}
       />
       <AnimatePresence>

@@ -62,9 +62,26 @@ Notas importantes:
 - **Nem todo episódio tem todos os beats**, e um episódio infantil de ~11 min comprime vários. O objetivo do rótulo não é forçar a estrutura — é **enxergar o formato** e achar os buracos. Os dois pares que mais importam: o **incidente incitante** e o **clímax** têm que conversar (o clímax resolve o problema que o incidente abriu); e toda cena boa **muda alguma coisa**.
 - Se uma cena não muda nada nem cumpre função clara, marque como candidata a corte ou fusão — isso é um achado valioso do mapa.
 
-### O que registrar por cena
+### Mapa de cenas — schema padrão (SEMPRE)
 
-Para cada cena, capture: **número e tipo (função)** · **local/hora** (INT/EXT, dia/noite) · **quem aparece** · **objetivo da cena** (o que ela precisa entregar) · **conflito/tensão** · **o que muda** (a virada da cena) · e, se o projeto tiver, o **estado de energia/clima** (ex.: medidor, paleta de cor do momento).
+O mapa de cenas é uma **tabela fixa**, com estas **7 colunas, nesta ordem e com estes nomes exatos** — nunca mude, nunca remova, nunca adicione coluna:
+
+```
+| # | Tipo (função) | Local / Hora | Quem | Objetivo da cena | Conflito | O que muda |
+```
+
+O que vai em cada coluna:
+- **#** — número da cena, em ordem.
+- **Tipo (função)** — o rótulo de função narrativa (ESTABELECIMENTO, INCIDENTE INCITANTE, CLÍMAX, etc.).
+- **Local / Hora** — INT./EXT. LOCAL — DIA/NOITE.
+- **Quem** — personagens que aparecem na cena (use "—" se nenhum).
+- **Objetivo da cena** — o que a cena precisa entregar.
+- **Conflito** — a tensão da cena (use "—" se não houver).
+- **O que muda** — a virada da cena; o que está diferente ao final dela.
+
+**Regra de saída obrigatória:** sempre que o usuário pedir a tabela/mapa de cenas **ou qualquer output** (resumo, diagnóstico, brainstorm de uma cena, etc.), **inclua também este mapa de cenas completo**, com exatamente este schema. O mapa acompanha toda entrega — é a referência fixa do episódio.
+
+Se o projeto tiver um estado extra que valha registrar (medidor de energia, paleta de cor do momento), trate como anotação **fora** da tabela; a tabela permanece com as 7 colunas fixas.
 
 ### Modelo do resumo executivo
 
@@ -207,6 +224,7 @@ Regras do formato:
 - [ ] Sons/esforços escritos; equilíbrio entre fala e ação visual.
 - [ ] Continuidade lógica entre as cenas (nada depende de algo não plantado).
 - [ ] Saída em **um único bloco de código Markdown** no chat.
+- [ ] O **mapa de cenas** (7 colunas fixas) acompanha esta e qualquer outra entrega.
 
 ## Armadilhas comuns
 
@@ -217,3 +235,4 @@ Regras do formato:
 - **Tirar o robótico e tirar o exagero junto.** O alvo é fala natural **e** exagerada na medida — não fala "realista" sem graça.
 - **Gerar arquivo na Fase 3.** A reescrita final vai em bloco de código no chat, como o usuário pediu.
 - **Encher de diálogo.** Deixe a ação visual carregar parte; nem tudo precisa virar fala.
+- **Entregar output sem o mapa de cenas.** Qualquer saída leva junto o mapa completo, com as 7 colunas fixas (`# | Tipo (função) | Local / Hora | Quem | Objetivo da cena | Conflito | O que muda`). Não altere o schema.
