@@ -7,7 +7,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type UIEvent as ReactUIEvent,
   type ErrorInfo,
   type FormEvent,
   type DragEvent as ReactDragEvent,
@@ -59,6 +58,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  FileText,
   FolderPlus,
   Folder,
   GripVertical,
@@ -312,7 +312,6 @@ const generationModeOptions = [
 ] as const;
 
 const DIRECTOR_MESSAGE_CACHE_LIMIT = 3;
-const DIRECTOR_STREAM_FLUSH_INTERVAL_MS = 16;
 
 // Each angle carries a `prompt`: a precise, AI-facing cinematographic directive
 // written in standard film terminology. It states where the camera sits, how the
@@ -1036,6 +1035,8 @@ type ComposerReferenceImage = {
   bytesBase64: string;
   previewUrl: string;
   size: number;
+  attachmentKind?: 'image' | 'document';
+  text?: string;
   sourceImageId?: string;
   shouldRevokePreviewUrl?: boolean;
 };
@@ -1052,6 +1053,41 @@ type SavedReferenceImage = ComposerReferenceImage & {
   parentFolderId?: string;
   section?: 'primary' | 'angles';
 };
+
+const DIRECTOR_DOCUMENT_EXTENSIONS = new Set(['pdf', 'md', 'markdown', 'txt', 'text']);
+
+function getFileExtension(name: string) {
+  const match = /\.([^.]+)$/.exec(name.trim().toLowerCase());
+  return match?.[1] ?? '';
+}
+
+function normalizeFileMimeType(file: File) {
+  const extension = getFileExtension(file.name);
+  if (file.type) return file.type;
+  if (extension === 'pdf') return 'application/pdf';
+  if (extension === 'md' || extension === 'markdown') return 'text/markdown';
+  if (extension === 'txt' || extension === 'text') return 'text/plain';
+  return 'application/octet-stream';
+}
+
+function isDirectorDocumentFile(file: File) {
+  const mimeType = normalizeFileMimeType(file);
+  const extension = getFileExtension(file.name);
+  return mimeType === 'application/pdf' || mimeType.startsWith('text/') || DIRECTOR_DOCUMENT_EXTENSIONS.has(extension);
+}
+
+function isComposerImageAttachment(reference: Pick<ComposerReferenceImage, 'mimeType' | 'attachmentKind'>) {
+  return reference.attachmentKind !== 'document' && reference.mimeType.startsWith('image/');
+}
+
+function isComposerDocumentAttachment(reference: Pick<ComposerReferenceImage, 'mimeType' | 'attachmentKind'>) {
+  return reference.attachmentKind === 'document' || !reference.mimeType.startsWith('image/');
+}
+
+function shouldReadDirectorDocumentText(mimeType: string, name: string) {
+  const extension = getFileExtension(name);
+  return mimeType.startsWith('text/') || extension === 'md' || extension === 'markdown' || extension === 'txt' || extension === 'text';
+}
 
 // A node in the composer's reference mention tree. Mirrors the Reference
 // Library folder tree: organizational folders (ReferenceFolderRecord) plus
@@ -2109,10 +2145,6 @@ export function App() {
   const workspaceTabsRef = useRef<HTMLDivElement>(null);
   const isReferencePickerOpenRef = useRef(false);
   const activeRunsRef = useRef<Record<string, ActiveGenerationRun>>({});
-  const pendingDirectorDeltaByMessageIdRef = useRef<
-    Record<string, { chatId: string; parts: DirectorMessagePart[] }>
-  >({});
-  const directorDeltaFlushTimerRef = useRef<number | null>(null);
   const directorMessageStreamListenersRef = useRef(new Set<DirectorMessageStreamListener>());
   const latestDirectorMessageStreamSnapshotsRef = useRef(new Map<string, DirectorMessageStreamSnapshot>());
   const activeDirectorRunsRef = useRef<Record<string, DirectorActiveRun>>({});
@@ -2415,7 +2447,11 @@ export function App() {
   const hasPrompt = prompt.trim().length > 0;
   const hasReferenceImages = referenceImages.length > 0;
   const selectedGeneratedImageIds = useMemo(
-    () => referenceImages.map((image) => image.sourceImageId).filter((id): id is string => Boolean(id)),
+    () =>
+      referenceImages
+        .filter(isComposerImageAttachment)
+        .map((image) => image.sourceImageId)
+        .filter((id): id is string => Boolean(id)),
     [referenceImages]
   );
   const selectedGeneratedImages = useMemo(
@@ -2779,7 +2815,7 @@ export function App() {
       keepSelectorOpen: isNavigableReferenceNode(node, referenceMentionTree),
     }));
 
-    const attachedOpts: ReferenceSelectorOption[] = referenceImages.map((img) => {
+    const attachedOpts: ReferenceSelectorOption[] = referenceImages.filter(isComposerImageAttachment).map((img) => {
       const titleWithoutExt = img.name.replace(/\.[^/.]+$/, "");
       return {
         id: img.id,
@@ -2813,7 +2849,7 @@ export function App() {
         title: node.title,
         previewUrl: node.previewUrl,
       })),
-      ...referenceImages.map((image) => ({
+      ...referenceImages.filter(isComposerImageAttachment).map((image) => ({
         id: image.id,
         title: image.name.replace(/\.[^/.]+$/, ''),
         previewUrl: image.previewUrl,
@@ -2840,6 +2876,7 @@ export function App() {
   const selectedPromptReferences = useMemo(() => {
     const savedRefs = resolveSavedReferencesFromMentionIds(savedReferences, selectedPromptReferenceIds, referenceFolders);
     const attachedRefs = referenceImages
+      .filter(isComposerImageAttachment)
       .filter((img) => selectedPromptReferenceIds.includes(img.id))
       .map((img) => ({
         id: img.id,
@@ -4209,6 +4246,8 @@ export function App() {
       return;
     }
 
+    clearComposerAfterSubmit();
+
     let activeProjectId = selectedProjectId;
     let activeThreadId = selectedThreadId;
 
@@ -4267,8 +4306,6 @@ export function App() {
       );
     }
 
-    clearComposerAfterSubmit();
-
     const selectedSavedReferences = resolveSavedReferenceSelections(
       savedReferences,
       selectedPromptReferenceIds,
@@ -4289,6 +4326,7 @@ export function App() {
         };
       }),
       ...referenceImages
+        .filter(isComposerImageAttachment)
         .filter((image) => !seenDirectorReferenceBytes.has(image.bytesBase64))
         .map((image) => ({
           name: image.name,
@@ -4298,13 +4336,30 @@ export function App() {
           description: savedReferences.find((reference) => reference.id === image.id)?.description,
         })),
     ];
-    const optimisticReferenceAttachments = referencePayload.map((reference) => ({
-      name: reference.name,
-      title: reference.title ?? null,
-      description: reference.description ?? null,
-      mimeType: reference.mimeType,
-      previewUrl: `data:${reference.mimeType};base64,${reference.bytesBase64}`,
+    const referenceAttachments = referenceImages.filter(isComposerDocumentAttachment).map((attachment) => ({
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      bytesBase64: attachment.bytesBase64,
+      title: attachment.name.replace(/\.[^/.]+$/, ''),
+      description: 'Uploaded Director document',
+      text: attachment.text,
     }));
+    const optimisticReferenceAttachments = [
+      ...referencePayload.map((reference) => ({
+        name: reference.name,
+        title: reference.title ?? null,
+        description: reference.description ?? null,
+        mimeType: reference.mimeType,
+        previewUrl: `data:${reference.mimeType};base64,${reference.bytesBase64}`,
+      })),
+      ...referenceAttachments.map((attachment) => ({
+        name: attachment.name,
+        title: attachment.title ?? null,
+        description: attachment.description ?? null,
+        mimeType: attachment.mimeType,
+        previewUrl: null,
+      })),
+    ];
     await runDirectorTurn({
       chatId: targetChatId,
       threadId: activeThreadId,
@@ -4320,6 +4375,7 @@ export function App() {
           modelId: selectedModel.id,
           reasoningEffort: selectedModel.supportsReasoningEffort === false ? undefined : directorReasoningEffort,
           referenceImages: referencePayload,
+          referenceAttachments,
         }),
     });
   }, [
@@ -4395,8 +4451,12 @@ export function App() {
   }, [activeDirectorChatId]);
 
   const appendReferenceImages = useCallback(async (files: FileList | File[]) => {
-    const imageFiles = Array.from(files).filter((file) => file.type.startsWith('image/'));
-    if (imageFiles.length === 0) {
+    const allowDocuments = generationWorkspaceMode === 'director';
+    const acceptedFiles = Array.from(files).filter((file) => {
+      const mimeType = normalizeFileMimeType(file);
+      return mimeType.startsWith('image/') || (allowDocuments && isDirectorDocumentFile(file));
+    });
+    if (acceptedFiles.length === 0) {
       return;
     }
 
@@ -4404,24 +4464,33 @@ export function App() {
     const nextNames: string[] = [];
 
     const nextReferenceImages = await Promise.all(
-      imageFiles.map(async (file, index) => {
+      acceptedFiles.map(async (file, index) => {
+        const mimeType = normalizeFileMimeType(file);
+        const isImage = mimeType.startsWith('image/');
         const bytes = new Uint8Array(await file.arrayBuffer());
         const uniqueName = getUniqueAttachmentName(file.name, [...existingNames, ...nextNames]);
         nextNames.push(uniqueName);
         return {
           id: `${file.name}-${file.size}-${Date.now()}-${index}`,
           name: uniqueName,
-          mimeType: file.type || 'image/png',
+          mimeType,
           bytesBase64: bytesToBase64(bytes),
-          previewUrl: URL.createObjectURL(file),
+          previewUrl: isImage ? URL.createObjectURL(file) : '',
           size: file.size,
+          attachmentKind: isImage ? 'image' : 'document',
+          text: !isImage && shouldReadDirectorDocumentText(mimeType, file.name)
+            ? typeof file.text === 'function'
+              ? await file.text()
+              : new TextDecoder().decode(bytes)
+            : undefined,
+          shouldRevokePreviewUrl: isImage,
         } satisfies ComposerReferenceImage;
       })
     );
 
     setReferenceImages((current) => [...current, ...nextReferenceImages]);
     holdComposerOpen();
-  }, [holdComposerOpen]);
+  }, [generationWorkspaceMode, holdComposerOpen]);
 
   const openReferencePicker = useCallback(() => {
     isReferencePickerOpenRef.current = true;
@@ -6297,67 +6366,40 @@ export function App() {
 
   useEffect(() => {
     return subscribeToDirectorMessageDelta((event) => {
-      pendingDirectorDeltaByMessageIdRef.current[event.messageId] = {
-        chatId: event.chatId,
-        parts: event.parts,
-      };
-
-      if (directorDeltaFlushTimerRef.current !== null) {
-        return;
+      let nextMessagesByChatId = directorMessagesByChatIdRef.current;
+      if (!nextMessagesByChatId[event.chatId] && directorMessagesCacheRef.current[event.chatId]) {
+        nextMessagesByChatId = {
+          ...nextMessagesByChatId,
+          [event.chatId]: directorMessagesCacheRef.current[event.chatId],
+        };
       }
-
-      directorDeltaFlushTimerRef.current = window.setTimeout(() => {
-        const pendingDeltas = pendingDirectorDeltaByMessageIdRef.current;
-        pendingDirectorDeltaByMessageIdRef.current = {};
-        directorDeltaFlushTimerRef.current = null;
-
-        let nextMessagesByChatId = directorMessagesByChatIdRef.current;
-        let touchedChatId: string | undefined;
-
-        for (const [messageId, pendingDelta] of Object.entries(pendingDeltas)) {
-          touchedChatId = pendingDelta.chatId;
-          if (!nextMessagesByChatId[pendingDelta.chatId] && directorMessagesCacheRef.current[pendingDelta.chatId]) {
-            nextMessagesByChatId = {
-              ...nextMessagesByChatId,
-              [pendingDelta.chatId]: directorMessagesCacheRef.current[pendingDelta.chatId],
-            };
-          }
-          nextMessagesByChatId = updateDirectorMessagesByChat(
-            nextMessagesByChatId,
-            pendingDelta.chatId,
-            messageId,
-            pendingDelta.parts,
-            'streaming'
-          );
-          directorMessagesCacheRef.current[pendingDelta.chatId] =
-            nextMessagesByChatId[pendingDelta.chatId] ?? directorMessagesCacheRef.current[pendingDelta.chatId] ?? [];
-          emitDirectorMessageStreamSnapshot({
-            chatId: pendingDelta.chatId,
-            messageId,
-            parts: pendingDelta.parts,
-            status: 'streaming',
-          });
-        }
-
-        directorMessagesByChatIdRef.current = limitDirectorMessagesByChatId(nextMessagesByChatId, touchedChatId);
-      }, DIRECTOR_STREAM_FLUSH_INTERVAL_MS);
+      nextMessagesByChatId = updateDirectorMessagesByChat(
+        nextMessagesByChatId,
+        event.chatId,
+        event.messageId,
+        event.parts,
+        'streaming'
+      );
+      directorMessagesCacheRef.current[event.chatId] =
+        nextMessagesByChatId[event.chatId] ?? directorMessagesCacheRef.current[event.chatId] ?? [];
+      directorMessagesByChatIdRef.current = limitDirectorMessagesByChatId(nextMessagesByChatId, event.chatId);
+      emitDirectorMessageStreamSnapshot({
+        chatId: event.chatId,
+        messageId: event.messageId,
+        parts: event.parts,
+        status: 'streaming',
+      });
     });
   }, [emitDirectorMessageStreamSnapshot, limitDirectorMessagesByChatId]);
 
   useEffect(() => {
     return () => {
-      if (directorDeltaFlushTimerRef.current !== null) {
-        window.clearTimeout(directorDeltaFlushTimerRef.current);
-      }
-      directorDeltaFlushTimerRef.current = null;
-      pendingDirectorDeltaByMessageIdRef.current = {};
       latestDirectorMessageStreamSnapshotsRef.current.clear();
     };
   }, []);
 
   useEffect(() => {
     return subscribeToDirectorMessageComplete((event) => {
-      delete pendingDirectorDeltaByMessageIdRef.current[event.messageId];
       latestDirectorMessageStreamSnapshotsRef.current.delete(event.messageId);
       setActiveDirectorRunsByChatId((current) => {
         const next = { ...current };
@@ -6386,7 +6428,6 @@ export function App() {
 
   useEffect(() => {
     return subscribeToDirectorMessageError((event) => {
-      delete pendingDirectorDeltaByMessageIdRef.current[event.messageId];
       latestDirectorMessageStreamSnapshotsRef.current.delete(event.messageId);
       setActiveDirectorRunsByChatId((current) => {
         const next = { ...current };
@@ -8524,6 +8565,9 @@ export function App() {
           }, 180);
         }}
         onAddReference={openReferencePicker}
+        onReferencePickerClose={() => {
+          isReferencePickerOpenRef.current = false;
+        }}
         onAppendReferenceImages={(files) => {
           void appendReferenceImages(files);
         }}
@@ -9968,6 +10012,8 @@ function DirectorMessageList({
 }) {
   const listRef = useListRef(null);
   const isPinnedToBottomRef = useRef(true);
+  const pendingStreamSnapshotsRef = useRef(new Map<string, DirectorMessageStreamSnapshot>());
+  const streamSnapshotFrameRef = useRef<number | null>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [displayMessages, setDisplayMessages] = useState(messages);
   const rowHeight = useDynamicRowHeight({
@@ -10025,25 +10071,72 @@ function DirectorMessageList({
       return;
     }
 
-    return onSubscribeMessageStream((snapshot) => {
+    const unsubscribe = onSubscribeMessageStream((snapshot) => {
       if (snapshot.chatId !== chatId) {
         return;
       }
 
-      setDisplayMessages((current) =>
-        updateDirectorMessageContent(current, snapshot.messageId, snapshot.parts, snapshot.status)
-      );
+      pendingStreamSnapshotsRef.current.set(snapshot.messageId, snapshot);
+
+      if (streamSnapshotFrameRef.current !== null) {
+        return;
+      }
+
+      streamSnapshotFrameRef.current = requestAnimationFrame(() => {
+        streamSnapshotFrameRef.current = null;
+        const snapshots = Array.from(pendingStreamSnapshotsRef.current.values());
+        pendingStreamSnapshotsRef.current.clear();
+
+        setDisplayMessages((current) =>
+          snapshots.reduce(
+            (nextMessages, pendingSnapshot) =>
+              updateDirectorMessageContent(
+                nextMessages,
+                pendingSnapshot.messageId,
+                pendingSnapshot.parts,
+                pendingSnapshot.status
+              ),
+            current
+          )
+        );
+      });
     });
+
+    return () => {
+      unsubscribe();
+      pendingStreamSnapshotsRef.current.clear();
+      if (streamSnapshotFrameRef.current !== null) {
+        cancelAnimationFrame(streamSnapshotFrameRef.current);
+        streamSnapshotFrameRef.current = null;
+      }
+    };
   }, [chatId, onSubscribeMessageStream]);
 
-  const handleScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
-    const node = event.currentTarget;
+  const updatePinnedToBottom = useCallback(() => {
+    const node = listRef.current?.element;
+    if (!node) {
+      return;
+    }
+
     const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 96;
     isPinnedToBottomRef.current = atBottom;
-    setIsAtBottom(atBottom);
-  }, []);
+    setIsAtBottom((current) => (current === atBottom ? current : atBottom));
+  }, [listRef]);
+
+  useEffect(() => {
+    const node = listRef.current?.element;
+    if (!node) {
+      return;
+    }
+
+    node.addEventListener('scroll', updatePinnedToBottom, { passive: true });
+    updatePinnedToBottom();
+    return () => node.removeEventListener('scroll', updatePinnedToBottom);
+  }, [chatId, displayMessages.length, listRef, updatePinnedToBottom]);
 
   const scrollToBottom = useCallback(() => {
+    isPinnedToBottomRef.current = true;
+    setIsAtBottom(true);
     listRef.current?.scrollToRow({
       align: 'end',
       behavior: 'smooth',
@@ -10089,7 +10182,6 @@ function DirectorMessageList({
         overscanCount={4}
         defaultHeight={720}
         className="h-full overscroll-contain"
-        onScroll={handleScroll}
         style={{ height: '100%' }}
       />
       <AnimatePresence>
@@ -10379,6 +10471,7 @@ function DirectorComposerBar({
   onComposerFocus,
   onComposerBlur,
   onAddReference,
+  onReferencePickerClose,
   onAppendReferenceImages,
   onOpenReference,
   onRemoveReference,
@@ -10433,6 +10526,7 @@ function DirectorComposerBar({
   onComposerFocus: () => void;
   onComposerBlur: () => void;
   onAddReference: () => void;
+  onReferencePickerClose: () => void;
   onAppendReferenceImages: (files: FileList | File[]) => void;
   onOpenReference: (referenceImage: ComposerReferenceImage) => void;
   onRemoveReference: (referenceId: string) => void;
@@ -10580,11 +10674,11 @@ function DirectorComposerBar({
           <input
             ref={referenceInputRef}
             type="file"
-            accept="image/*"
+            accept="image/*,application/pdf,text/markdown,text/plain,.pdf,.md,.markdown,.txt"
             multiple
             className="hidden"
             onChange={(event) => {
-              isReferencePickerOpenRef.current = false;
+              onReferencePickerClose();
               if (!event.target.files?.length) return;
               onAppendReferenceImages(event.target.files);
               event.target.value = '';
@@ -12229,15 +12323,32 @@ function InlineAttachmentsRow({
                     event.preventDefault();
                     onKeepOpen();
                   }}
-                  onDoubleClick={() => onOpenReference(referenceImage)}
-                  onClick={() => onOpenReference(referenceImage)}
+                  onDoubleClick={() => {
+                    if (isComposerImageAttachment(referenceImage)) {
+                      onOpenReference(referenceImage);
+                    }
+                  }}
+                  onClick={() => {
+                    if (isComposerImageAttachment(referenceImage)) {
+                      onOpenReference(referenceImage);
+                    }
+                  }}
                   className="h-full w-full"
                 >
-                  <img
-                    src={referenceImage.previewUrl}
-                    alt={referenceImage.name}
-                    className="h-full w-full object-cover opacity-90 saturate-[0.94]"
-                  />
+                  {isComposerImageAttachment(referenceImage) ? (
+                    <img
+                      src={referenceImage.previewUrl}
+                      alt={referenceImage.name}
+                      className="h-full w-full object-cover opacity-90 saturate-[0.94]"
+                    />
+                  ) : (
+                    <span className="flex h-full w-full flex-col items-center justify-center gap-1.5 px-2 text-center">
+                      <FileText className="size-5 text-[var(--muted-foreground)]" />
+                      <span className="line-clamp-2 max-w-full break-words text-[10px] font-medium leading-[1.15] text-[var(--foreground)]">
+                        {referenceImage.name}
+                      </span>
+                    </span>
+                  )}
                 </button>
                 <button
                   type="button"
@@ -12254,15 +12365,19 @@ function InlineAttachmentsRow({
               </div>
             </ContextMenuTrigger>
             <ContextMenuContent className="min-w-[160px]">
-              <ContextMenuItem
-                onClick={() => {
-                  onKeepOpen();
-                  onOpenReference(referenceImage);
-                }}
-              >
-                Open
-              </ContextMenuItem>
-              <ContextMenuSeparator />
+              {isComposerImageAttachment(referenceImage) ? (
+                <>
+                  <ContextMenuItem
+                    onClick={() => {
+                      onKeepOpen();
+                      onOpenReference(referenceImage);
+                    }}
+                  >
+                    Open
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                </>
+              ) : null}
               <ContextMenuItem
                 onClick={() => {
                   onKeepOpen();

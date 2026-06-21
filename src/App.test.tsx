@@ -12,6 +12,12 @@ import { toast } from 'sonner';
 const renderCounters = vi.hoisted(() => ({
   projectRow: 0,
   threadRow: 0,
+  streamdown: 0,
+}));
+
+const virtualizedListState = vi.hoisted(() => ({
+  element: null as HTMLDivElement | null,
+  scrollToRow: vi.fn(),
 }));
 
 const ONE_PIXEL_PNG_BASE64 =
@@ -879,7 +885,10 @@ vi.mock('./lib/electron-api', () => ({
 }));
 
 vi.mock('streamdown', () => ({
-  Streamdown: ({ children }: { children: string }) => <div>{children}</div>,
+  Streamdown: ({ children }: { children: string }) => {
+    renderCounters.streamdown += 1;
+    return <div>{children}</div>;
+  },
 }));
 
 vi.mock('react-window', () => ({
@@ -887,19 +896,29 @@ vi.mock('react-window', () => ({
     rowCount,
     rowComponent: RowComponent,
     rowProps,
+    listRef,
   }: {
     rowCount: number;
     rowComponent: ComponentType<{ index: number; style: CSSProperties; messages: unknown[] }>;
     rowProps: { messages: unknown[] };
+    listRef?: { current: typeof virtualizedListState };
   }) => (
-    <div data-testid="virtualized-list">
+    <div
+      ref={(element) => {
+        virtualizedListState.element = element;
+        if (listRef) {
+          listRef.current.element = element;
+        }
+      }}
+      data-testid="virtualized-list"
+    >
       {Array.from({ length: Math.min(rowCount, 12) }, (_, index) => (
         <RowComponent key={index} index={index} style={{}} {...rowProps} />
       ))}
     </div>
   ),
   useDynamicRowHeight: () => 112,
-  useListRef: () => ({ current: { scrollToRow: vi.fn() } }),
+  useListRef: () => ({ current: virtualizedListState }),
 }));
 
 vi.mock('sonner', () => ({
@@ -1234,6 +1253,9 @@ describe('App header thread title', () => {
     }));
     renderCounters.projectRow = 0;
     renderCounters.threadRow = 0;
+    renderCounters.streamdown = 0;
+    virtualizedListState.element = null;
+    virtualizedListState.scrollToRow.mockReset();
   });
 
   afterEach(() => {
@@ -6625,6 +6647,72 @@ describe('App header thread title', () => {
     );
   });
 
+  it('sends Director markdown uploads as attachments without injecting their text into the visible prompt', async () => {
+    const sendDirectorMessageMock = vi.mocked(electronApi.sendDirectorMessage);
+    sendDirectorMessageMock.mockClear();
+    const { container } = render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const directorInput = screen.getAllByRole('textbox').at(-1)!;
+    fireEvent.focus(directorInput);
+    await act(async () => {
+      fireEvent.change(directorInput, {
+        target: { value: 'Leia o md anexado e resuma o roteiro.' },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    const markdownFile = new File(['# Secret roteiro\nA virada acontece no corredor.'], 'roteiro.md', {
+      type: 'text/markdown',
+    });
+    Object.defineProperty(markdownFile, 'arrayBuffer', {
+      value: vi.fn(async () => new TextEncoder().encode('# Secret roteiro\nA virada acontece no corredor.').buffer),
+    });
+    Object.defineProperty(markdownFile, 'text', {
+      value: vi.fn(async () => '# Secret roteiro\nA virada acontece no corredor.'),
+    });
+
+    const directorFileInput = Array.from(container.querySelectorAll('input[type="file"]')).at(-1) as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(directorFileInput, {
+        target: { files: [markdownFile] },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    expect(screen.getByText('roteiro.md')).toBeInTheDocument();
+    expect(screen.queryByText(/A virada acontece no corredor/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(sendDirectorMessageMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: 'Leia o md anexado e resuma o roteiro.',
+        referenceImages: [],
+        referenceAttachments: [
+          expect.objectContaining({
+            name: 'roteiro.md',
+            mimeType: 'text/markdown',
+            text: '# Secret roteiro\nA virada acontece no corredor.',
+          }),
+        ],
+      })
+    );
+    expect(screen.queryByText(/A virada acontece no corredor/)).not.toBeInTheDocument();
+  });
+
   it('submits a Director prompt only once when the send action is triggered twice quickly', async () => {
     const sendDirectorMessageMock = vi.mocked(electronApi.sendDirectorMessage);
     sendDirectorMessageMock.mockImplementation(
@@ -6750,6 +6838,41 @@ describe('App header thread title', () => {
     const alert = screen.getByRole('alert');
     expect(alert).toHaveTextContent('Director stream failed');
     expect(alert).toHaveTextContent('Gemini is temporarily unavailable. Try again in a moment.');
+  });
+
+  it('collapses the Director composer before a new chat is created', async () => {
+    directorChatsFixtureByThread['thread-1'] = [];
+    vi.mocked(electronApi.createDirectorChat).mockImplementationOnce(
+      () => new Promise(() => undefined)
+    );
+
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    const directorInput = screen.getAllByRole('textbox').at(-1)!;
+    await act(async () => {
+      fireEvent.change(directorInput, {
+        target: { value: 'Plan the opening shot.' },
+      });
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('director-composer-shell')).toHaveClass('rounded-[24px]');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+      await Promise.resolve();
+    });
+
+    expect(vi.mocked(electronApi.createDirectorChat)).toHaveBeenCalledWith('thread-1');
+    expect(screen.getByTestId('director-composer-shell')).toHaveClass('rounded-full');
   });
 
   it('replaces optimistic Director rows when the persisted stream start arrives', async () => {
@@ -7445,7 +7568,6 @@ describe('App header thread title', () => {
         delta: 'First beat.',
         content: 'First beat.',
       });
-      await vi.runAllTimersAsync();
     });
 
     const directorWorkspace = screen.getByTestId('director-workspace');
@@ -8611,6 +8733,141 @@ describe('App header thread title', () => {
     expect(within(directorWorkspace).getByText((content) => content.includes('Chunk 5.'))).toBeInTheDocument();
     expect(renderCounters.projectRow).toBe(projectRowRendersAfterStart);
     expect(renderCounters.threadRow).toBe(threadRowRendersAfterStart);
+  });
+
+  it('stops Director auto-scroll after the user scrolls up', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        userMessage: {
+          id: 'director-user-message',
+          chatId: 'director-chat-1',
+          role: 'user',
+          contentMarkdown: 'Stream a long answer.',
+          status: 'completed',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+        assistantMessage: {
+          id: 'director-assistant-message',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: '',
+          status: 'streaming',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    const virtualizedList = screen.getByTestId('virtualized-list');
+    Object.defineProperties(virtualizedList, {
+      scrollHeight: { configurable: true, value: 1200 },
+      clientHeight: { configurable: true, value: 600 },
+      scrollTop: { configurable: true, value: 0 },
+    });
+    virtualizedListState.scrollToRow.mockClear();
+
+    fireEvent.scroll(virtualizedList);
+
+    await act(async () => {
+      directorMessageDeltaListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        messageId: 'director-assistant-message',
+        delta: 'Next beat.',
+        content: 'Next beat.',
+      });
+      await vi.advanceTimersByTimeAsync(16);
+    });
+
+    expect(virtualizedListState.scrollToRow).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /Scroll to bottom/i })).toBeInTheDocument();
+  });
+
+  it('coalesces rapid Director deltas into one markdown render per frame', async () => {
+    render(<App />);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Director' }));
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    await act(async () => {
+      directorMessageStartListener?.({
+        threadId: 'thread-1',
+        chatId: 'director-chat-1',
+        userMessage: {
+          id: 'director-user-message',
+          chatId: 'director-chat-1',
+          role: 'user',
+          contentMarkdown: 'Stream a long answer.',
+          status: 'completed',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+        assistantMessage: {
+          id: 'director-assistant-message',
+          chatId: 'director-chat-1',
+          role: 'assistant',
+          contentMarkdown: '',
+          status: 'streaming',
+          modelId: 'codex-gpt-5-4-mini',
+          modelLabel: 'Codex / GPT-5.4 Mini',
+          fastMode: true,
+          createdAt: '2026-06-01T12:15:00.000Z',
+          updatedAt: '2026-06-01T12:15:00.000Z',
+        },
+      });
+      await vi.runAllTimersAsync();
+    });
+
+    const rendersBeforeBurst = renderCounters.streamdown;
+
+    for (let index = 1; index <= 5; index += 1) {
+      await act(async () => {
+        directorMessageDeltaListener?.({
+          threadId: 'thread-1',
+          chatId: 'director-chat-1',
+          messageId: 'director-assistant-message',
+          delta: `Chunk ${index}. `,
+          content: Array.from({ length: index }, (_, chunkIndex) => `Chunk ${chunkIndex + 1}.`).join(' '),
+        });
+        await Promise.resolve();
+      });
+    }
+
+    expect(renderCounters.streamdown).toBe(rendersBeforeBurst);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16);
+    });
+
+    const directorWorkspace = screen.getByTestId('director-workspace');
+    expect(within(directorWorkspace).getByText((content) => content.includes('Chunk 5.'))).toBeInTheDocument();
+    expect(renderCounters.streamdown).toBe(rendersBeforeBurst + 1);
   });
 
   it('keeps showing Director Thinking while a streamed response waits between deltas', async () => {

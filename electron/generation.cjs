@@ -113,6 +113,7 @@ function normalizeDirectorPromptContent(content) {
 const DIRECTOR_SYSTEM_PROMPT = [
   'You are Director for Imagen, a professional AI image and video editing studio.',
   'Respond with normal concise markdown by default.',
+  'Whenever the user asks you to handle, write, analyze, adapt, or plan a roteiro/script/screenplay, load and follow the bundled roteiro skill before responding.',
   'When the user explicitly wants one or more still images, call the generateImages tool.',
   'Do not claim that generation already happened before approval.',
   'Use @Reference names only when they are actually relevant.',
@@ -138,6 +139,60 @@ function getDirectorMessageText(message) {
   return getTextFromParts(message?.parts ?? parseDirectorParts(message?.partsJson));
 }
 
+function isDirectorImageAttachment(reference) {
+  return typeof reference?.mimeType === 'string' && reference.mimeType.startsWith('image/');
+}
+
+function isDirectorTextAttachment(reference) {
+  const mimeType = typeof reference?.mimeType === 'string' ? reference.mimeType : '';
+  const name = typeof reference?.name === 'string' ? reference.name.toLowerCase() : '';
+  return (
+    mimeType.startsWith('text/') ||
+    name.endsWith('.md') ||
+    name.endsWith('.markdown') ||
+    name.endsWith('.txt') ||
+    name.endsWith('.text')
+  );
+}
+
+function buildDirectorAttachmentText(prompt, references) {
+  const lines = [prompt];
+  if (!Array.isArray(references) || references.length === 0) {
+    return lines.join('\n');
+  }
+
+  lines.push('', 'Attached reference metadata:');
+  for (const [index, reference] of references.entries()) {
+    lines.push(
+      [
+        `${index + 1}. ${reference.title || reference.name}`,
+        reference.description ? ` - ${reference.description}` : '',
+        reference.mimeType ? ` (${reference.mimeType})` : '',
+      ].join('')
+    );
+  }
+
+  const textDocuments = references.filter((reference) => isDirectorTextAttachment(reference) && typeof reference.text === 'string' && reference.text.trim());
+  if (textDocuments.length > 0) {
+    lines.push('', 'Attached document context:');
+    for (const [index, reference] of textDocuments.entries()) {
+      lines.push(
+        [
+          `--- Document ${index + 1}: ${reference.title || reference.name}`,
+          reference.mimeType ? `MIME type: ${reference.mimeType}` : null,
+          'Content:',
+          reference.text,
+          '--- End document',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      );
+    }
+  }
+
+  return lines.join('\n');
+}
+
 function buildDirectorMessages({ previousMessages, prompt, referenceImages }) {
   const messages = [{ role: 'system', content: DIRECTOR_SYSTEM_PROMPT }, ...toDirectorModelMessages(
     previousMessages
@@ -148,33 +203,34 @@ function buildDirectorMessages({ previousMessages, prompt, referenceImages }) {
       }))
   )];
 
-  if (referenceImages.length === 0) {
+  const references = Array.isArray(referenceImages) ? referenceImages : [];
+  if (references.length === 0) {
     messages.push({ role: 'user', content: prompt });
     return messages;
   }
 
+  const imageReferences = references.filter(isDirectorImageAttachment);
+  const fileReferences = references.filter((reference) => !isDirectorImageAttachment(reference) && !isDirectorTextAttachment(reference));
   messages.push({
     role: 'user',
     content: [
       {
         type: 'text',
-        text: [
-          prompt,
-          '',
-          'Attached reference metadata:',
-          ...referenceImages.map((reference, index) =>
-            [
-              `${index + 1}. ${reference.title || reference.name}`,
-              reference.description ? ` - ${reference.description}` : '',
-            ].join('')
-          ),
-        ].join('\n'),
+        text: buildDirectorAttachmentText(prompt, references),
       },
-      ...referenceImages
+      ...imageReferences
         .filter((reference) => typeof reference.bytesBase64 === 'string' && reference.bytesBase64.length > 0)
         .map((reference) => ({
           type: 'image',
           image: `data:${reference.mimeType || 'image/png'};base64,${reference.bytesBase64}`,
+        })),
+      ...fileReferences
+        .filter((reference) => typeof reference.bytesBase64 === 'string' && reference.bytesBase64.length > 0)
+        .map((reference) => ({
+          type: 'file',
+          data: reference.bytesBase64,
+          filename: reference.name,
+          mediaType: reference.mimeType || 'application/octet-stream',
         })),
     ],
   });
@@ -3259,6 +3315,8 @@ async function listReferenceFolders() {
     const chatId = typeof input?.chatId === 'string' ? input.chatId.trim() : '';
     const threadId = typeof input?.threadId === 'string' ? input.threadId.trim() : '';
     const prompt = typeof input?.prompt === 'string' ? input.prompt.trim() : '';
+    const referenceImages = Array.isArray(input?.referenceImages) ? input.referenceImages : [];
+    const referenceAttachments = Array.isArray(input?.referenceAttachments) ? input.referenceAttachments : [];
 
     return runDirectorMessage({
       chatId,
@@ -3267,7 +3325,7 @@ async function listReferenceFolders() {
       modelId: input?.modelId,
       fastMode: input?.fastMode === true,
       reasoningEffort: input?.reasoningEffort,
-      referenceImages: Array.isArray(input?.referenceImages) ? input.referenceImages : [],
+      referenceImages: [...referenceImages, ...referenceAttachments],
     });
   }
 
@@ -4987,6 +5045,7 @@ function toGenerationReferenceSnapshot(referenceImages) {
     description: referenceImage.description ?? null,
     mimeType: referenceImage.mimeType,
     bytesBase64: typeof referenceImage.bytesBase64 === 'string' ? referenceImage.bytesBase64 : null,
+    text: typeof referenceImage.text === 'string' ? referenceImage.text : null,
   }));
 }
 
@@ -5014,6 +5073,7 @@ function parseGenerationReferenceSnapshot(referenceImagesJson) {
         description: typeof referenceImage.description === 'string' ? referenceImage.description : null,
         mimeType: typeof referenceImage.mimeType === 'string' ? referenceImage.mimeType : 'image/png',
         bytesBase64: referenceImage.bytesBase64,
+        text: typeof referenceImage.text === 'string' ? referenceImage.text : null,
       }));
   } catch {
     return [];

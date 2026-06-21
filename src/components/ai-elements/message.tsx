@@ -322,18 +322,10 @@ export const MessageBranchPage = ({
 export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
 const streamdownPlugins = { cjk, code, math, mermaid };
-const streamingMarkdownAnimation = {
-  animation: "blurIn" as const,
-  duration: 280,
-  easing: "cubic-bezier(0.22, 1, 0.36, 1)",
-  sep: "word" as const,
-  stagger: 12,
-};
 
 export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (
     <Streamdown
-      animated={streamingMarkdownAnimation}
       className={cn(
         "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
         className

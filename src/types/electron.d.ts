@@ -441,6 +441,14 @@ interface ElectronSendDirectorMessagePayload {
     mimeType: string;
     bytesBase64: string;
   }>;
+  referenceAttachments?: Array<{
+    name: string;
+    title?: string;
+    description?: string;
+    mimeType: string;
+    bytesBase64: string;
+    text?: string;
+  }>;
 }
 
 interface ElectronRegenerateDirectorMessagePayload {

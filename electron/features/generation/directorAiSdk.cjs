@@ -302,7 +302,7 @@ function buildDirectorStreamOptions({
     ...(system ? { system } : null),
     messages: modelMessages,
     abortSignal,
-    experimental_transform: smoothStream(),
+    experimental_transform: smoothStream({ chunking: 'word', delayInMs: 8 }),
     // Allow the model to call loadSkill, read the result, and keep reasoning in
     // the same turn. generateImages still halts the stream via needsApproval.
     ...(typeof stepCountIs === 'function' ? { stopWhen: stepCountIs(8) } : null),
@@ -485,8 +485,6 @@ async function* createAiSdkDirectorPartStream({
       if (chunk?.usage) {
         streamSummary.usage = chunk.usage;
       }
-
-      console.info('[crenv:director-ai] Director stream chunk', summarizeDirectorChunkForLog(chunk));
 
       if (accumulator.apply(chunk)) {
         streamSummary.appliedChunkCount += 1;

@@ -95,6 +95,80 @@ describe('generation store startup', () => {
     store.close();
   });
 
+  it('sends Director documents as model context while storing only attachment metadata', async () => {
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crenv-generation-startup-'));
+    tempDirs.push(userDataDir);
+    const capturedMessages: Array<Array<{ role: string; content: unknown }>> = [];
+
+    const store = await createGenerationStore(userDataDir, {
+      createDirectorPartStream: async function* (input: {
+        messages: Array<{ role: string; content: unknown }>;
+      }) {
+        capturedMessages.push(input.messages);
+        yield [{ type: 'text', text: 'The attachment has a clean three-beat structure.' }];
+      },
+    });
+
+    const workspace = await store.ensureProjectThreadWorkspace();
+    const chat = await store.createDirectorChat(workspace.thread.id);
+
+    const result = await store.sendDirectorMessage({
+      chatId: chat.id,
+      threadId: workspace.thread.id,
+      prompt: 'Analyze the attached roteiro notes.',
+      modelId: 'google-gemini-3-pro',
+      referenceImages: [],
+      referenceAttachments: [
+        {
+          name: 'roteiro.md',
+          title: 'Roteiro Notes',
+          description: 'Uploaded Director document',
+          mimeType: 'text/markdown',
+          bytesBase64: Buffer.from('# Secret beat\nThe ending changes here.', 'utf8').toString('base64'),
+          text: '# Secret beat\nThe ending changes here.',
+        },
+        {
+          name: 'brief.pdf',
+          title: 'Brief PDF',
+          description: 'Uploaded Director document',
+          mimeType: 'application/pdf',
+          bytesBase64: 'JVBERi0xLjQ=',
+        },
+      ],
+    });
+
+    const userContent = capturedMessages[0]?.at(-1)?.content;
+    expect(capturedMessages[0]?.[0]?.content).toEqual(expect.stringContaining('roteiro skill'));
+    expect(userContent).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('# Secret beat\nThe ending changes here.'),
+      }),
+      expect.objectContaining({
+        type: 'file',
+        filename: 'brief.pdf',
+        mediaType: 'application/pdf',
+        data: 'JVBERi0xLjQ=',
+      }),
+    ]);
+    expect(result.userMessage.parts).toEqual([{ type: 'text', text: 'Analyze the attached roteiro notes.' }]);
+    expect(result.userMessage.references).toEqual([
+      expect.objectContaining({
+        name: 'roteiro.md',
+        title: 'Roteiro Notes',
+        mimeType: 'text/markdown',
+      }),
+      expect.objectContaining({
+        name: 'brief.pdf',
+        title: 'Brief PDF',
+        mimeType: 'application/pdf',
+      }),
+    ]);
+    expect(JSON.stringify(result.userMessage)).not.toContain('Secret beat');
+
+    store.close();
+  });
+
   it('generates and persists a short Director chat title in parallel with the first response', async () => {
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crenv-generation-startup-'));
     tempDirs.push(userDataDir);
@@ -399,7 +473,7 @@ describe('generation store startup', () => {
     expect(refreshAllCodexImageAccountLimits).toHaveBeenCalledTimes(1);
     expect(result.assets).toHaveLength(2);
     expect(result.assets[0]?.modelId).toBe('codex-gpt-5-4-mini');
-    expect(result.assets[0]?.modelLabel).toBe('GPT-5.4 Mini');
+    expect(result.assets[0]?.modelLabel).toBe('GPT Image (Codex)');
     expect(result.assets[0]?.provider).toBe('codex');
     expect(result.assets[0]?.durationMs).toBe(4567);
     expect(imageReadyEvents).toHaveLength(3);

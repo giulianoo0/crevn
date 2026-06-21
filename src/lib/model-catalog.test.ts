@@ -19,11 +19,11 @@ describe('model catalog', () => {
     expect(getDefaultModelOption()).toEqual(
       expect.objectContaining({
         id: 'codex-gpt-5-4-mini',
-        label: 'GPT-5.4 Mini',
+        label: 'GPT Image',
         providerId: 'codex',
       })
     );
-    expect(getModelsForProvider('codex').map((model) => model.label)).toEqual(['GPT-5.4 Mini']);
+    expect(getModelsForProvider('codex').map((model) => model.label)).toEqual(['GPT Image']);
     expect(getModelsForProvider('google').map((model) => model.label)).toEqual([
       'Gemini 3.5 Flash',
       'Gemini 3.1 Flash Lite',

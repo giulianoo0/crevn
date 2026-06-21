@@ -13,21 +13,15 @@ vi.mock('streamdown', () => ({
 }));
 
 describe('MessageResponse', () => {
-  it('enables blur-in word animation for streaming markdown', () => {
+  it('renders markdown without blur or fade animation props during streaming', () => {
     render(<MessageResponse isAnimating>New streaming text</MessageResponse>);
 
     expect(screen.getByTestId('streamdown')).toHaveTextContent('New streaming text');
     expect(streamdownRender).toHaveBeenCalledWith(
       expect.objectContaining({
-        animated: {
-          animation: 'blurIn',
-          duration: 280,
-          easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
-          sep: 'word',
-          stagger: 12,
-        },
         isAnimating: true,
       })
     );
+    expect(streamdownRender.mock.calls.at(-1)?.[0]).not.toHaveProperty('animated');
   });
 });

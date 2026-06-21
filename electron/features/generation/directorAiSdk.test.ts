@@ -167,16 +167,21 @@ describe('Director AI SDK model messages', () => {
 describe('Director AI SDK stream options', () => {
   it('uses smoothStream for smoother text and reasoning deltas', () => {
     const transform = Symbol('smooth-stream-transform');
+    const smoothStreamCalls: unknown[] = [];
     const options = buildDirectorStreamOptions({
       model: 'gemini-model',
       messages: [{ role: 'user', content: 'Plan a shot.' }],
       abortSignal: undefined,
-      smoothStream: () => transform,
+      smoothStream: (options: unknown) => {
+        smoothStreamCalls.push(options);
+        return transform;
+      },
       tool: (definition: unknown) => definition,
       jsonSchema: (schema: unknown) => schema,
     });
 
     expect(options.experimental_transform).toBe(transform);
+    expect(smoothStreamCalls).toEqual([{ chunking: 'word', delayInMs: 8 }]);
   });
 
   it('moves system messages into the streamText system option', () => {
