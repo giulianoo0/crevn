@@ -67,13 +67,13 @@ Notas importantes:
 O mapa de cenas é uma **tabela fixa**, com estas **7 colunas, nesta ordem e com estes nomes exatos** — nunca mude, nunca remova, nunca adicione coluna:
 
 ```
-| # | Tipo (função) | Local / Hora | Quem | Objetivo da cena | Conflito | O que muda |
+| # | Tipo | Local | Quem | Objetivo da cena | Conflito | O que muda |
 ```
 
 O que vai em cada coluna:
 - **#** — número da cena, em ordem.
-- **Tipo (função)** — o rótulo de função narrativa (ESTABELECIMENTO, INCIDENTE INCITANTE, CLÍMAX, etc.).
-- **Local / Hora** — INT./EXT. LOCAL — DIA/NOITE.
+- **Tipo** — o rótulo de função narrativa **seguido do beat detalhado**, no formato `Tipo - Beat`. Sempre detalhe o beat depois do tipo. Ex.: `Exposição - Gancho Inicial`, `Incidente Incitante - A Luz Some`, `Clímax - Confronto Final`.
+- **Local** — INT./EXT. LOCAL — DIA/NOITE.
 - **Quem** — personagens que aparecem na cena (use "—" se nenhum).
 - **Objetivo da cena** — o que a cena precisa entregar.
 - **Conflito** — a tensão da cena (use "—" se não houver).
@@ -97,11 +97,11 @@ Entregue assim (tabela ajuda a bater o olho no formato do episódio):
 **Arco do episódio:** como o "normal" do começo vira o "novo normal" do fim.
 
 ## Mapa de cenas
-| #  | Tipo (função)        | Local / Hora      | Quem        | Objetivo da cena            | Conflito          | O que muda                 |
-|----|----------------------|-------------------|-------------|-----------------------------|-------------------|-----------------------------|
-| 1  | ESTABELECIMENTO      | EXT. cidade — dia | —           | situar onde estamos         | —                 | abre o mundo                |
-| 2  | INCIDENTE INCITANTE  | INT. base — dia   | equipe      | disparar o problema         | algo deu errado   | a missão começa             |
-| …  | …                    | …                 | …           | …                           | …                 | …                           |
+| # | Tipo                          | Local             | Quem   | Objetivo da cena   | Conflito        | O que muda         |
+|---|-------------------------------|-------------------|--------|--------------------|-----------------|--------------------|
+| 1 | Exposição - Gancho Inicial    | EXT. cidade — dia | —      | situar onde estamos | —              | abre o mundo       |
+| 2 | Incidente Incitante - A Luz Some | INT. base — dia | equipe | disparar o problema | algo deu errado | a missão começa    |
+| … | …                             | …                 | …      | …                  | …               | …                  |
 
 ## Diagnóstico rápido
 - **Pontos fortes:** o que já funciona.
@@ -179,7 +179,7 @@ Formato do roteiro (ajuste os campos ao projeto):
 
 ---
 
-## CENA 1 — [ESTABELECIMENTO] — EXT. LOCAL — DIA
+## CENA 1 — [Exposição - Gancho Inicial] — EXT. LOCAL — DIA
 
 *(Descrição da ação e do ambiente em prosa curta e visual. O que a câmera vê,
 o que acontece, o clima. Sem jargão de prompt.)*
@@ -194,7 +194,7 @@ o que acontece, o clima. Sem jargão de prompt.)*
 
 ---
 
-## CENA 2 — [INCIDENTE INCITANTE] — INT. BASE — DIA
+## CENA 2 — [Incidente Incitante - A Luz Some] — INT. BASE — DIA
 
 *(ação...)*
 
@@ -203,7 +203,7 @@ o que acontece, o clima. Sem jargão de prompt.)*
 ````
 
 Regras do formato:
-- **Cabeçalho de cena** com **número + [TIPO/função] + INT./EXT. LOCAL — DIA/NOITE**, pra manter o mapa visível dentro do próprio roteiro.
+- **Cabeçalho de cena** com **número + [Tipo - Beat] + INT./EXT. LOCAL — DIA/NOITE**, pra manter o mapa visível dentro do próprio roteiro. Sempre detalhe o beat depois do tipo.
 - **Ação em prosa curta e visual**, em itálico; foco no que se vê e no que muda.
 - **Falas** com o nome do personagem em destaque; rubricas de atuação em itálico e parênteses *(animado)*, *(sussurra)*.
 - **Sons e esforços escritos** dentro das falas/rubricas.
@@ -235,4 +235,4 @@ Regras do formato:
 - **Tirar o robótico e tirar o exagero junto.** O alvo é fala natural **e** exagerada na medida — não fala "realista" sem graça.
 - **Gerar arquivo na Fase 3.** A reescrita final vai em bloco de código no chat, como o usuário pediu.
 - **Encher de diálogo.** Deixe a ação visual carregar parte; nem tudo precisa virar fala.
-- **Entregar output sem o mapa de cenas.** Qualquer saída leva junto o mapa completo, com as 7 colunas fixas (`# | Tipo (função) | Local / Hora | Quem | Objetivo da cena | Conflito | O que muda`). Não altere o schema.
+- **Entregar output sem o mapa de cenas.** Qualquer saída leva junto o mapa completo, com as 7 colunas fixas (`# | Tipo | Local | Quem | Objetivo da cena | Conflito | O que muda`). Não altere o schema, e na coluna **Tipo** sempre detalhe o beat (`Tipo - Beat`).
